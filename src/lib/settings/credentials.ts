@@ -4,6 +4,7 @@ import {
   getOpenAiSettings,
   getPreferredEmbeddingProvider,
   getVoyageSettings,
+  isLocalEnabled,
   setAppSetting,
   type PreferredProvider,
 } from "./app-settings";
@@ -63,18 +64,21 @@ export type SettingsKeysResponse = {
   keyring: KeyringStatus;
   preferredProvider: PreferredProvider | null;
   timeoutMs: number;
+  local: { enabled: boolean };
   openai: ProviderSecretStatus & {
+    enabled: boolean;
     baseUrl: string;
     model: string;
   };
   voyage: ProviderSecretStatus & {
+    enabled: boolean;
     model: string;
   };
   ollama: ProviderSecretStatus & {
     enabled: boolean;
     baseUrl: string;
     model: string;
-    /** Non-default / explicitly configured for provider switcher. */
+    /** Usable for search/reindex when enabled (API key optional). */
     available: boolean;
   };
 };
@@ -88,22 +92,27 @@ export function getSettingsKeysStatus(): SettingsKeysResponse {
     keyring: getKeyringStatus(),
     preferredProvider: getPreferredEmbeddingProvider(),
     timeoutMs: getEmbeddingTimeoutMs(),
+    local: {
+      enabled: isLocalEnabled(),
+    },
     openai: {
       ...getSecretStatus("openai"),
+      enabled: openai.enabled,
       baseUrl: openai.baseUrl,
       model: openai.model,
     },
     voyage: {
       ...getSecretStatus("voyage"),
+      enabled: voyage.enabled,
       model: voyage.model,
     },
     ollama: {
       configured: ollamaSecret.configured && ollamaSecret.source === "keyring",
       source: ollamaSecret.source === "keyring" ? "keyring" : null,
-      enabled: ollama.configured,
+      enabled: ollama.enabled,
       baseUrl: ollama.baseUrl,
       model: ollama.model,
-      available: ollama.configured,
+      available: ollama.enabled,
     },
   };
 }
@@ -114,7 +123,10 @@ export type UpdateSettingsKeysInput = {
   ollamaApiKey?: string | null;
   ollamaBaseUrl?: string | null;
   ollamaModel?: string | null;
+  localEnabled?: boolean | null;
   ollamaEnabled?: boolean | null;
+  openaiEnabled?: boolean | null;
+  voyageEnabled?: boolean | null;
   openaiBaseUrl?: string | null;
   openaiModel?: string | null;
   voyageModel?: string | null;
@@ -129,6 +141,14 @@ function applySecretUpdate(account: KeyringAccount, value: string | null | undef
     return;
   }
   setKeyringSecret(account, value);
+}
+
+function applyEnabledUpdate(
+  key: "local_enabled" | "ollama_enabled" | "openai_enabled" | "voyage_enabled",
+  value: boolean | null | undefined,
+) {
+  if (value === undefined || value === null) return;
+  setAppSetting(key, value ? "1" : "0");
 }
 
 const PROVIDERS = new Set<PreferredProvider>([
@@ -151,6 +171,7 @@ export function updateSettingsKeys(input: UpdateSettingsKeysInput): SettingsKeys
     );
   }
 
+  // Secrets never flip enable flags — credentials ≠ available index.
   applySecretUpdate("openai", input.openaiApiKey);
   applySecretUpdate("voyage", input.voyageApiKey);
   applySecretUpdate("ollama", input.ollamaApiKey);
@@ -165,9 +186,11 @@ export function updateSettingsKeys(input: UpdateSettingsKeysInput): SettingsKeys
       input.ollamaModel?.trim() || null,
     );
   }
-  if (input.ollamaEnabled !== undefined && input.ollamaEnabled !== null) {
-    setAppSetting("ollama_enabled", input.ollamaEnabled ? "1" : "0");
-  }
+
+  applyEnabledUpdate("local_enabled", input.localEnabled);
+  applyEnabledUpdate("ollama_enabled", input.ollamaEnabled);
+  applyEnabledUpdate("openai_enabled", input.openaiEnabled);
+  applyEnabledUpdate("voyage_enabled", input.voyageEnabled);
 
   if (input.openaiBaseUrl !== undefined) {
     setAppSetting("openai_base_url", input.openaiBaseUrl?.trim() || null);

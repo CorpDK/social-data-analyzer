@@ -4,9 +4,12 @@ import { getSqlite } from "../db";
 export type PreferredProvider = "local" | "ollama" | "openai" | "voyage";
 
 export type AppSettingKey =
+  | "local_enabled"
   | "ollama_base_url"
   | "ollama_embedding_model"
   | "ollama_enabled"
+  | "openai_enabled"
+  | "voyage_enabled"
   | "embedding_provider"
   | "openai_base_url"
   | "openai_embedding_model"
@@ -90,6 +93,69 @@ function parseProvider(raw: string | null | undefined): PreferredProvider | null
   return null;
 }
 
+/**
+ * Explicit enable flags in app_settings. Credentials alone never enable an index.
+ * Defaults: local on; openai / voyage / ollama off.
+ * Env `*_ENABLED=1|0` (and legacy `EMBEDDING_OLLAMA`) are CI-only fallbacks when
+ * the sqlite key is unset.
+ */
+function parseEnabledFlag(
+  sqliteValue: string | null,
+  envCandidates: Array<string | null | undefined>,
+  defaultEnabled: boolean,
+): boolean {
+  if (sqliteValue === "1") return true;
+  if (sqliteValue === "0") return false;
+  for (const candidate of envCandidates) {
+    const env = candidate?.trim();
+    if (env === "1") return true;
+    if (env === "0") return false;
+  }
+  return defaultEnabled;
+}
+
+export function isLocalEnabled(sqlite: Database.Database = getSqlite()): boolean {
+  return parseEnabledFlag(
+    getAppSetting("local_enabled", sqlite),
+    [process.env.LOCAL_ENABLED],
+    true,
+  );
+}
+
+export function isOpenAiEnabled(sqlite: Database.Database = getSqlite()): boolean {
+  return parseEnabledFlag(
+    getAppSetting("openai_enabled", sqlite),
+    [process.env.OPENAI_ENABLED],
+    false,
+  );
+}
+
+export function isVoyageEnabled(sqlite: Database.Database = getSqlite()): boolean {
+  return parseEnabledFlag(
+    getAppSetting("voyage_enabled", sqlite),
+    [process.env.VOYAGE_ENABLED],
+    false,
+  );
+}
+
+export function isOllamaEnabled(sqlite: Database.Database = getSqlite()): boolean {
+  return parseEnabledFlag(
+    getAppSetting("ollama_enabled", sqlite),
+    [process.env.OLLAMA_ENABLED, process.env.EMBEDDING_OLLAMA],
+    false,
+  );
+}
+
+export function isProviderIndexEnabled(
+  provider: PreferredProvider,
+  sqlite: Database.Database = getSqlite(),
+): boolean {
+  if (provider === "local") return isLocalEnabled(sqlite);
+  if (provider === "ollama") return isOllamaEnabled(sqlite);
+  if (provider === "openai") return isOpenAiEnabled(sqlite);
+  return isVoyageEnabled(sqlite);
+}
+
 export function getOllamaSettings(sqlite: Database.Database = getSqlite()) {
   const baseUrl =
     firstNonEmpty(
@@ -101,19 +167,13 @@ export function getOllamaSettings(sqlite: Database.Database = getSqlite()) {
       getAppSetting("ollama_embedding_model", sqlite),
       process.env.OLLAMA_EMBEDDING_MODEL,
     ) || DEFAULT_OLLAMA_MODEL;
-  const enabledFlag = getAppSetting("ollama_enabled", sqlite);
-  const enabled =
-    enabledFlag === "1" ||
-    (enabledFlag !== "0" &&
-      Boolean(getAppSetting("ollama_base_url", sqlite))) ||
-    Boolean(process.env.OLLAMA_BASE_URL?.trim()) ||
-    process.env.EMBEDDING_OLLAMA?.trim() === "1";
+  const enabled = isOllamaEnabled(sqlite);
 
   return {
     baseUrl,
     model,
     enabled,
-    /** True when the user/env explicitly opted into Ollama (not just defaults). */
+    /** True when the index is explicitly enabled (credentials/URL alone do not count). */
     configured: enabled,
   };
 }
@@ -130,6 +190,7 @@ export function getOpenAiSettings(sqlite: Database.Database = getSqlite()) {
         getAppSetting("openai_embedding_model", sqlite),
         process.env.EMBEDDING_MODEL,
       ) || DEFAULT_OPENAI_MODEL,
+    enabled: isOpenAiEnabled(sqlite),
   };
 }
 
@@ -140,6 +201,7 @@ export function getVoyageSettings(sqlite: Database.Database = getSqlite()) {
         getAppSetting("voyage_model", sqlite),
         process.env.VOYAGE_MODEL,
       ) || DEFAULT_VOYAGE_MODEL,
+    enabled: isVoyageEnabled(sqlite),
   };
 }
 
@@ -172,8 +234,9 @@ export function getEmbeddingTimeoutMs(
 export type RuntimeAppSettings = {
   preferredProvider: PreferredProvider | null;
   timeoutMs: number;
-  openai: { baseUrl: string; model: string };
-  voyage: { model: string };
+  local: { enabled: boolean };
+  openai: { baseUrl: string; model: string; enabled: boolean };
+  voyage: { model: string; enabled: boolean };
   ollama: ReturnType<typeof getOllamaSettings>;
 };
 
@@ -184,6 +247,7 @@ export function getRuntimeAppSettings(
   return {
     preferredProvider: getPreferredEmbeddingProvider(sqlite),
     timeoutMs: getEmbeddingTimeoutMs(sqlite),
+    local: { enabled: isLocalEnabled(sqlite) },
     openai: getOpenAiSettings(sqlite),
     voyage: getVoyageSettings(sqlite),
     ollama: getOllamaSettings(sqlite),

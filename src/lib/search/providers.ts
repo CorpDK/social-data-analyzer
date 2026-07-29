@@ -8,63 +8,82 @@ import {
   getVoyageApiKey,
 } from "../settings/credentials";
 import {
-  getOllamaSettings,
   getPreferredEmbeddingProvider,
+  isProviderIndexEnabled,
 } from "../settings/app-settings";
 
 export type ProviderAvailability = {
   available: EmbeddingProvider[];
   configured: Record<EmbeddingProvider, boolean>;
+  enabled: Record<EmbeddingProvider, boolean>;
   default: EmbeddingProvider;
 };
 
-function isOpenAiConfigured(): boolean {
-  return Boolean(getOpenAiApiKey());
-}
-
-function isVoyageConfigured(): boolean {
+/** True when credentials exist (or are not required). Independent of enable. */
+export function providerHasCredentials(provider: EmbeddingProvider): boolean {
+  if (provider === "local" || provider === "ollama") return true;
+  if (provider === "openai") return Boolean(getOpenAiApiKey());
   return Boolean(getVoyageApiKey());
 }
 
-/** Available when Settings/env explicitly enables Ollama (URL or EMBEDDING_OLLAMA=1). */
-export function isOllamaConfigured(): boolean {
-  return getOllamaSettings().configured;
+export function isProviderEnabled(provider: EmbeddingProvider): boolean {
+  return isProviderIndexEnabled(provider);
 }
 
+/**
+ * Usable for search / reindex / import embedding:
+ * explicit enable + credentials when required.
+ * Storing an API key alone never makes a provider configured.
+ */
 export function isProviderConfigured(provider: EmbeddingProvider): boolean {
-  if (provider === "local") return true;
-  if (provider === "ollama") return isOllamaConfigured();
-  if (provider === "openai") return isOpenAiConfigured();
-  return isVoyageConfigured();
+  return isProviderEnabled(provider) && providerHasCredentials(provider);
 }
 
-/** Neural providers maintained alongside the always-on local hasher index. */
+/** Enabled + credentialed neural providers (excludes local). */
 export function configuredRemoteProviders(): EmbeddingProvider[] {
   const providers: EmbeddingProvider[] = [];
-  if (isOllamaConfigured()) providers.push("ollama");
-  if (isOpenAiConfigured()) providers.push("openai");
-  if (isVoyageConfigured()) providers.push("voyage");
+  if (isProviderConfigured("ollama")) providers.push("ollama");
+  if (isProviderConfigured("openai")) providers.push("openai");
+  if (isProviderConfigured("voyage")) providers.push("voyage");
+  return providers;
+}
+
+/** All enabled + credentialed providers, local first when enabled. */
+export function configuredProviders(): EmbeddingProvider[] {
+  const providers: EmbeddingProvider[] = [];
+  if (isProviderConfigured("local")) providers.push("local");
+  providers.push(...configuredRemoteProviders());
   return providers;
 }
 
 export function defaultSearchProvider(): EmbeddingProvider {
   const preferred = getPreferredEmbeddingProvider();
   if (preferred && isProviderConfigured(preferred)) return preferred;
-  if (isOpenAiConfigured()) return "openai";
-  if (isVoyageConfigured()) return "voyage";
-  if (isOllamaConfigured()) return "ollama";
+  if (isProviderConfigured("openai")) return "openai";
+  if (isProviderConfigured("voyage")) return "voyage";
+  if (isProviderConfigured("ollama")) return "ollama";
+  if (isProviderConfigured("local")) return "local";
+  // Hard fallback for hybrid/vec code paths when every index is disabled.
   return "local";
 }
 
 export function getProviderAvailability(): ProviderAvailability {
-  const configured = {
-    local: true,
-    ollama: isOllamaConfigured(),
-    openai: isOpenAiConfigured(),
-    voyage: isVoyageConfigured(),
+  const enabled = {
+    local: isProviderEnabled("local"),
+    ollama: isProviderEnabled("ollama"),
+    openai: isProviderEnabled("openai"),
+    voyage: isProviderEnabled("voyage"),
   } satisfies Record<EmbeddingProvider, boolean>;
 
-  const available: EmbeddingProvider[] = ["local"];
+  const configured = {
+    local: isProviderConfigured("local"),
+    ollama: isProviderConfigured("ollama"),
+    openai: isProviderConfigured("openai"),
+    voyage: isProviderConfigured("voyage"),
+  } satisfies Record<EmbeddingProvider, boolean>;
+
+  const available: EmbeddingProvider[] = [];
+  if (configured.local) available.push("local");
   if (configured.ollama) available.push("ollama");
   if (configured.openai) available.push("openai");
   if (configured.voyage) available.push("voyage");
@@ -72,6 +91,7 @@ export function getProviderAvailability(): ProviderAvailability {
   return {
     available,
     configured,
+    enabled,
     default: defaultSearchProvider(),
   };
 }
@@ -106,22 +126,27 @@ export function resolveSearchProvider(
   }
 
   if (!availability.available.includes(requested)) {
+    const fallback =
+      availability.available[0] ??
+      (isProviderConfigured("local") ? "local" : fallbackDefault);
     return {
       requested,
-      provider: "local",
+      provider: fallback,
       fallback: true,
-      reason: `${requested} is not configured; using local semantic search.`,
+      reason: `${requested} is not enabled; using ${fallback} semantic search.`,
     };
   }
 
   const config = embeddingConfigForProvider(requested);
   // Ollama uses a dummy bearer token; cloud providers need a real key.
   if (requested !== "local" && requested !== "ollama" && !config.apiKey) {
+    const fallback =
+      availability.available.find((p) => p !== requested) ?? "local";
     return {
       requested,
-      provider: "local",
+      provider: fallback,
       fallback: true,
-      reason: `${requested} API key is missing; using local semantic search.`,
+      reason: `${requested} API key is missing; using ${fallback} semantic search.`,
     };
   }
 

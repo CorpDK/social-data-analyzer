@@ -18,8 +18,9 @@ type SettingsPayload = {
   };
   preferredProvider: PreferredProvider | null;
   timeoutMs: number;
-  openai: SecretStatus & { baseUrl: string; model: string };
-  voyage: SecretStatus & { model: string };
+  local: { enabled: boolean };
+  openai: SecretStatus & { enabled: boolean; baseUrl: string; model: string };
+  voyage: SecretStatus & { enabled: boolean; model: string };
   ollama: SecretStatus & {
     enabled: boolean;
     baseUrl: string;
@@ -52,6 +53,9 @@ export function SettingsForm() {
   const [openaiModel, setOpenaiModel] = useState("text-embedding-3-small");
   const [voyageModel, setVoyageModel] = useState("voyage-4-lite");
   const [ollamaModel, setOllamaModel] = useState("qwen3-embedding:0.6b");
+  const [localEnabled, setLocalEnabled] = useState(true);
+  const [openaiEnabled, setOpenaiEnabled] = useState(false);
+  const [voyageEnabled, setVoyageEnabled] = useState(false);
   const [ollamaEnabled, setOllamaEnabled] = useState(false);
 
   const applyPayload = useCallback((json: SettingsPayload) => {
@@ -63,6 +67,9 @@ export function SettingsForm() {
     setVoyageModel(json.voyage.model);
     setOllamaBaseUrl(json.ollama.baseUrl);
     setOllamaModel(json.ollama.model);
+    setLocalEnabled(json.local.enabled);
+    setOpenaiEnabled(json.openai.enabled);
+    setVoyageEnabled(json.voyage.enabled);
     setOllamaEnabled(json.ollama.enabled);
     setOpenaiKey("");
     setVoyageKey("");
@@ -129,9 +136,12 @@ export function SettingsForm() {
         voyageModel,
         ollamaBaseUrl,
         ollamaModel,
+        localEnabled,
+        openaiEnabled,
+        voyageEnabled,
         ollamaEnabled,
       });
-      setMessage("Search, model, and connection settings saved.");
+      setMessage("Search, index, model, and connection settings saved.");
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to save settings");
     } finally {
@@ -150,7 +160,11 @@ export function SettingsForm() {
     setMessage(null);
     try {
       await update({ [field]: value.trim() });
-      setMessage(value ? `${provider} credential saved in the system keyring.` : `${provider} keyring entry cleared.`);
+      setMessage(
+        value
+          ? `${provider} credential saved in the system keyring. Enable the index separately below if you want to use it.`
+          : `${provider} keyring entry cleared.`,
+      );
     } catch (saveError) {
       setError(saveError instanceof Error ? saveError.message : "Failed to update credential");
     } finally {
@@ -193,6 +207,37 @@ export function SettingsForm() {
       value: ollamaKey,
       setValue: setOllamaKey,
       placeholder: "Optional bearer token",
+    },
+  ];
+
+  const indexToggles = [
+    {
+      id: "localEnabled",
+      label: "Enable Local (basic) index",
+      hint: "Offline feature-hash vectors. FTS keyword search always stays on.",
+      checked: localEnabled,
+      setChecked: setLocalEnabled,
+    },
+    {
+      id: "openaiEnabled",
+      label: "Enable OpenAI index",
+      hint: "Requires an OpenAI API key. Saving a key does not turn this on.",
+      checked: openaiEnabled,
+      setChecked: setOpenaiEnabled,
+    },
+    {
+      id: "voyageEnabled",
+      label: "Enable Voyage index",
+      hint: "Requires a Voyage API key. Saving a key does not turn this on.",
+      checked: voyageEnabled,
+      setChecked: setVoyageEnabled,
+    },
+    {
+      id: "ollamaEnabled",
+      label: "Enable Ollama index",
+      hint: "Requires a running Ollama with the selected model pulled.",
+      checked: ollamaEnabled,
+      setChecked: setOllamaEnabled,
     },
   ];
 
@@ -248,13 +293,47 @@ export function SettingsForm() {
           </label>
         </section>
 
-        <section className={`${cardClass} order-2 space-y-3 md:col-span-2 xl:order-4`} aria-labelledby="credentials-heading">
+        <section
+          className={`${cardClass} order-2 space-y-3 md:col-span-2 xl:col-span-2`}
+          aria-labelledby="indexes-heading"
+        >
+          <div>
+            <h2 id="indexes-heading" className="font-[family-name:var(--font-fraunces)] text-lg">
+              Indexes
+            </h2>
+            <p className="mt-0.5 text-xs text-[var(--muted)]">
+              Explicitly enable each index. API keys and URLs alone do not activate search or reindex.
+            </p>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2">
+            {indexToggles.map((toggle) => (
+              <label
+                key={toggle.id}
+                className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]/45 px-3 py-2.5 text-sm"
+              >
+                <span>
+                  <span className="block font-medium">{toggle.label}</span>
+                  <span className="block text-xs text-[var(--muted)]">{toggle.hint}</span>
+                </span>
+                <input
+                  type="checkbox"
+                  name={toggle.id}
+                  checked={toggle.checked}
+                  onChange={(event) => toggle.setChecked(event.target.checked)}
+                  className="size-4 shrink-0 accent-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                />
+              </label>
+            ))}
+          </div>
+        </section>
+
+        <section className={`${cardClass} order-3 space-y-3 md:col-span-2 xl:order-4 xl:col-span-3`} aria-labelledby="credentials-heading">
           <div>
             <h2 id="credentials-heading" className="font-[family-name:var(--font-fraunces)] text-lg">
               API keys & credentials
             </h2>
             <p className="mt-0.5 text-xs text-[var(--muted)]">
-              Saved separately to your system keyring. Stored values are never returned.
+              Saved separately to your system keyring. Stored values are never returned. Saving a key does not enable the index.
             </p>
           </div>
           <div className="grid gap-3 lg:grid-cols-3">
@@ -310,7 +389,7 @@ export function SettingsForm() {
           </div>
         </section>
 
-        <section className={`${cardClass} order-3 space-y-3 xl:order-2`} aria-labelledby="models-heading">
+        <section className={`${cardClass} order-4 space-y-3 xl:order-3`} aria-labelledby="models-heading">
           <div>
             <h2 id="models-heading" className="font-[family-name:var(--font-fraunces)] text-lg">Models</h2>
             <p className="mt-0.5 text-xs text-[var(--muted)]">Embedding model identifiers by provider.</p>
@@ -329,7 +408,7 @@ export function SettingsForm() {
           </label>
         </section>
 
-        <section className={`${cardClass} order-4 space-y-3 xl:order-3`} aria-labelledby="endpoints-heading">
+        <section className={`${cardClass} order-5 space-y-3 xl:order-5`} aria-labelledby="endpoints-heading">
           <div>
             <h2 id="endpoints-heading" className="font-[family-name:var(--font-fraunces)] text-lg">Endpoints</h2>
             <p className="mt-0.5 text-xs text-[var(--muted)]">OpenAI-compatible service connections.</p>
@@ -341,25 +420,6 @@ export function SettingsForm() {
           <label className={labelClass}>
             <span className="text-[var(--muted)]">Ollama base URL</span>
             <input type="url" name="ollamaBaseUrl" value={ollamaBaseUrl} onChange={(event) => setOllamaBaseUrl(event.target.value)} className={monoFieldClass} />
-          </label>
-        </section>
-
-        <section className={`${cardClass} order-5 space-y-3`} aria-labelledby="local-runtime-heading">
-          <div>
-            <h2 id="local-runtime-heading" className="font-[family-name:var(--font-fraunces)] text-lg">Local runtime</h2>
-            <p className="mt-0.5 text-xs text-[var(--muted)]">Ollama must be running with the selected model pulled.</p>
-          </div>
-          <label className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]/45 px-3 py-2.5 text-sm">
-            <span>
-              <span className="block font-medium">Enable Ollama</span>
-              <span className="block text-xs text-[var(--muted)]">Use for semantic search</span>
-            </span>
-            <input
-              type="checkbox"
-              checked={ollamaEnabled}
-              onChange={(event) => setOllamaEnabled(event.target.checked)}
-              className="size-4 accent-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-            />
           </label>
         </section>
       </div>

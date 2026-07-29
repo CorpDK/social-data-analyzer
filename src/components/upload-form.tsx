@@ -2,6 +2,11 @@
 
 import { useRouter } from "next/navigation";
 import { useState } from "react";
+import {
+  IMPORT_MAX_FILE_BYTES,
+  IMPORT_MAX_FILE_LABEL,
+  importFileTooLargeMessage,
+} from "@/lib/import-limits";
 
 type ImportResponse = {
   status?: "completed" | "duplicate" | "failed";
@@ -24,6 +29,11 @@ export function UploadForm() {
     event.preventDefault();
     if (!file) {
       setError("Choose a .zip or .json export first.");
+      return;
+    }
+
+    if (file.size > IMPORT_MAX_FILE_BYTES) {
+      setError(importFileTooLargeMessage());
       return;
     }
 
@@ -64,8 +74,9 @@ export function UploadForm() {
         </h2>
         <p className="max-w-2xl text-[var(--muted)]">
           Upload Instagram&apos;s official data download as JSON (.zip or a
-          saved_*.json file). Re-importing newer exports merges new saves and
-          skips duplicates by media shortcode.
+          saved_*.json file). Full Meta exports with media are supported up to{" "}
+          {IMPORT_MAX_FILE_LABEL}. Re-importing newer exports merges new saves
+          and skips duplicates by media shortcode.
         </p>
       </div>
 
@@ -78,14 +89,22 @@ export function UploadForm() {
           accept=".zip,.json,application/zip,application/json"
           className="block w-full text-sm text-[var(--muted)] file:mr-4 file:rounded-full file:border-0 file:bg-[var(--ink)] file:px-4 file:py-2 file:text-sm file:text-[var(--surface)]"
           onChange={(event) => {
-            setFile(event.target.files?.[0] ?? null);
+            const next = event.target.files?.[0] ?? null;
+            setFile(next);
             setResult(null);
-            setError(null);
+            if (next && next.size > IMPORT_MAX_FILE_BYTES) {
+              setError(importFileTooLargeMessage());
+            } else {
+              setError(null);
+            }
           }}
         />
         {file ? (
           <span className="font-[family-name:var(--font-ibm)] text-xs text-[var(--muted)]">
             {file.name} · {(file.size / (1024 * 1024)).toFixed(2)} MB
+            {file.size > IMPORT_MAX_FILE_BYTES
+              ? ` (over ${IMPORT_MAX_FILE_LABEL} limit)`
+              : ""}
           </span>
         ) : null}
       </label>
@@ -93,7 +112,9 @@ export function UploadForm() {
       <div className="mt-5 flex flex-wrap items-center gap-3">
         <button
           type="submit"
-          disabled={busy || !file}
+          disabled={
+            busy || !file || (file != null && file.size > IMPORT_MAX_FILE_BYTES)
+          }
           className="rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-medium text-white transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "Importing…" : "Import into library"}

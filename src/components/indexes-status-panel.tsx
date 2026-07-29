@@ -8,6 +8,8 @@ type IndexHealth = "ready" | "partial" | "stale" | "empty" | "unavailable";
 
 type ProviderIndexStatus = {
   provider: EmbeddingProvider;
+  enabled: boolean;
+  hasCredentials: boolean;
   configured: boolean;
   indexPresent: boolean;
   totalItems: number;
@@ -145,6 +147,17 @@ function jobStateStyles(state: EmbeddingJob["state"]): string {
 function formatUpdatedAt(unix: number | null): string {
   if (!unix) return "—";
   return new Date(unix * 1000).toLocaleString();
+}
+
+function providerAvailabilityLabel(provider: ProviderIndexStatus): string {
+  if (provider.configured) return "Configured";
+  if (provider.hasCredentials && !provider.enabled) {
+    return "Credentials saved · Disabled";
+  }
+  if (provider.enabled && !provider.hasCredentials) {
+    return "Enabled · Missing credentials";
+  }
+  return "Not configured";
 }
 
 export function IndexesStatusPanel() {
@@ -400,7 +413,7 @@ export function IndexesStatusPanel() {
         </span>
       </div>
 
-      <div className="space-y-2.5">
+      <div className="space-y-2">
         {(data?.providers ?? []).map((provider) => {
           const label = PROVIDER_LABELS[provider.provider];
           const canReindex = provider.configured && !running && pending === null;
@@ -418,14 +431,17 @@ export function IndexesStatusPanel() {
           return (
             <section
               key={provider.provider}
-              className="grid min-w-0 gap-3 rounded-xl border border-[var(--line)] bg-[var(--surface)] p-3 sm:p-3.5 md:grid-cols-[minmax(120px,0.8fr)_minmax(110px,0.7fr)_minmax(250px,1.8fr)_auto] md:items-center md:gap-3 lg:gap-5"
+              // Shared column template across every provider row so Coverage /
+              // Model / Dimensions / Endpoint / Last updated stay aligned.
+              // The <dl> uses `md:contents` so its children join this grid on desktop.
+              className="grid min-w-0 gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2.5 md:grid-cols-[minmax(132px,1.15fr)_minmax(112px,0.9fr)_minmax(88px,1fr)_minmax(64px,0.45fr)_minmax(88px,0.9fr)_minmax(96px,0.85fr)_auto] md:items-center md:gap-x-3 md:gap-y-0 lg:gap-x-4"
               aria-labelledby={`provider-${provider.provider}`}
             >
-              <div className="min-w-0">
+              <div className="min-w-0 self-center">
                 <div className="flex flex-wrap items-center gap-2">
                   <h3
                     id={`provider-${provider.provider}`}
-                    className="font-[family-name:var(--font-fraunces)] text-base"
+                    className="font-[family-name:var(--font-fraunces)] text-base leading-tight"
                   >
                     {label}
                   </h3>
@@ -435,14 +451,19 @@ export function IndexesStatusPanel() {
                     {provider.health}
                   </span>
                 </div>
-                <p className="mt-0.5 truncate text-[11px] text-[var(--muted)]">
-                  {provider.configured ? "Configured" : "Not configured"}
+                <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
+                  {providerAvailabilityLabel(provider)}
                   {provider.indexPresent ? " · Index present" : " · No vectors yet"}
                 </p>
+                {provider.hint ? (
+                  <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
+                    {provider.hint}
+                  </p>
+                ) : null}
               </div>
 
-              <div className="min-w-0">
-                <div className="mb-1 flex items-center justify-between gap-3 text-[11px] text-[var(--muted)]">
+              <div className="min-w-0 self-center">
+                <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-[var(--muted)]">
                   <span>
                     Coverage{" "}
                     <span className="font-medium text-[var(--ink)]">
@@ -475,40 +496,40 @@ export function IndexesStatusPanel() {
                 </div>
               </div>
 
-              <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-1 text-[11px] xl:grid-cols-4">
-                <div className="min-w-0">
+              <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] sm:grid-cols-4 md:contents">
+                <div className="min-w-0 self-center">
                   <dt className="text-[var(--muted)]">Model</dt>
                   <dd
-                    className="truncate font-[family-name:var(--font-ibm)] text-xs text-[var(--ink)]"
+                    className="truncate font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]"
                     title={model}
                   >
                     {model}
                   </dd>
                 </div>
-                <div>
+                <div className="min-w-0 self-center">
                   <dt className="text-[var(--muted)]">Dimensions</dt>
-                  <dd className="font-[family-name:var(--font-ibm)] text-xs text-[var(--ink)]">
+                  <dd className="font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]">
                     {dimensions}
                   </dd>
                 </div>
-                <div className="min-w-0">
+                <div className="min-w-0 self-center">
                   <dt className="text-[var(--muted)]">Endpoint</dt>
                   <dd
-                    className="truncate font-[family-name:var(--font-ibm)] text-xs text-[var(--ink)]"
+                    className="truncate font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]"
                     title={endpoint}
                   >
                     {endpoint}
                   </dd>
                 </div>
-                <div className="min-w-0">
+                <div className="min-w-0 self-center">
                   <dt className="text-[var(--muted)]">Last updated</dt>
-                  <dd className="truncate text-xs text-[var(--ink)]">
+                  <dd className="truncate text-xs leading-snug text-[var(--ink)]">
                     {formatUpdatedAt(provider.stored?.updatedAt ?? null)}
                   </dd>
                 </div>
               </dl>
 
-              <div className="flex items-center justify-end md:min-w-24">
+              <div className="flex items-center justify-start self-center md:justify-end md:min-w-20">
                 {provider.configured ? (
                   <button
                     type="button"
@@ -524,7 +545,7 @@ export function IndexesStatusPanel() {
                   </button>
                 ) : (
                   <Link className={secondaryButton} href="/settings">
-                    Enable in Settings
+                    Enable
                   </Link>
                 )}
               </div>

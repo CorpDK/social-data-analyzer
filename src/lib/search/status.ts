@@ -12,7 +12,11 @@ import {
   vectorTableDimensions,
   type VectorIndexName,
 } from "./sync";
-import { isProviderConfigured } from "./providers";
+import {
+  isProviderConfigured,
+  isProviderEnabled,
+  providerHasCredentials,
+} from "./providers";
 import { getLatestEmbeddingJob, type EmbeddingJobRecord } from "./jobs";
 
 export type IndexHealth =
@@ -24,6 +28,11 @@ export type IndexHealth =
 
 export type ProviderIndexStatus = {
   provider: EmbeddingProvider;
+  /** Explicit Settings enable flag (independent of credentials). */
+  enabled: boolean;
+  /** Credentials present when required (local/ollama always true). */
+  hasCredentials: boolean;
+  /** Ready for search/reindex: enabled && hasCredentials. */
   configured: boolean;
   indexPresent: boolean;
   totalItems: number;
@@ -51,11 +60,18 @@ function coveragePercent(embedded: number, total: number): number {
 
 function providerHint(
   provider: EmbeddingProvider,
-  configured: boolean,
+  enabled: boolean,
+  hasCredentials: boolean,
   health: IndexHealth,
 ): string | null {
-  if (!configured) {
+  if (!enabled && hasCredentials) {
+    return "Credentials saved — enable in Settings to use this index";
+  }
+  if (!enabled) {
     return "Enable in Settings then Reindex";
+  }
+  if (!hasCredentials) {
+    return `Add ${provider === "openai" ? "OpenAI" : "Voyage"} API key in Settings`;
   }
   if (health === "empty") {
     return "Index is empty — run Reindex to build vectors";
@@ -83,17 +99,16 @@ export function getProviderIndexStatus(
       }
     ).c;
 
+  const enabled = isProviderEnabled(provider);
+  const hasCredentials = providerHasCredentials(provider);
   const configured = isProviderConfigured(provider);
   const index = provider as VectorIndexName;
   const tableDimensions = vectorTableDimensions(index, sqlite);
-  const embeddedCount = configured ? vecCount(index, sqlite) : 0;
-  const meta = configured
-    ? getIndexedEmbeddingProfileMeta(index, sqlite)
-    : null;
-  const storedProfile = configured
-    ? getIndexedEmbeddingProfile(index, sqlite)
-    : null;
-  const expected = configured
+  // Report stored coverage even when disabled so the UI can show leftover indexes.
+  const embeddedCount = vecCount(index, sqlite);
+  const meta = getIndexedEmbeddingProfileMeta(index, sqlite);
+  const storedProfile = getIndexedEmbeddingProfile(index, sqlite);
+  const expected = hasCredentials
     ? embeddingConfigForProvider(provider).profile
     : null;
 
@@ -118,13 +133,15 @@ export function getProviderIndexStatus(
 
   return {
     provider,
+    enabled,
+    hasCredentials,
     configured,
     indexPresent,
     totalItems: total,
     embeddedCount,
     coveragePercent: coveragePercent(embeddedCount, total),
     health,
-    hint: providerHint(provider, configured, health),
+    hint: providerHint(provider, enabled, hasCredentials, health),
     stored: storedProfile
       ? {
           ...storedProfile,

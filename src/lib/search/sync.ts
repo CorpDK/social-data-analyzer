@@ -13,6 +13,7 @@ import {
   type EmbeddingProvider,
 } from "./embeddings";
 import {
+  configuredProviders,
   configuredRemoteProviders,
   isProviderConfigured,
 } from "./providers";
@@ -368,8 +369,9 @@ async function syncProviderIndex(
 }
 
 /**
- * Always writes local vectors first. Remote providers run afterward and outside
- * SQLite transactions; a remote failure cannot remove the offline index.
+ * Updates vector indexes only for explicitly enabled providers.
+ * Disabled indexes are skipped even when API keys exist.
+ * Network work for remotes runs outside long SQLite transactions.
  */
 export async function syncItemEmbeddings(
   itemIds: number[],
@@ -379,11 +381,9 @@ export async function syncItemEmbeddings(
   const rows = allSearchRows(sqlite, uniqueIds);
   const updatedProviders: string[] = [];
   const notes: string[] = [];
+  const targets = configuredProviders();
 
-  const localResult = await syncProviderIndex("local", rows, false, sqlite);
-  if (localResult.updated) updatedProviders.push("local");
-
-  for (const provider of configuredRemoteProviders()) {
+  for (const provider of targets) {
     const result = await syncProviderIndex(provider, rows, false, sqlite);
     if (result.updated) {
       updatedProviders.push(provider);
@@ -401,6 +401,16 @@ export async function syncItemEmbeddings(
     };
   }
 
+  if (targets.length === 0) {
+    return {
+      status: "skipped",
+      items: rows.length,
+      providers: [],
+      message:
+        "No embedding indexes are enabled — keyword (FTS) search still works. Enable providers in Settings.",
+    };
+  }
+
   const remoteConfigured = configuredRemoteProviders();
   const remoteUpdated = remoteConfigured.filter((p) =>
     updatedProviders.includes(p),
@@ -408,18 +418,27 @@ export async function syncItemEmbeddings(
   const skippedRemote = remoteConfigured.filter(
     (p) => !updatedProviders.includes(p),
   );
+  const localUpdated = updatedProviders.includes("local");
 
-  let message = `Offline semantic index updated for ${rows.length} item${rows.length === 1 ? "" : "s"}`;
+  let message = localUpdated
+    ? `Offline semantic index updated for ${rows.length} item${rows.length === 1 ? "" : "s"}`
+    : `Semantic indexing for ${rows.length} item${rows.length === 1 ? "" : "s"}`;
   if (remoteUpdated.length > 0) {
     message += `; ${remoteUpdated.join(", ")} indexes updated`;
   }
   if (skippedRemote.length > 0) {
     message += `; ${skippedRemote.join(", ")} skipped (${notes.join("; ") || "run pnpm run reindex"})`;
   }
+  if (!localUpdated && remoteUpdated.length === 0 && skippedRemote.length === 0) {
+    message += " (no enabled indexes updated)";
+  }
   message += ".";
 
   return {
-    status: skippedRemote.length > 0 && remoteUpdated.length === 0 ? "skipped" : "updated",
+    status:
+      skippedRemote.length > 0 && remoteUpdated.length === 0 && !localUpdated
+        ? "skipped"
+        : "updated",
     items: rows.length,
     providers: updatedProviders,
     message,
@@ -429,7 +448,7 @@ export async function syncItemEmbeddings(
 function assertProviderRebuildable(provider: EmbeddingProvider) {
   if (!isProviderConfigured(provider)) {
     throw new Error(
-      `${provider} is not configured — enable it in Settings before reindexing`,
+      `${provider} is not enabled — turn it on in Settings (and add credentials if needed) before reindexing`,
     );
   }
   if (provider !== "local" && provider !== "ollama") {
@@ -534,7 +553,7 @@ export async function rebuildProviderIndex(
 }
 
 /**
- * Rebuild FTS, then every configured provider (local + remotes).
+ * Rebuild FTS, then every enabled (+ credentialed) provider.
  * Network calls never hold a transaction.
  */
 export async function rebuildConfiguredIndexes(options?: {
@@ -548,7 +567,7 @@ export async function rebuildConfiguredIndexes(options?: {
 }> {
   if (options?.requireRemote && !isRemoteEmbeddingConfigured()) {
     throw new Error(
-      "--remote requires OpenAI/Voyage keys (Settings or env) and/or Ollama configured",
+      "--remote requires at least one enabled neural provider (OpenAI/Voyage with keys, and/or Ollama)",
     );
   }
 
@@ -557,11 +576,12 @@ export async function rebuildConfiguredIndexes(options?: {
   const onProgress = options?.onProgress;
   const shouldCancel = options?.shouldCancel;
   const total = rows.length;
+  const providers = configuredProviders();
 
   await emitProgress(onProgress, {
     phase: "fts",
     processed: 0,
-    total: Math.max(1, total * Math.max(1, 1 + configuredRemoteProviders().length)),
+    total: Math.max(1, total * Math.max(1, providers.length)),
     message: "Rebuilding keyword (FTS) index…",
   });
   throwIfCancelled(shouldCancel);
@@ -571,12 +591,8 @@ export async function rebuildConfiguredIndexes(options?: {
     for (const row of rows) upsertItemFts(row.id, row, sqlite);
   })();
 
-  const providers: EmbeddingProvider[] = [
-    "local",
-    ...configuredRemoteProviders(),
-  ];
   const remoteUpdated: string[] = [];
-  const overallTotal = Math.max(1, total * providers.length || 1);
+  const overallTotal = Math.max(1, total * Math.max(1, providers.length));
   let overallBase = 0;
 
   for (const provider of providers) {
@@ -610,8 +626,8 @@ export async function rebuildConfiguredIndexes(options?: {
 }
 
 /**
- * Rebuild FTS and local vectors unconditionally, then rebuild every configured
- * remote index. Network calls never hold a transaction.
+ * Rebuild FTS, then every enabled provider index.
+ * Network calls never hold a transaction.
  */
 export async function rebuildSearchIndex(options?: {
   requireRemote?: boolean;
@@ -625,7 +641,7 @@ export async function rebuildSearchIndex(options?: {
   return rebuildConfiguredIndexes(options);
 }
 
-/** Backfill keyword and fixed local vectors without startup network calls. */
+/** Backfill keyword index; local vectors only when the local index is enabled. */
 export function ensureSearchIndexBackfill() {
   const sqlite = getSqlite();
   const rows = allSearchRows(sqlite);
@@ -636,6 +652,8 @@ export function ensureSearchIndexBackfill() {
       for (const row of rows) upsertItemFts(row.id, row, sqlite);
     })();
   }
+
+  if (!isProviderConfigured("local")) return;
 
   const localConfig = localEmbeddingConfig();
   if (

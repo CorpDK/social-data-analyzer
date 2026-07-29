@@ -7,9 +7,9 @@ Local Next.js app that imports official Instagram data exports, stores saved pos
 - Upload Instagram JSON exports (`.zip` or `.json`)
 - SQLite persistence with **WAL** (`data/instagram-saves.db`)
 - Hybrid search: **FTS5** keyword + **sqlite-vec** semantic (RRF merge)
-- Semantic providers: **Local (basic)** hasher (always), **Ollama**, **OpenAI**, **Voyage**
+- Semantic providers: **Local (basic)** hasher, **Ollama**, **OpenAI**, **Voyage** — each explicitly enableable
 - **Indexes** page: per-provider coverage/health + UI reindex with live progress
-- Runtime config via **Settings** (keys → system keyring; models/URLs → SQLite); env vars are optional fallbacks
+- Runtime config via **Settings** (keys → system keyring; enable flags / models / URLs → SQLite); env vars are optional CI fallbacks
 - Light / dark / system theme (header switcher; preference in localStorage)
 - Deduping by media shortcode (and identical file content hash)
 - Periodic re-imports: adds new saves, updates metadata/collections, skips unchanged
@@ -26,27 +26,27 @@ Open [http://localhost:3000](http://localhost:3000), then **Settings** to config
 
 ### Search index
 
-Search always keeps offline layers: FTS5 keyword search and a deterministic
-1024-dimension local feature-hash index (**Local (basic)**). That hasher is
-weaker than a neural model, but needs no network or secret.
+**FTS5 keyword search always stays on.** Vector indexes are separate and only
+used when explicitly **enabled** in Settings (credentials alone do not count).
 
-Neural providers are available in the UI when configured:
+| Mode | Ready for search / reindex / import embed |
+|------|-------------------------------------------|
+| `local` | Enable Local index (default **on**). Offline hasher; no secret. |
+| `ollama` | Enable Ollama index (default **off**) + running Ollama |
+| `openai` | Enable OpenAI index (default **off**) + API key |
+| `voyage` | Enable Voyage index (default **off**) + API key |
 
-| Mode | Availability |
-|------|----------------|
-| `local` | Always (hasher + FTS5) |
-| `ollama` | Settings enable (or env `OLLAMA_BASE_URL` / `EMBEDDING_OLLAMA=1`) |
-| `openai` | Keyring / Settings (or env `OPENAI_API_KEY`) |
-| `voyage` | Keyring / Settings (or env `VOYAGE_API_KEY`) |
+Enable flags live in SQLite `app_settings` (`local_enabled`, `openai_enabled`,
+`voyage_enabled`, `ollama_enabled`). Saving a key never flips enable to on.
+Existing installs with keys stay disabled until you turn each index on.
 
-On the **Saves** page, switch semantic provider with the segmented control (or
-`?provider=local|ollama|openai|voyage`). The choice is stored in localStorage
-and validated server-side; an unavailable provider falls back to local and
-reports that in the response.
+On the **Saves** page, the provider switcher lists only **enabled + usable**
+providers. The choice is stored in localStorage and validated server-side; a
+disabled/unavailable provider falls back and reports that in the response.
 
 **Settings → Preferred provider** (or env `EMBEDDING_PROVIDER`) sets the default
-when no UI/URL override is present. If omitted (Auto), the app prefers OpenAI,
-then Voyage, then Ollama, then local.
+when no UI/URL override is present. Auto only considers enabled providers
+(OpenAI → Voyage → Ollama → Local).
 
 Remote embedding and KNN errors—including timeouts and network/5xx
 failures—fall back to the matching local query vector and local document index.
@@ -54,8 +54,8 @@ Vector spaces are never mixed across providers. Search reports `hybrid`/`vec`
 for the preferred path, `hybrid-local-fallback`/`vec-local-fallback` after
 failover, and `fts` when only keyword results are available.
 
-`GET /api/search/providers` returns `{ available, configured, default }` without
-leaking key values.
+`GET /api/search/providers` returns `{ available, configured, enabled, default }`
+without leaking key values.
 
 ### API keys & Settings
 
@@ -64,9 +64,10 @@ Prefer **Settings** in the nav. Configure:
 | Setting | Persistence |
 |---------|-------------|
 | OpenAI / Voyage / optional Ollama API keys | OS keyring (`@napi-rs/keyring`) |
+| Per-index enable (local / openai / voyage / ollama) | SQLite `app_settings` |
 | OpenAI base URL & model | SQLite `app_settings` |
 | Voyage model | SQLite `app_settings` |
-| Ollama enable / base URL / model | SQLite `app_settings` |
+| Ollama base URL / model | SQLite `app_settings` |
 | Preferred provider & embedding timeout | SQLite `app_settings` |
 
 The API never returns secret values to the browser after save—only configured
@@ -97,9 +98,9 @@ All four vector indexes use fixed 1024 dimensions. Tables:
 `saved_items_vec_local`, `saved_items_vec_ollama`, `saved_items_vec_openai`,
 `saved_items_vec_voyage`.
 
-`pnpm run reindex` always rebuilds FTS and local vectors, and also rebuilds every
-configured neural provider. `--remote` asserts that at least one neural provider
-is configured:
+`pnpm run reindex` always rebuilds FTS, then every **enabled** provider (local
+when enabled, plus enabled neural indexes with credentials). `--remote` asserts
+that at least one neural provider is enabled:
 
 ```bash
 pnpm run reindex -- --remote
@@ -112,9 +113,9 @@ cancel is cooperative between items. APIs: `GET /api/search/status`,
 `POST /api/search/reindex`, `GET /api/search/reindex`,
 `POST /api/search/reindex/cancel`.
 
-Imports update FTS in their data transaction, then write local vectors and
-attempt each configured neural index after commit. No SQLite transaction is held
-over a network call.
+Imports update FTS in their data transaction, then update vectors only for
+**enabled** indexes after commit. Disabled indexes are skipped even if keys
+exist. No SQLite transaction is held over a network call.
 
 ### Theme
 
@@ -129,7 +130,7 @@ before paint to avoid a flash.
 2. Export your Instagram profile to device
 3. Choose saved/activity data (or all information)
 4. Set format to **JSON**
-5. Download the zip when Meta emails you, then upload it on the **Import** page
+5. Download the zip when Meta emails you, then upload it on the **Import** page (max **2GB** — enough for full Meta exports that include media)
 
 ## Deduplication
 

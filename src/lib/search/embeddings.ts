@@ -9,6 +9,9 @@ import {
   getOpenAiSettings,
   getPreferredEmbeddingProvider,
   getVoyageSettings,
+  isOllamaEnabled,
+  isOpenAiEnabled,
+  isVoyageEnabled,
 } from "../settings/app-settings";
 
 export type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
@@ -193,19 +196,24 @@ export function embeddingConfig(): EmbeddingConfig {
   if (preferred) {
     return embeddingConfigForProvider(preferred);
   }
-  if (getOpenAiApiKey()) return embeddingConfigForProvider("openai");
-  if (getVoyageApiKey()) return embeddingConfigForProvider("voyage");
-  if (getOllamaSettings().configured) {
+  if (isOpenAiEnabled() && getOpenAiApiKey()) {
+    return embeddingConfigForProvider("openai");
+  }
+  if (isVoyageEnabled() && getVoyageApiKey()) {
+    return embeddingConfigForProvider("voyage");
+  }
+  if (isOllamaEnabled()) {
     return embeddingConfigForProvider("ollama");
   }
   return localEmbeddingConfig();
 }
 
+/** At least one neural index is explicitly enabled and credentialed. */
 export function isRemoteEmbeddingConfigured(): boolean {
   return Boolean(
-    getOpenAiApiKey() ||
-      getVoyageApiKey() ||
-      getOllamaSettings().configured,
+    (isOpenAiEnabled() && getOpenAiApiKey()) ||
+      (isVoyageEnabled() && getVoyageApiKey()) ||
+      isOllamaEnabled(),
   );
 }
 

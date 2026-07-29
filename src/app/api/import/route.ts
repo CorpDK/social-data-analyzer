@@ -3,6 +3,10 @@ import {
   importExportArchive,
   importExportJson,
 } from "@/lib/import-export";
+import {
+  IMPORT_MAX_FILE_BYTES,
+  importFileTooLargeMessage,
+} from "@/lib/import-limits";
 
 export const runtime = "nodejs";
 
@@ -20,16 +24,24 @@ export async function POST(request: Request) {
 
     const filename = file.name || "export.zip";
     const lower = filename.toLowerCase();
+
+    // Cap full Meta exports that include media (shared with client validation)
+    if (file.size > IMPORT_MAX_FILE_BYTES) {
+      return NextResponse.json(
+        { error: importFileTooLargeMessage() },
+        { status: 400 },
+      );
+    }
+
     const buffer = Buffer.from(await file.arrayBuffer());
 
     if (buffer.byteLength === 0) {
       return NextResponse.json({ error: "File is empty." }, { status: 400 });
     }
 
-    // Cap at ~200MB for local tooling
-    if (buffer.byteLength > 200 * 1024 * 1024) {
+    if (buffer.byteLength > IMPORT_MAX_FILE_BYTES) {
       return NextResponse.json(
-        { error: "File is too large (max 200MB)." },
+        { error: importFileTooLargeMessage() },
         { status: 400 },
       );
     }

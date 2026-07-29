@@ -19,6 +19,7 @@ type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
 type ProviderInfo = {
   available: EmbeddingProvider[];
   configured: Record<EmbeddingProvider, boolean>;
+  enabled?: Record<EmbeddingProvider, boolean>;
   default: EmbeddingProvider;
 };
 

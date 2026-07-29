@@ -15,6 +15,10 @@ async function main() {
   delete process.env.OLLAMA_BASE_URL;
   delete process.env.OLLAMA_API_KEY;
   delete process.env.EMBEDDING_OLLAMA;
+  delete process.env.OLLAMA_ENABLED;
+  delete process.env.OPENAI_ENABLED;
+  delete process.env.VOYAGE_ENABLED;
+  delete process.env.LOCAL_ENABLED;
   delete process.env.OLLAMA_EMBEDDING_MODEL;
   delete process.env.EMBEDDING_BASE_URL;
   delete process.env.EMBEDDING_MODEL;
@@ -130,7 +134,6 @@ async function main() {
     voyageApiKey: "test-voyage-key",
     ollamaBaseUrl: "http://127.0.0.1:11434/v1",
     ollamaModel: "qwen3-embedding:0.6b",
-    ollamaEnabled: true,
     openaiBaseUrl: "https://api.openai.com/v1",
     openaiModel: "text-embedding-3-small",
     voyageModel: "voyage-4-lite",
@@ -138,22 +141,58 @@ async function main() {
     timeoutMs: 10000,
   });
 
+  const settingsAfterKeys = getSettingsKeysStatus();
+  if (
+    !settingsAfterKeys.openai.configured ||
+    settingsAfterKeys.openai.source !== "keyring" ||
+    !settingsAfterKeys.voyage.configured ||
+    settingsAfterKeys.openai.enabled ||
+    settingsAfterKeys.voyage.enabled ||
+    settingsAfterKeys.ollama.enabled ||
+    settingsAfterKeys.ollama.available ||
+    !settingsAfterKeys.local.enabled ||
+    settingsAfterKeys.ollama.model !== "qwen3-embedding:0.6b" ||
+    settingsAfterKeys.openai.model !== "text-embedding-3-small" ||
+    settingsAfterKeys.voyage.model !== "voyage-4-lite" ||
+    settingsAfterKeys.preferredProvider !== "openai" ||
+    settingsAfterKeys.timeoutMs !== 10000
+  ) {
+    throw new Error(
+      "Settings should persist keys without enabling indexes; local defaults on",
+    );
+  }
+  if (JSON.stringify(settingsAfterKeys).includes("test-key")) {
+    throw new Error("Settings status must never echo secret values");
+  }
+
+  const availabilityKeysOnly = getProviderAvailability();
+  if (
+    availabilityKeysOnly.available.join(",") !== "local" ||
+    availabilityKeysOnly.configured.openai ||
+    availabilityKeysOnly.configured.voyage ||
+    availabilityKeysOnly.configured.ollama
+  ) {
+    throw new Error(
+      `API keys / Ollama URL alone must not enable indexes (got ${availabilityKeysOnly.available.join(",")})`,
+    );
+  }
+
+  updateSettingsKeys({
+    localEnabled: true,
+    openaiEnabled: true,
+    voyageEnabled: true,
+    ollamaEnabled: true,
+  });
+
   const settingsAfter = getSettingsKeysStatus();
   if (
-    !settingsAfter.openai.configured ||
-    settingsAfter.openai.source !== "keyring" ||
-    !settingsAfter.voyage.configured ||
+    !settingsAfter.openai.enabled ||
+    !settingsAfter.voyage.enabled ||
+    !settingsAfter.ollama.enabled ||
     !settingsAfter.ollama.available ||
-    settingsAfter.ollama.model !== "qwen3-embedding:0.6b" ||
-    settingsAfter.openai.model !== "text-embedding-3-small" ||
-    settingsAfter.voyage.model !== "voyage-4-lite" ||
-    settingsAfter.preferredProvider !== "openai" ||
-    settingsAfter.timeoutMs !== 10000
+    !settingsAfter.local.enabled
   ) {
-    throw new Error("Settings should persist keys in keyring and non-secrets in SQLite");
-  }
-  if (JSON.stringify(settingsAfter).includes("test-key")) {
-    throw new Error("Settings status must never echo secret values");
+    throw new Error("Explicit enable flags should turn indexes on");
   }
 
   // Models come from Settings (sqlite), not env.
@@ -331,7 +370,7 @@ async function main() {
     );
   }
 
-  updateSettingsKeys({ openaiApiKey: "" });
+  updateSettingsKeys({ openaiApiKey: "", openaiEnabled: false });
   const forcedFallback = await listSaves({
     q: "chef.daily",
     provider: "openai",
@@ -344,19 +383,28 @@ async function main() {
     throw new Error("Unconfigured provider request must fall back to local");
   }
 
-  // Env fallback still works when keyring entry is cleared.
+  // Env key alone must not enable; explicit enable + env key does.
   process.env.OPENAI_API_KEY = "env-fallback-key";
+  const envKeyOnly = getProviderAvailability();
+  if (envKeyOnly.configured.openai) {
+    throw new Error("OPENAI_API_KEY alone must not enable openai");
+  }
+  updateSettingsKeys({ openaiEnabled: true });
   const envAvailability = getProviderAvailability();
   if (!envAvailability.configured.openai) {
-    throw new Error("OPENAI_API_KEY env fallback should configure openai");
+    throw new Error("Enabled OpenAI with OPENAI_API_KEY env fallback should work");
   }
   delete process.env.OPENAI_API_KEY;
+  updateSettingsKeys({ openaiEnabled: false });
 
   // --- Indexes status + background reindex jobs ---
   updateSettingsKeys({
     openaiApiKey: "test-openai-key",
     voyageApiKey: "test-voyage-key",
+    openaiEnabled: true,
+    voyageEnabled: true,
     ollamaEnabled: true,
+    localEnabled: true,
   });
   const { getSearchIndexStatus } = await import("../src/lib/search/status");
   const {
@@ -372,12 +420,27 @@ async function main() {
   }
   const localStatus = statusBefore.providers.find((p) => p.provider === "local");
   if (!localStatus?.configured || localStatus.health === "unavailable") {
-    throw new Error("Local provider should always be configured");
+    throw new Error("Local provider should be enabled by default / for status test");
   }
   const openaiStatus = statusBefore.providers.find((p) => p.provider === "openai");
-  if (!openaiStatus?.configured) {
-    throw new Error("OpenAI should be configured for status test");
+  if (!openaiStatus?.configured || !openaiStatus.enabled) {
+    throw new Error("OpenAI should be enabled and credentialed for status test");
   }
+  updateSettingsKeys({ openaiEnabled: false });
+  const disabledOpenAi = getSearchIndexStatus().providers.find(
+    (p) => p.provider === "openai",
+  );
+  if (
+    disabledOpenAi?.configured ||
+    disabledOpenAi?.enabled ||
+    !disabledOpenAi?.hasCredentials ||
+    disabledOpenAi.health !== "unavailable"
+  ) {
+    throw new Error(
+      "Disabled OpenAI with saved credentials should report credentials + unavailable",
+    );
+  }
+  updateSettingsKeys({ openaiEnabled: true });
 
   // Clear openai vectors to simulate a newly enabled / empty index.
   sqlite.exec(`DELETE FROM saved_items_vec_openai`);

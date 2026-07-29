@@ -332,14 +332,14 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
     if (!anyConfigured) {
       return {
         ok: false,
-        error: "No providers are configured",
+        error: "No providers are enabled (and credentialed where required)",
         status: 400,
       };
     }
   } else if (!isProviderConfigured(target)) {
     return {
       ok: false,
-      error: `${target} is not configured — enable it in Settings first`,
+      error: `${target} is not enabled — turn it on in Settings (and add credentials if needed)`,
       status: 400,
     };
   }
