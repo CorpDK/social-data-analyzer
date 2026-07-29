@@ -1,7 +1,9 @@
 import { NextResponse } from "next/server";
 import {
+  ensureJobRunner,
   getActiveEmbeddingJob,
-  getLatestEmbeddingJob,
+  getDisplayEmbeddingJob,
+  getPendingEmbeddingJobs,
   parseReindexTarget,
   startReindexJob,
 } from "@/lib/search/jobs";
@@ -12,9 +14,11 @@ export const dynamic = "force-dynamic";
 /** Current / latest reindex job progress (also included in GET /api/search/status). */
 export async function GET() {
   try {
+    ensureJobRunner();
     const active = getActiveEmbeddingJob();
     return NextResponse.json({
-      job: active ?? getLatestEmbeddingJob(),
+      job: active ?? getDisplayEmbeddingJob(),
+      pendingJobs: getPendingEmbeddingJobs(),
       cancelSupported: true,
     });
   } catch (error) {
@@ -31,7 +35,11 @@ export async function GET() {
 
 /**
  * Start a background reindex on the Node process.
- * Returns immediately with the job record; poll GET for progress.
+ * Returns immediately with the job record(s); poll GET / status for progress.
+ *
+ * `provider: "all-configured"` expands to one job per enabled+usable provider
+ * (queued behind any currently running job; skips providers that already have
+ * a pending/running job).
  */
 export async function POST(request: Request) {
   try {
@@ -61,12 +69,19 @@ export async function POST(request: Request) {
     const result = startReindexJob(target);
     if (!result.ok) {
       return NextResponse.json(
-        { error: result.error, job: result.job ?? null },
+        {
+          error: result.error,
+          job: result.job ?? null,
+          jobs: result.jobs ?? null,
+        },
         { status: result.status },
       );
     }
 
-    return NextResponse.json({ job: result.job }, { status: 202 });
+    return NextResponse.json(
+      { job: result.job, jobs: result.jobs },
+      { status: 202 },
+    );
   } catch (error) {
     console.error("Failed to start reindex", error);
     return NextResponse.json(

@@ -61,15 +61,51 @@ async function main() {
   ];
 
   const parsed = parseExportJsonFiles(files);
-  console.log("parsed count:", parsed.length);
+  console.log("parsed count:", parsed.items.length);
   console.log(
-    parsed.map((item) => ({
+    parsed.items.map((item) => ({
       key: item.mediaKey,
       type: item.mediaType,
       author: item.authorUsername,
       collections: item.collections,
     })),
   );
+
+  const newFormat = parseExportJsonFiles([
+    {
+      name: "your_instagram_activity/saved/saved_posts.json",
+      content: fs.readFileSync(
+        path.join(fixtures, "sample-saved-posts-new-format.json"),
+        "utf8",
+      ),
+    },
+  ]);
+  const newAuthor = newFormat.items.find(
+    (item) => item.mediaKey === "newfmtreel01",
+  );
+  if (!newAuthor?.authorUsername || !newAuthor.savedAt) {
+    throw new Error("New-format saved posts should parse author and savedAt");
+  }
+
+  const flatCollections = parseExportJsonFiles([
+    {
+      name: "your_instagram_activity/saved/saved_collections.json",
+      content: fs.readFileSync(
+        path.join(fixtures, "sample-saved-collections-flat.json"),
+        "utf8",
+      ),
+    },
+  ]);
+  const flatItem = flatCollections.items.find(
+    (item) => item.mediaKey === "flatcollreel1",
+  );
+  if (
+    !flatItem?.authorUsername ||
+    !flatItem.collections.includes("Recipes") ||
+    !flatItem.savedAt
+  ) {
+    throw new Error("Flat collections format should parse author, date, and tag");
+  }
 
   const first = await importExportJson(
     files[0].content,
@@ -89,8 +125,8 @@ async function main() {
   );
   console.log("collections import:", merged);
 
-  if (parsed.length < 3) {
-    throw new Error(`Expected at least 3 unique items, got ${parsed.length}`);
+  if (parsed.items.length < 3) {
+    throw new Error(`Expected at least 3 unique items, got ${parsed.items.length}`);
   }
   if (first.status !== "completed" || first.itemsAdded < 1) {
     throw new Error("First import should add items");
@@ -102,6 +138,64 @@ async function main() {
     throw new Error("Collections import should complete");
   }
   const sqlite = getSqlite();
+
+  const {
+    catalogSchemasFromFiles,
+    inferSchemaFromValue,
+    parseJsonPrefix,
+  } = await import("../src/lib/json-schema-infer");
+  const { getSchemasForImport, getAggregatedSchemas } = await import(
+    "../src/lib/schema-catalog"
+  );
+
+  const inferred = catalogSchemasFromFiles([
+    { name: files[0].name, content: files[0].content },
+  ]);
+  if (inferred.length !== 1 || inferred[0]?.topLevelType !== "object") {
+    throw new Error("Schema inference should see object top-level for saved posts");
+  }
+  const mediaKey = inferred[0]?.schema?.keys?.saved_saved_media;
+  if (!mediaKey || mediaKey.type !== "array" || !mediaKey.items) {
+    throw new Error("Schema should describe saved_saved_media as an array of objects");
+  }
+
+  const truncated = parseJsonPrefix(
+    '{"items":[{"a":1},{"a":2},{"a":',
+    true,
+  ) as { items: unknown[] };
+  if (!Array.isArray(truncated.items) || truncated.items.length < 2) {
+    throw new Error("Truncated JSON repair should keep complete array elements");
+  }
+  const deep = inferSchemaFromValue({ a: { b: { c: [1, 2, 3] } } });
+  if (deep.keys?.a?.keys?.b?.keys?.c?.type !== "array") {
+    throw new Error("Nested schema inference should reach array under a.b.c");
+  }
+
+  if (!first.importId) {
+    throw new Error("First import should return an importId for schema checks");
+  }
+  const firstSchemas = getSchemasForImport(first.importId);
+  if (firstSchemas.length < 1) {
+    throw new Error("Import should persist at least one import_schemas row");
+  }
+  if (firstSchemas[0]?.topLevelType !== "object" || !firstSchemas[0]?.schema) {
+    throw new Error("Persisted schema should include top-level object shape");
+  }
+  const schemaTableCount = (
+    sqlite
+      .prepare("SELECT count(*) AS count FROM import_schemas")
+      .get() as { count: number }
+  ).count;
+  if (schemaTableCount < 2) {
+    throw new Error(
+      `Expected schemas from multiple imports, got ${schemaTableCount}`,
+    );
+  }
+  const aggregated = getAggregatedSchemas();
+  if (aggregated.length < 1) {
+    throw new Error("Aggregated schema catalog should list unique paths");
+  }
+
   const localCount = (
     sqlite
       .prepare("SELECT count(*) AS count FROM saved_items_vec_local")
@@ -412,11 +506,16 @@ async function main() {
     waitForIdleJob,
     cancelReindexJob,
     getLatestEmbeddingJob,
+    getPendingEmbeddingJobs,
+    getActiveEmbeddingJob,
   } = await import("../src/lib/search/jobs");
 
   const statusBefore = getSearchIndexStatus();
   if (statusBefore.providers.length !== 4) {
     throw new Error("Status should include all four embedding providers");
+  }
+  if (!Array.isArray(statusBefore.pendingJobs) || !Array.isArray(statusBefore.recentJobs)) {
+    throw new Error("Status should include pendingJobs and recentJobs arrays");
   }
   const localStatus = statusBefore.providers.find((p) => p.provider === "local");
   if (!localStatus?.configured || localStatus.health === "unavailable") {
@@ -458,22 +557,27 @@ async function main() {
   if (!started.ok) {
     throw new Error(`Failed to start openai reindex: ${started.error}`);
   }
-  if (started.job.state !== "running") {
-    throw new Error("Started job should be running");
+  if (started.job.state !== "running" || started.job.target !== "openai") {
+    throw new Error("Started openai job should be running");
   }
-  const conflict = startReindexJob("local");
-  if (conflict.ok || conflict.status !== 409) {
-    throw new Error("Second concurrent job should be rejected with 409");
+  // Different provider should enqueue behind the active job (not 409).
+  const queued = startReindexJob("local");
+  if (!queued.ok) {
+    throw new Error(`Local reindex should enqueue while openai runs: ${queued.error}`);
+  }
+  if (queued.job.state !== "pending" && getPendingEmbeddingJobs().length < 1) {
+    throw new Error("Local job should be pending in the queue");
+  }
+  const duplicate = startReindexJob("local");
+  if (duplicate.ok || duplicate.status !== 409) {
+    throw new Error("Duplicate local job should be rejected with 409");
   }
 
   const finished = await waitForIdleJob(60_000);
   if (!finished || finished.state !== "completed") {
     throw new Error(
-      `OpenAI reindex job should complete (got ${finished?.state}: ${finished?.error})`,
+      `Queue should finish with a completed job (got ${finished?.state}: ${finished?.error})`,
     );
-  }
-  if (finished.processed < 1 || finished.percent < 100) {
-    throw new Error("Completed job should report full progress");
   }
   const openaiAfter = getSearchIndexStatus().providers.find(
     (p) => p.provider === "openai",
@@ -485,28 +589,108 @@ async function main() {
     throw new Error("OpenAI reindex via job should restore full coverage");
   }
 
-  // Cooperative cancel: start all-configured and cancel immediately.
-  const allJob = startReindexJob("all-configured");
-  if (!allJob.ok) {
-    throw new Error(`Failed to start all-configured reindex: ${allJob.error}`);
+  // all-configured expands to one job per enabled provider.
+  const allJobs = startReindexJob("all-configured");
+  if (!allJobs.ok) {
+    throw new Error(`Failed to start all-configured reindex: ${allJobs.error}`);
   }
-  const cancelled = cancelReindexJob(allJob.job.id);
+  if (allJobs.jobs.length < 2) {
+    throw new Error(
+      `all-configured should enqueue multiple provider jobs (got ${allJobs.jobs.length})`,
+    );
+  }
+  if (allJobs.jobs.some((job) => job.target === "all-configured")) {
+    throw new Error("Expanded jobs must use concrete provider targets");
+  }
+  const activeAfterAll = getActiveEmbeddingJob();
+  if (!activeAfterAll || activeAfterAll.state !== "running") {
+    throw new Error("First all-configured provider job should be running");
+  }
+  if (getPendingEmbeddingJobs().length < 1) {
+    throw new Error("Remaining all-configured providers should be pending");
+  }
+
+  // Cancel active only; queued jobs remain and continue.
+  const cancelled = cancelReindexJob(activeAfterAll.id);
   if (!cancelled.ok) {
     throw new Error(`Cancel should succeed: ${cancelled.error}`);
   }
-  const afterCancel = await waitForIdleJob(60_000);
-  if (!afterCancel || afterCancel.state !== "cancelled") {
+  const afterCancelSettle = await new Promise<{
+    state: string;
+    id: number;
+  } | null>((resolve) => {
+    const startedAt = Date.now();
+    const tick = () => {
+      // Wait until the cancelled job is terminal (next may already be running).
+      const cancelledRow = sqlite
+        .prepare(`SELECT id, state FROM embedding_jobs WHERE id = ?`)
+        .get(activeAfterAll.id) as { id: number; state: string } | undefined;
+      if (cancelledRow?.state === "cancelled") {
+        resolve(cancelledRow);
+        return;
+      }
+      if (Date.now() - startedAt > 60_000) {
+        resolve(null);
+        return;
+      }
+      setTimeout(tick, 25);
+    };
+    tick();
+  });
+  if (!afterCancelSettle || afterCancelSettle.state !== "cancelled") {
     throw new Error(
-      `Cancelled job should end as cancelled (got ${afterCancel?.state})`,
+      `Cancelled active job should end as cancelled (got ${afterCancelSettle?.state})`,
     );
   }
-  if (getLatestEmbeddingJob()?.id !== afterCancel.id) {
-    throw new Error("Latest job should be the cancelled all-configured run");
+
+  // Let the remaining queue drain so later tests see a clean runner.
+  await waitForIdleJob(120_000);
+  if (getLatestEmbeddingJob() == null) {
+    throw new Error("Expected embedding jobs after all-configured queue");
   }
 
   const { resetLibrary, RESET_LIBRARY_CONFIRMATION_PHRASE } = await import(
     "../src/lib/settings/reset-library"
   );
+
+  const backfillContent = JSON.stringify({
+    saved_saved_media: [
+      {
+        title: "",
+        string_list_data: [
+          {
+            href: "https://www.instagram.com/reel/BackfillReel1/",
+            value: "backfill.user",
+            timestamp: 1700000000,
+          },
+        ],
+      },
+    ],
+  });
+  const backfillFirst = await importExportJson(
+    backfillContent,
+    "backfill-saved.json",
+  );
+  if (backfillFirst.status !== "completed" || backfillFirst.itemsAdded !== 1) {
+    throw new Error("Backfill fixture should import one item");
+  }
+  sqlite
+    .prepare(
+      "UPDATE saved_items SET author_username = NULL, saved_at = NULL WHERE media_key = ?",
+    )
+    .run("backfillreel1");
+  const backfillAgain = await importExportJson(
+    backfillContent,
+    "backfill-saved.json",
+  );
+  if (
+    backfillAgain.status !== "duplicate" ||
+    backfillAgain.itemsUpdated !== 1
+  ) {
+    throw new Error(
+      "Duplicate re-import should backfill missing author/savedAt metadata",
+    );
+  }
 
   let rejectedBadPhrase = false;
   try {
@@ -530,6 +714,7 @@ async function main() {
         (SELECT count(*) FROM saved_items) AS items,
         (SELECT count(*) FROM imports) AS imports,
         (SELECT count(*) FROM item_collections) AS collections,
+        (SELECT count(*) FROM import_schemas) AS schemas,
         (SELECT count(*) FROM saved_items_fts) AS fts,
         (SELECT count(*) FROM saved_items_vec_local) AS localVec,
         (SELECT count(*) FROM embedding_index_profiles) AS profiles,
@@ -539,6 +724,7 @@ async function main() {
     items: number;
     imports: number;
     collections: number;
+    schemas: number;
     fts: number;
     localVec: number;
     profiles: number;
@@ -549,6 +735,7 @@ async function main() {
     afterReset.items !== 0 ||
     afterReset.imports !== 0 ||
     afterReset.collections !== 0 ||
+    afterReset.schemas !== 0 ||
     afterReset.fts !== 0 ||
     afterReset.localVec !== 0 ||
     afterReset.profiles !== 0

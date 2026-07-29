@@ -84,8 +84,44 @@ export const itemCollections = sqliteTable(
   ],
 );
 
+export const importSchemas = sqliteTable(
+  "import_schemas",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    importId: integer("import_id")
+      .notNull()
+      .references(() => imports.id, { onDelete: "cascade" }),
+    filePath: text("file_path").notNull(),
+    byteSize: integer("byte_size").notNull().default(0),
+    truncatedRead: integer("truncated_read", { mode: "boolean" })
+      .notNull()
+      .default(false),
+    topLevelType: text("top_level_type").notNull().default("unknown"),
+    schemaJson: text("schema_json").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    uniqueIndex("import_schemas_import_path_uidx").on(
+      table.importId,
+      table.filePath,
+    ),
+    index("import_schemas_import_id_idx").on(table.importId),
+    index("import_schemas_file_path_idx").on(table.filePath),
+  ],
+);
+
 export const importsRelations = relations(imports, ({ many }) => ({
   items: many(savedItems),
+  schemas: many(importSchemas),
+}));
+
+export const importSchemasRelations = relations(importSchemas, ({ one }) => ({
+  import: one(imports, {
+    fields: [importSchemas.importId],
+    references: [imports.id],
+  }),
 }));
 
 export const savedItemsRelations = relations(savedItems, ({ one, many }) => ({
@@ -115,3 +151,4 @@ export const itemCollectionsRelations = relations(
 export type Import = typeof imports.$inferSelect;
 export type SavedItem = typeof savedItems.$inferSelect;
 export type ItemCollection = typeof itemCollections.$inferSelect;
+export type ImportSchema = typeof importSchemas.$inferSelect;

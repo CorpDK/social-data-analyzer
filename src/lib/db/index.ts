@@ -17,7 +17,7 @@ const dbPath =
  * Bump whenever the idempotent schema below gains or changes a table/index.
  * Development re-applies it once per module evaluation for hot-reload safety.
  */
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 const globalForDb = globalThis as unknown as {
   sqlite?: Database.Database;
@@ -102,6 +102,24 @@ function ensureDatabaseSchema(sqlite: Database.Database) {
       value TEXT NOT NULL,
       updated_at INTEGER NOT NULL DEFAULT (unixepoch())
     );
+
+    CREATE TABLE IF NOT EXISTS import_schemas (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      import_id INTEGER NOT NULL REFERENCES imports(id) ON DELETE CASCADE,
+      file_path TEXT NOT NULL,
+      byte_size INTEGER NOT NULL DEFAULT 0,
+      truncated_read INTEGER NOT NULL DEFAULT 0,
+      top_level_type TEXT NOT NULL DEFAULT 'unknown',
+      schema_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS import_schemas_import_path_uidx
+      ON import_schemas (import_id, file_path);
+    CREATE INDEX IF NOT EXISTS import_schemas_import_id_idx
+      ON import_schemas (import_id);
+    CREATE INDEX IF NOT EXISTS import_schemas_file_path_idx
+      ON import_schemas (file_path);
   `);
 
   ensureEmbeddingJobsTable(sqlite);

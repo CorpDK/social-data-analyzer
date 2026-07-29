@@ -79,12 +79,30 @@ function readStoredProvider(): EmbeddingProvider | null {
   return isProvider(stored) ? stored : null;
 }
 
+function resolveProvider(
+  providerParam: string | null,
+  providers: ProviderInfo | null,
+): EmbeddingProvider {
+  if (
+    isProvider(providerParam) &&
+    (!providers || providers.available.includes(providerParam))
+  ) {
+    return providerParam;
+  }
+  const stored = readStoredProvider();
+  if (stored && (!providers || providers.available.includes(stored))) {
+    return stored;
+  }
+  return providers?.default ?? "local";
+}
+
 export function SavesBrowser() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
 
   const [data, setData] = useState<SavesResponse | null>(null);
+  const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<ProviderInfo | null>(null);
   const [filters, setFilters] = useState<FilterOptions>({
     authors: [],
@@ -98,12 +116,9 @@ export function SavesBrowser() {
   const collection = searchParams.get("collection") ?? "";
   const page = Number(searchParams.get("page") ?? "1");
   const providerParam = searchParams.get("provider");
+  const searchKey = searchParams.toString();
 
-  const activeProvider =
-    (providerParam as EmbeddingProvider | null) ??
-    readStoredProvider() ??
-    providers?.default ??
-    "local";
+  const activeProvider = resolveProvider(providerParam, providers);
 
   const updateParams = useCallback(
     (patch: Record<string, string | null>) => {
@@ -120,8 +135,10 @@ export function SavesBrowser() {
           window.localStorage.setItem(PROVIDER_STORAGE_KEY, providerValue);
         }
       }
+      const nextKey = next.toString();
+      if (nextKey === searchParams.toString()) return;
       startTransition(() => {
-        router.push(`/saves?${next.toString()}`);
+        router.push(nextKey ? `/saves?${nextKey}` : "/saves");
       });
     },
     [router, searchParams, providers],
@@ -148,36 +165,58 @@ export function SavesBrowser() {
   }, []);
 
   useEffect(() => {
-    if (!providers) return;
-    const fromUrl = providerParam as EmbeddingProvider | null;
-    const stored = readStoredProvider();
-    const desired =
-      fromUrl && providers.available.includes(fromUrl)
-        ? fromUrl
-        : stored && providers.available.includes(stored)
-          ? stored
-          : providers.default;
+    let cancelled = false;
 
-    if (
-      desired &&
-      desired !== providerParam &&
-      (providerParam || stored || desired !== "local")
-    ) {
-      const next = new URLSearchParams(searchParams.toString());
-      if (desired === providers.default) next.delete("provider");
-      else next.set("provider", desired);
-      window.localStorage.setItem(PROVIDER_STORAGE_KEY, desired);
-      startTransition(() => {
-        router.replace(`/saves?${next.toString()}`);
-      });
+    async function loadFilters() {
+      try {
+        const res = await fetch("/api/imports");
+        if (!res.ok) return;
+        const json = (await res.json()) as { filters?: FilterOptions };
+        if (!cancelled) {
+          setFilters(json.filters ?? { authors: [], collections: [] });
+        }
+      } catch {
+        // Filter options are optional for rendering.
+      }
     }
-  }, [providers, providerParam, router, searchParams]);
+
+    void loadFilters();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Canonicalize provider in the URL once providers are known.
+  // Omit `provider` when it equals the server default. Only navigate when
+  // the serialized query string would actually change — otherwise a default
+  // of "ollama" (or any non-"local") with no URL param loops forever via
+  // router.replace → new searchParams → effect → replace.
+  useEffect(() => {
+    if (!providers) return;
+
+    const desired = resolveProvider(providerParam, providers);
+    const next = new URLSearchParams(searchKey);
+    if (desired === providers.default) next.delete("provider");
+    else next.set("provider", desired);
+
+    const nextKey = next.toString();
+    if (nextKey === searchKey) {
+      window.localStorage.setItem(PROVIDER_STORAGE_KEY, desired);
+      return;
+    }
+
+    window.localStorage.setItem(PROVIDER_STORAGE_KEY, desired);
+    startTransition(() => {
+      router.replace(nextKey ? `/saves?${nextKey}` : "/saves");
+    });
+  }, [providers, providerParam, router, searchKey]);
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
 
     async function load() {
       setError(null);
+      setLoading(true);
       try {
         const params = new URLSearchParams();
         if (q) params.set("q", q);
@@ -188,36 +227,35 @@ export function SavesBrowser() {
         params.set("page", String(page || 1));
         params.set("pageSize", "25");
 
-        const [savesRes, importsRes] = await Promise.all([
-          fetch(`/api/saves?${params.toString()}`),
-          fetch("/api/imports"),
-        ]);
+        const savesRes = await fetch(`/api/saves?${params.toString()}`, {
+          signal: controller.signal,
+        });
 
         if (!savesRes.ok) throw new Error("Failed to load saves");
         const savesJson = (await savesRes.json()) as SavesResponse;
-        const importsJson = (await importsRes.json()) as {
-          filters?: FilterOptions;
-        };
 
-        if (!cancelled) {
+        if (!controller.signal.aborted) {
           setData(savesJson);
-          setFilters(importsJson.filters ?? { authors: [], collections: [] });
         }
       } catch (err) {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "Failed to load");
+        if (controller.signal.aborted) return;
+        setError(err instanceof Error ? err.message : "Failed to load");
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
         }
       }
     }
 
     void load();
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [q, type, author, collection, page, activeProvider]);
 
   const providerOptions = providers?.available ?? ["local"];
   const showProviderControl = providerOptions.length > 1;
+  const isRefreshing = pending || loading;
 
   return (
     <div className="space-y-6">
@@ -371,7 +409,7 @@ export function SavesBrowser() {
             {data?.searchProvider && q.trim() !== ""
               ? ` · ${PROVIDER_LABELS[data.searchProvider]}`
               : ""}
-            {pending ? " · updating" : ""}
+            {data && isRefreshing ? " · updating" : ""}
           </span>
           {data?.providerFallback && data.providerFallbackReason ? (
             <span className="text-xs text-[var(--danger)]">
@@ -385,7 +423,11 @@ export function SavesBrowser() {
           ) : null}
         </div>
 
-        <div className="overflow-x-auto">
+        <div
+          className={`overflow-x-auto transition-opacity ${
+            data && isRefreshing ? "opacity-60" : "opacity-100"
+          }`}
+        >
           <table className="w-full min-w-[720px] text-left text-sm">
             <thead className="text-xs uppercase tracking-[0.12em] text-[var(--muted)]">
               <tr>

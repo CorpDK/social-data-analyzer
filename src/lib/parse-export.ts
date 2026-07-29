@@ -10,8 +10,17 @@ export type ParsedSavedItem = {
   collections: string[];
 };
 
+export type ParseResult = {
+  items: ParsedSavedItem[];
+  savedJsonFiles: string[];
+  warnings: string[];
+};
+
 const IG_URL_RE =
   /instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/i;
+
+const GENERIC_LABEL_RE =
+  /^(saved on|added time|saved post|saved|name|time)$/i;
 
 export function detectMediaType(href: string): MediaType {
   const lower = href.toLowerCase();
@@ -67,6 +76,85 @@ function readTimestamp(value: unknown): Date | null {
   return null;
 }
 
+function looksLikeUsername(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 64) return false;
+  if (GENERIC_LABEL_RE.test(trimmed)) return false;
+  if (/^https?:\/\//i.test(trimmed)) return false;
+  return /^[@a-z0-9._-]+$/i.test(trimmed);
+}
+
+function normalizeUsername(value: string): string {
+  return value.replace(/^@+/, "").trim();
+}
+
+function readStringListData(entry: Record<string, unknown>): {
+  href: string | null;
+  savedAt: Date | null;
+  value: string | null;
+} {
+  const list =
+    (Array.isArray(entry.string_list_data) && entry.string_list_data) ||
+    (Array.isArray(entry.stringListData) && entry.stringListData) ||
+    null;
+
+  if (!list) {
+    return { href: null, savedAt: null, value: null };
+  }
+
+  for (const raw of list) {
+    const data = asRecord(raw);
+    if (!data) continue;
+    const href = readString(data.href);
+    if (href) {
+      return {
+        href,
+        savedAt: readTimestamp(data.timestamp),
+        value: readString(data.value),
+      };
+    }
+  }
+
+  const first = asRecord(list[0]);
+  return {
+    href: null,
+    savedAt: first ? readTimestamp(first.timestamp) : null,
+    value: first ? readString(first.value) : null,
+  };
+}
+
+function readAuthorUsername(
+  entry: Record<string, unknown>,
+  listValue: string | null = null,
+): string | null {
+  const title = readString(entry.title);
+  if (title) return normalizeUsername(title);
+
+  if (listValue && looksLikeUsername(listValue)) {
+    return normalizeUsername(listValue);
+  }
+
+  const map = asRecord(entry.string_map_data) ?? asRecord(entry.stringMapData);
+  if (map) {
+    for (const [key, value] of Object.entries(map)) {
+      if (!/name|author|username|channel|creator|profile/i.test(key)) continue;
+      const data = asRecord(value);
+      const fromValue = readString(data?.value);
+      if (fromValue && looksLikeUsername(fromValue)) {
+        return normalizeUsername(fromValue);
+      }
+    }
+
+    const nameField = asRecord(map.Name) ?? asRecord(map.name);
+    const fromName = readString(nameField?.value);
+    if (fromName && looksLikeUsername(fromName)) {
+      return normalizeUsername(fromName);
+    }
+  }
+
+  return null;
+}
+
 function collectHrefs(node: unknown, out: string[] = []): string[] {
   if (!node) return out;
   if (typeof node === "string") {
@@ -92,35 +180,58 @@ function collectHrefs(node: unknown, out: string[] = []): string[] {
   return out;
 }
 
-function readSavedOn(
-  entry: Record<string, unknown>,
-): { href: string | null; savedAt: Date | null } {
+function readSavedOn(entry: Record<string, unknown>): {
+  href: string | null;
+  savedAt: Date | null;
+  value: string | null;
+} {
   const map = asRecord(entry.string_map_data) ?? asRecord(entry.stringMapData);
-  if (!map) {
-    return { href: null, savedAt: null };
-  }
+  if (map) {
+    for (const [key, value] of Object.entries(map)) {
+      if (!/saved|added|time/i.test(key)) continue;
+      const data = asRecord(value);
+      if (!data) continue;
+      const href = readString(data.href);
+      if (href) {
+        return {
+          href,
+          savedAt: readTimestamp(data.timestamp),
+          value: readString(data.value),
+        };
+      }
+    }
 
-  for (const [key, value] of Object.entries(map)) {
-    if (!/saved/i.test(key)) continue;
-    const data = asRecord(value);
-    if (!data) continue;
-    return {
-      href: readString(data.href),
-      savedAt: readTimestamp(data.timestamp),
-    };
-  }
-
-  // Fallback: first map entry with an href
-  for (const value of Object.values(map)) {
-    const data = asRecord(value);
-    if (!data) continue;
-    const href = readString(data.href);
+    // Flat collections: Name.href + Added Time.timestamp
+    const nameField = asRecord(map.Name) ?? asRecord(map.name);
+    const href = readString(nameField?.href);
     if (href) {
-      return { href, savedAt: readTimestamp(data.timestamp) };
+      const addedTime =
+        asRecord(map["Added Time"]) ??
+        asRecord(map["Saved on"]) ??
+        asRecord(map.Time);
+      return {
+        href,
+        savedAt: readTimestamp(addedTime?.timestamp),
+        value: readString(nameField?.value),
+      };
+    }
+
+    // Fallback: first map entry with an href
+    for (const value of Object.values(map)) {
+      const data = asRecord(value);
+      if (!data) continue;
+      const href = readString(data.href);
+      if (href) {
+        return {
+          href,
+          savedAt: readTimestamp(data.timestamp),
+          value: readString(data.value),
+        };
+      }
     }
   }
 
-  return { href: null, savedAt: null };
+  return readStringListData(entry);
 }
 
 function pushItem(
@@ -176,13 +287,13 @@ function parseSavedMediaArray(
     const entry = asRecord(raw);
     if (!entry) continue;
 
-    const title = readString(entry.title);
-    const { href, savedAt } = readSavedOn(entry);
+    const { href, savedAt, value } = readSavedOn(entry);
+    const authorUsername = readAuthorUsername(entry, value);
 
     if (href) {
       pushItem(items, {
         href,
-        authorUsername: title,
+        authorUsername,
         savedAt,
         collection,
       });
@@ -192,7 +303,7 @@ function parseSavedMediaArray(
     for (const found of collectHrefs(entry)) {
       pushItem(items, {
         href: found,
-        authorUsername: title,
+        authorUsername,
         savedAt,
         collection,
       });
@@ -222,6 +333,88 @@ function parseCollectionEntry(
 
   for (const found of collectHrefs(entry)) {
     pushItem(items, { href: found, collection: collectionName });
+  }
+}
+
+function isFlatCollectionEntry(entry: Record<string, unknown>): boolean {
+  const hasMediaList =
+    (Array.isArray(entry.media_list_data) && entry.media_list_data.length > 0) ||
+    (Array.isArray(entry.mediaListData) && entry.mediaListData.length > 0) ||
+    (Array.isArray(entry.saved_saved_media) && entry.saved_saved_media.length > 0);
+
+  if (hasMediaList) return false;
+
+  const map = asRecord(entry.string_map_data) ?? asRecord(entry.stringMapData);
+  if (map?.Name || map?.name) return true;
+
+  const list = readStringListData(entry);
+  return Boolean(list.href || list.value);
+}
+
+function parseFlatCollectionsArray(
+  entries: unknown[],
+  items: Map<string, ParsedSavedItem>,
+) {
+  let currentCollection: string | null = null;
+
+  for (const raw of entries) {
+    const entry = asRecord(raw);
+    if (!entry) continue;
+
+    const map = asRecord(entry.string_map_data) ?? asRecord(entry.stringMapData);
+    if (map) {
+      const nameField = asRecord(map.Name) ?? asRecord(map.name);
+      const href = readString(nameField?.href);
+      const value = readString(nameField?.value);
+
+      if (!href && value) {
+        currentCollection = value.trim();
+        continue;
+      }
+
+      if (href) {
+        const addedTime =
+          asRecord(map["Added Time"]) ??
+          asRecord(map["Saved on"]) ??
+          asRecord(map.Time);
+        pushItem(items, {
+          href,
+          authorUsername:
+            value && looksLikeUsername(value)
+              ? normalizeUsername(value)
+              : readAuthorUsername(entry, value),
+          savedAt: readTimestamp(addedTime?.timestamp),
+          collection: currentCollection,
+        });
+        continue;
+      }
+    }
+
+    const { href, savedAt, value } = readSavedOn(entry);
+
+    if (!href && value) {
+      currentCollection = value.trim();
+      continue;
+    }
+
+    if (href) {
+      pushItem(items, {
+        href,
+        authorUsername: readAuthorUsername(entry, value),
+        savedAt,
+        collection: currentCollection,
+      });
+      continue;
+    }
+
+    for (const found of collectHrefs(entry)) {
+      pushItem(items, {
+        href: found,
+        authorUsername: readAuthorUsername(entry, value),
+        savedAt,
+        collection: currentCollection,
+      });
+    }
   }
 }
 
@@ -258,9 +451,18 @@ function parseJsonDocument(
     null;
 
   if (collections) {
-    for (const raw of collections) {
+    const looksFlat = collections.some((raw) => {
       const entry = asRecord(raw);
-      if (entry) parseCollectionEntry(entry, items);
+      return entry ? isFlatCollectionEntry(entry) : false;
+    });
+
+    if (looksFlat) {
+      parseFlatCollectionsArray(collections, items);
+    } else {
+      for (const raw of collections) {
+        const entry = asRecord(raw);
+        if (entry) parseCollectionEntry(entry, items);
+      }
     }
   }
 
@@ -272,39 +474,52 @@ function parseJsonDocument(
   }
 }
 
+function shouldParseJsonFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (!lower.endsWith(".json")) return false;
+  if (lower.includes("__macosx") || lower.split("/").pop()?.startsWith(".")) {
+    return false;
+  }
+
+  return (
+    lower.includes("saved") ||
+    lower.includes("collection") ||
+    /(^|\/)(posts?|reels?)\.json$/.test(lower)
+  );
+}
+
+function isSavedJsonFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  return lower.includes("saved") || lower.includes("collection");
+}
+
 export function parseExportJsonFiles(
   files: Array<{ name: string; content: string }>,
-): ParsedSavedItem[] {
+): ParseResult {
   const items = new Map<string, ParsedSavedItem>();
+  const savedJsonFiles: string[] = [];
+  const warnings: string[] = [];
 
   for (const file of files) {
-    const lower = file.name.toLowerCase();
-    const looksRelevant =
-      lower.includes("saved") ||
-      lower.includes("collection") ||
-      lower.endsWith(".json");
+    if (!shouldParseJsonFile(file.name)) continue;
 
-    if (!looksRelevant || !lower.endsWith(".json")) continue;
-    // Skip huge unrelated dumps unless path suggests saved content
-    if (
-      !lower.includes("saved") &&
-      !lower.includes("collection") &&
-      !/(^|\/)(posts?|reels?)\.json$/.test(lower)
-    ) {
-      continue;
+    if (isSavedJsonFile(file.name)) {
+      savedJsonFiles.push(file.name);
     }
 
     try {
       const json = JSON.parse(file.content) as unknown;
       parseJsonDocument(json, items, file.name);
     } catch {
-      // Ignore malformed JSON files in the archive
+      warnings.push(`Skipped malformed JSON: ${file.name}`);
     }
   }
 
-  return [...items.values()].sort((a, b) => {
+  const parsedItems = [...items.values()].sort((a, b) => {
     const at = a.savedAt?.getTime() ?? 0;
     const bt = b.savedAt?.getTime() ?? 0;
     return bt - at;
   });
+
+  return { items: parsedItems, savedJsonFiles, warnings };
 }

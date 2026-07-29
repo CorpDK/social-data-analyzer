@@ -8,6 +8,7 @@ const links = [
   { href: "/", label: "Overview" },
   { href: "/saves", label: "Saves" },
   { href: "/indexes", label: "Indexes" },
+  { href: "/schemas", label: "Schemas" },
   { href: "/import", label: "Import" },
   { href: "/settings", label: "Settings" },
 ];

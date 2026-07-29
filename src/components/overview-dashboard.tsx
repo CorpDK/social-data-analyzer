@@ -146,6 +146,7 @@ export function OverviewDashboard() {
                   <th className="pb-2 font-medium">Added</th>
                   <th className="pb-2 font-medium">Updated</th>
                   <th className="pb-2 font-medium">Skipped</th>
+                  <th className="pb-2 font-medium">Log</th>
                 </tr>
               </thead>
               <tbody>
@@ -167,6 +168,14 @@ export function OverviewDashboard() {
                     </td>
                     <td className="py-3 font-[family-name:var(--font-ibm)]">
                       {row.itemsSkipped}
+                    </td>
+                    <td className="py-3">
+                      <Link
+                        href={`/imports/${row.id}`}
+                        className="text-[var(--accent)] hover:underline"
+                      >
+                        Details
+                      </Link>
                     </td>
                   </tr>
                 ))}

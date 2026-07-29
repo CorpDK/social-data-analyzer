@@ -9,11 +9,13 @@ import {
   rebuildProviderIndex,
   type RebuildProgress,
 } from "./sync";
-import { isProviderConfigured } from "./providers";
+import { configuredProviders, isProviderConfigured } from "./providers";
 
+/** API accept target; persisted jobs use a concrete provider (never all-configured). */
 export type EmbeddingJobTarget = EmbeddingProvider | "all-configured";
 
 export type EmbeddingJobState =
+  | "pending"
   | "running"
   | "completed"
   | "failed"
@@ -98,7 +100,11 @@ function mapJobRow(row: {
   const total = row.total;
   const processed = row.processed;
   const percent =
-    total <= 0 ? (row.state === "completed" ? 100 : 0) : Math.min(100, Math.round((processed / total) * 1000) / 10);
+    total <= 0
+      ? row.state === "completed"
+        ? 100
+        : 0
+      : Math.min(100, Math.round((processed / total) * 1000) / 10);
 
   return {
     id: row.id,
@@ -118,6 +124,10 @@ function mapJobRow(row: {
   };
 }
 
+const JOB_SELECT = `SELECT id, target, state, phase, processed, total, current_provider,
+              error, message, cancel_requested, started_at, finished_at, updated_at
+       FROM embedding_jobs`;
+
 export function parseReindexTarget(
   value: unknown,
 ): EmbeddingJobTarget | null {
@@ -130,21 +140,23 @@ export function parseReindexTarget(
 
 export function getEmbeddingJob(id: number): EmbeddingJobRecord | null {
   const row = getSqlite()
-    .prepare(
-      `SELECT id, target, state, phase, processed, total, current_provider,
-              error, message, cancel_requested, started_at, finished_at, updated_at
-       FROM embedding_jobs WHERE id = ?`,
-    )
+    .prepare(`${JOB_SELECT} WHERE id = ?`)
     .get(id) as Parameters<typeof mapJobRow>[0] | undefined;
   return row ? mapJobRow(row) : null;
 }
 
 export function getLatestEmbeddingJob(): EmbeddingJobRecord | null {
   const row = getSqlite()
+    .prepare(`${JOB_SELECT} ORDER BY id DESC LIMIT 1`)
+    .get() as Parameters<typeof mapJobRow>[0] | undefined;
+  return row ? mapJobRow(row) : null;
+}
+
+export function getLatestFinishedEmbeddingJob(): EmbeddingJobRecord | null {
+  const row = getSqlite()
     .prepare(
-      `SELECT id, target, state, phase, processed, total, current_provider,
-              error, message, cancel_requested, started_at, finished_at, updated_at
-       FROM embedding_jobs
+      `${JOB_SELECT}
+       WHERE state IN ('completed', 'failed', 'cancelled')
        ORDER BY id DESC
        LIMIT 1`,
     )
@@ -155,14 +167,81 @@ export function getLatestEmbeddingJob(): EmbeddingJobRecord | null {
 export function getActiveEmbeddingJob(): EmbeddingJobRecord | null {
   const row = getSqlite()
     .prepare(
-      `SELECT id, target, state, phase, processed, total, current_provider,
-              error, message, cancel_requested, started_at, finished_at, updated_at
-       FROM embedding_jobs
+      `${JOB_SELECT}
        WHERE state = 'running'
-       ORDER BY id DESC
+       ORDER BY id ASC
        LIMIT 1`,
     )
     .get() as Parameters<typeof mapJobRow>[0] | undefined;
+  return row ? mapJobRow(row) : null;
+}
+
+export function getPendingEmbeddingJobs(): EmbeddingJobRecord[] {
+  const rows = getSqlite()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE state = 'pending'
+       ORDER BY id ASC`,
+    )
+    .all() as Parameters<typeof mapJobRow>[0][];
+  return rows.map(mapJobRow);
+}
+
+/** Recent terminal jobs (completed / failed / cancelled), newest first. */
+export function getRecentEmbeddingJobs(limit = 8): EmbeddingJobRecord[] {
+  const rows = getSqlite()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE state IN ('completed', 'failed', 'cancelled')
+       ORDER BY id DESC
+       LIMIT ?`,
+    )
+    .all(limit) as Parameters<typeof mapJobRow>[0][];
+  return rows.map(mapJobRow);
+}
+
+const DEFAULT_JOB_LIST_LIMIT = 50;
+const MAX_JOB_LIST_LIMIT = 100;
+
+/** All embedding jobs newest-first (running/pending mixed with finished by id). */
+export function listEmbeddingJobs(options?: {
+  limit?: number;
+  offset?: number;
+}): { jobs: EmbeddingJobRecord[]; total: number; limit: number; offset: number } {
+  const limit = Math.min(
+    Math.max(1, Math.floor(options?.limit ?? DEFAULT_JOB_LIST_LIMIT)),
+    MAX_JOB_LIST_LIMIT,
+  );
+  const offset = Math.max(0, Math.floor(options?.offset ?? 0));
+  const sqlite = getSqlite();
+  const total = (
+    sqlite.prepare(`SELECT count(*) AS c FROM embedding_jobs`).get() as {
+      c: number;
+    }
+  ).c;
+  const rows = sqlite
+    .prepare(`${JOB_SELECT} ORDER BY id DESC LIMIT ? OFFSET ?`)
+    .all(limit, offset) as Parameters<typeof mapJobRow>[0][];
+  return { jobs: rows.map(mapJobRow), total, limit, offset };
+}
+
+/** Active job if any, else the latest finished job (for status display). */
+export function getDisplayEmbeddingJob(): EmbeddingJobRecord | null {
+  return getActiveEmbeddingJob() ?? getLatestFinishedEmbeddingJob();
+}
+
+function getOpenJobForProvider(
+  provider: EmbeddingProvider,
+): EmbeddingJobRecord | null {
+  const row = getSqlite()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE target = ?
+         AND state IN ('pending', 'running')
+       ORDER BY id ASC
+       LIMIT 1`,
+    )
+    .get(provider) as Parameters<typeof mapJobRow>[0] | undefined;
   return row ? mapJobRow(row) : null;
 }
 
@@ -243,6 +322,27 @@ function shouldCancel(jobId: number): boolean {
   return Boolean(row?.c);
 }
 
+function insertPendingJob(target: EmbeddingProvider): EmbeddingJobRecord {
+  const sqlite = getSqlite();
+  const totalItems = (
+    sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
+      c: number;
+    }
+  ).c;
+
+  const info = sqlite
+    .prepare(
+      `INSERT INTO embedding_jobs(
+        target, state, phase, processed, total, current_provider, message
+      ) VALUES (?, 'pending', 'queued', 0, ?, NULL, ?)`,
+    )
+    .run(target, totalItems, `Queued rebuild for ${target}`);
+
+  const job = getEmbeddingJob(Number(info.lastInsertRowid));
+  if (!job) throw new Error("Failed to create embedding job");
+  return job;
+}
+
 async function executeJob(jobId: number, target: EmbeddingJobTarget) {
   const state = runner();
   try {
@@ -250,6 +350,7 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
       applyProgress(jobId, progress);
     const cancel = () => shouldCancel(jobId);
 
+    // Legacy rows may still use all-configured; new code never creates them.
     if (target === "all-configured") {
       const result = await rebuildConfiguredIndexes({
         onProgress,
@@ -299,44 +400,110 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
   } finally {
     state.cancelFlags.delete(jobId);
     if (state.activeJobId === jobId) state.activeJobId = null;
+    // Start the next pending job (if any) after this one settles.
+    pumpQueue();
   }
 }
 
+/** Promote the oldest pending job to running when the runner is idle. */
+function pumpQueue() {
+  const state = runner();
+  if (state.activeJobId !== null) return;
+
+  // DB may still say "running" after a crash — reclaim before starting another.
+  const dbActive = getActiveEmbeddingJob();
+  if (dbActive) {
+    reclaimOrphanedJobs();
+  }
+
+  const next = getPendingEmbeddingJobs()[0];
+  if (!next) return;
+
+  updateJob(next.id, {
+    state: "running",
+    phase: "queued",
+    message: `Starting rebuild for ${next.target}`,
+  });
+
+  state.activeJobId = next.id;
+  state.cancelFlags.set(next.id, false);
+  void executeJob(next.id, next.target);
+}
+
+/**
+ * Reclaim orphaned running rows and resume the pending queue after restart/HMR.
+ * Safe to call from status polls.
+ */
+export function ensureJobRunner() {
+  const state = runner();
+  if (state.activeJobId !== null) return;
+  reclaimOrphanedJobs();
+  pumpQueue();
+}
+
 export type StartReindexResult =
-  | { ok: true; job: EmbeddingJobRecord }
-  | { ok: false; error: string; status: number; job?: EmbeddingJobRecord };
+  | { ok: true; job: EmbeddingJobRecord; jobs: EmbeddingJobRecord[] }
+  | {
+      ok: false;
+      error: string;
+      status: number;
+      job?: EmbeddingJobRecord;
+      jobs?: EmbeddingJobRecord[];
+    };
 
 export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult {
-  const state = runner();
-  let active = getActiveEmbeddingJob();
-  // DB row left "running" after a crash/HMR with no in-process worker.
-  if (active && state.activeJobId === null) {
-    reclaimOrphanedJobs();
-    active = null;
-  }
-  if (active || state.activeJobId !== null) {
-    return {
-      ok: false,
-      error: "A reindex job is already running. Wait for it to finish or cancel it.",
-      status: 409,
-      job: active ?? (state.activeJobId ? getEmbeddingJob(state.activeJobId) : null) ?? undefined,
-    };
-  }
+  ensureJobRunner();
 
   if (target === "all-configured") {
-    const anyConfigured =
-      isProviderConfigured("local") ||
-      isProviderConfigured("ollama") ||
-      isProviderConfigured("openai") ||
-      isProviderConfigured("voyage");
-    if (!anyConfigured) {
+    const providers = configuredProviders();
+    if (providers.length === 0) {
       return {
         ok: false,
         error: "No providers are enabled (and credentialed where required)",
         status: 400,
       };
     }
-  } else if (!isProviderConfigured(target)) {
+
+    const enqueued: EmbeddingJobRecord[] = [];
+    const alreadyOpen: EmbeddingJobRecord[] = [];
+
+    for (const provider of providers) {
+      const open = getOpenJobForProvider(provider);
+      if (open) {
+        alreadyOpen.push(open);
+        continue;
+      }
+      enqueued.push(insertPendingJob(provider));
+    }
+
+    if (enqueued.length === 0) {
+      return {
+        ok: false,
+        error:
+          "All configured providers already have a pending or running reindex job",
+        status: 409,
+        job: getActiveEmbeddingJob() ?? alreadyOpen[0],
+        jobs: alreadyOpen,
+      };
+    }
+
+    pumpQueue();
+
+    const jobs = [...enqueued];
+    const active = getActiveEmbeddingJob();
+    const job =
+      active && jobs.some((j) => j.id === active.id)
+        ? active
+        : (getEmbeddingJob(enqueued[0]!.id) ?? enqueued[0]!);
+
+    return {
+      ok: true,
+      job,
+      jobs: jobs.map((j) => getEmbeddingJob(j.id) ?? j),
+    };
+  }
+
+  if (!isProviderConfigured(target)) {
     return {
       ok: false,
       error: `${target} is not enabled — turn it on in Settings (and add credentials if needed)`,
@@ -344,46 +511,37 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
     };
   }
 
-  const sqlite = getSqlite();
-  const totalItems = (
-    sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
-      c: number;
-    }
-  ).c;
-
-  const info = sqlite
-    .prepare(
-      `INSERT INTO embedding_jobs(
-        target, state, phase, processed, total, current_provider, message
-      ) VALUES (?, 'running', 'queued', 0, ?, NULL, ?)`,
-    )
-    .run(
-      target,
-      totalItems,
-      target === "all-configured"
-        ? "Queued rebuild for all configured providers"
-        : `Queued rebuild for ${target}`,
-    );
-
-  const jobId = Number(info.lastInsertRowid);
-  state.activeJobId = jobId;
-  state.cancelFlags.set(jobId, false);
-
-  // Kick off work on the Node process without blocking the HTTP response.
-  void executeJob(jobId, target);
-
-  const job = getEmbeddingJob(jobId);
-  if (!job) {
-    return { ok: false, error: "Failed to create job", status: 500 };
+  const open = getOpenJobForProvider(target);
+  if (open) {
+    return {
+      ok: false,
+      error:
+        open.state === "running"
+          ? `A reindex job for ${target} is already running.`
+          : `A reindex job for ${target} is already queued.`,
+      status: 409,
+      job: open,
+      jobs: [open],
+    };
   }
-  return { ok: true, job };
+
+  const created = insertPendingJob(target);
+  pumpQueue();
+  const job = getEmbeddingJob(created.id) ?? created;
+  return { ok: true, job, jobs: [job] };
 }
 
 export type CancelReindexResult =
   | { ok: true; job: EmbeddingJobRecord }
   | { ok: false; error: string; status: number; job?: EmbeddingJobRecord };
 
+/**
+ * Cancel the active (running) job only. Pending queued jobs remain and will
+ * start after the active job settles (cancelled / completed / failed).
+ */
 export function cancelReindexJob(jobId?: number): CancelReindexResult {
+  ensureJobRunner();
+
   const active = jobId ? getEmbeddingJob(jobId) : getActiveEmbeddingJob();
   if (!active || active.state !== "running") {
     return {
@@ -413,13 +571,17 @@ export function cancelReindexJob(jobId?: number): CancelReindexResult {
   return { ok: true, job };
 }
 
-/** Test helper: wait until no job is running (or timeout). */
-export async function waitForIdleJob(timeoutMs = 30_000): Promise<EmbeddingJobRecord | null> {
+/** Test helper: wait until the queue is idle (no running or pending jobs). */
+export async function waitForIdleJob(
+  timeoutMs = 30_000,
+): Promise<EmbeddingJobRecord | null> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
+    ensureJobRunner();
     const active = getActiveEmbeddingJob();
-    if (!active) return getLatestEmbeddingJob();
+    const pending = getPendingEmbeddingJobs();
+    if (!active && pending.length === 0) return getLatestEmbeddingJob();
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  throw new Error("Timed out waiting for embedding job to finish");
+  throw new Error("Timed out waiting for embedding job queue to finish");
 }

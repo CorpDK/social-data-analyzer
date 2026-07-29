@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { UploadForm } from "@/components/upload-form";
 import { listImports } from "@/lib/queries";
 
@@ -70,6 +71,7 @@ export default function ImportPage() {
                   <th className="pb-2 font-medium">Added</th>
                   <th className="pb-2 font-medium">Updated</th>
                   <th className="pb-2 font-medium">Skipped</th>
+                  <th className="pb-2 font-medium">Log</th>
                 </tr>
               </thead>
               <tbody>
@@ -104,8 +106,16 @@ export default function ImportPage() {
                     <td className="py-3 pr-3 font-[family-name:var(--font-ibm)]">
                       {row.itemsUpdated}
                     </td>
-                    <td className="py-3 font-[family-name:var(--font-ibm)]">
+                    <td className="py-3 pr-3 font-[family-name:var(--font-ibm)]">
                       {row.itemsSkipped}
+                    </td>
+                    <td className="py-3">
+                      <Link
+                        href={`/imports/${row.id}`}
+                        className="text-[var(--accent)] hover:underline"
+                      >
+                        Details
+                      </Link>
                     </td>
                   </tr>
                 ))}

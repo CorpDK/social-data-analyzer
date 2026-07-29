@@ -2,10 +2,19 @@ import { createHash } from "node:crypto";
 import AdmZip from "adm-zip";
 import { and, eq } from "drizzle-orm";
 import { getDb, getSqlite, schema } from "./db";
+import {
+  buildImportLogFromItems,
+  serializeImportLog,
+  type ImportLog,
+} from "./import-log";
+import {
+  catalogSchemasFromFiles,
+  type FileSchemaCatalogEntry,
+} from "./json-schema-infer";
 import { parseExportJsonFiles, type ParsedSavedItem } from "./parse-export";
 import { syncItemEmbeddings, upsertItemFts } from "./search/sync";
 
-const { imports, savedItems, itemCollections } = schema;
+const { imports, savedItems, itemCollections, importSchemas } = schema;
 
 export type ImportResult = {
   importId: number | null;
@@ -17,10 +26,25 @@ export type ImportResult = {
   itemsUpdated: number;
   itemsSkipped: number;
   message: string;
+  log?: ImportLog;
 };
 
 function hashBuffer(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+function appendImportNotes(importId: number, extra: string) {
+  const row = getDb()
+    .select({ notes: imports.notes })
+    .from(imports)
+    .where(eq(imports.id, importId))
+    .get();
+  const next = row?.notes ? `${row.notes}\n${extra}` : extra;
+  getDb()
+    .update(imports)
+    .set({ notes: next })
+    .where(eq(imports.id, importId))
+    .run();
 }
 
 async function syncEmbeddingsAfterImport(
@@ -34,11 +58,7 @@ async function syncEmbeddingsAfterImport(
     const message = `Semantic indexing failed; imported data and keyword search are available. ${
       error instanceof Error ? error.message : "Unknown embedding error"
     }`;
-    getDb()
-      .update(imports)
-      .set({ notes: message })
-      .where(eq(imports.id, importId))
-      .run();
+    appendImportNotes(importId, message);
     return message;
   }
 }
@@ -46,23 +66,26 @@ async function syncEmbeddingsAfterImport(
 function extractJsonFilesFromZip(buffer: Buffer): Array<{
   name: string;
   content: string;
+  byteSize: number;
 }> {
   const zip = new AdmZip(buffer);
   const entries = zip.getEntries();
-  const files: Array<{ name: string; content: string }> = [];
+  const files: Array<{ name: string; content: string; byteSize: number }> = [];
 
   for (const entry of entries) {
     if (entry.isDirectory) continue;
     const name = entry.entryName.replace(/\\/g, "/");
     if (!name.toLowerCase().endsWith(".json")) continue;
-    // Skip Mac metadata
+    // Skip Mac metadata / junk
     if (name.includes("__MACOSX") || name.split("/").pop()?.startsWith(".")) {
       continue;
     }
     try {
+      const data = entry.getData();
       files.push({
         name,
-        content: entry.getData().toString("utf8"),
+        content: data.toString("utf8"),
+        byteSize: data.byteLength,
       });
     } catch {
       // Skip unreadable entries
@@ -70,6 +93,30 @@ function extractJsonFilesFromZip(buffer: Buffer): Array<{
   }
 
   return files;
+}
+
+function persistImportSchemas(
+  importId: number,
+  catalog: FileSchemaCatalogEntry[],
+) {
+  const db = getDb();
+  db.delete(importSchemas).where(eq(importSchemas.importId, importId)).run();
+
+  for (const entry of catalog) {
+    db.insert(importSchemas)
+      .values({
+        importId,
+        filePath: entry.filePath,
+        byteSize: entry.byteSize,
+        truncatedRead: entry.truncatedRead,
+        topLevelType: entry.topLevelType,
+        schemaJson: JSON.stringify({
+          schema: entry.schema,
+          parseError: entry.parseError ?? null,
+        }),
+      })
+      .run();
+  }
 }
 
 export async function importExportArchive(
@@ -89,35 +136,6 @@ export async function importExportArchive(
       ),
     )
     .get();
-
-  if (prior) {
-    const duplicate = db
-      .insert(imports)
-      .values({
-        filename,
-        contentHash,
-        status: "duplicate",
-        itemsFound: prior.itemsFound,
-        itemsAdded: 0,
-        itemsUpdated: 0,
-        itemsSkipped: prior.itemsFound,
-        notes: `Identical to import #${prior.id}`,
-      })
-      .returning()
-      .get();
-
-    return {
-      importId: duplicate.id,
-      status: "duplicate",
-      filename,
-      contentHash,
-      itemsFound: prior.itemsFound,
-      itemsAdded: 0,
-      itemsUpdated: 0,
-      itemsSkipped: prior.itemsFound,
-      message: `This file was already imported (#${prior.id}). No changes made.`,
-    };
-  }
 
   let files: Array<{ name: string; content: string }>;
   try {
@@ -149,8 +167,15 @@ export async function importExportArchive(
     };
   }
 
-  // Also accept a single JSON payload disguised as .json upload wrapped earlier
-  const items = parseExportJsonFiles(files);
+  const schemaCatalog = catalogSchemasFromFiles(files);
+  const parsed = parseExportJsonFiles(files);
+  const items = parsed.items;
+  const importLog = buildImportLogFromItems(
+    files,
+    parsed.savedJsonFiles,
+    items,
+    parsed.warnings,
+  );
 
   if (items.length === 0) {
     const failed = db
@@ -166,6 +191,13 @@ export async function importExportArchive(
       .returning()
       .get();
 
+    // Still keep schema catalog so the explorer can show what was in the zip.
+    try {
+      persistImportSchemas(failed.id, schemaCatalog);
+    } catch {
+      // non-fatal
+    }
+
     return {
       importId: failed.id,
       status: "failed",
@@ -179,13 +211,15 @@ export async function importExportArchive(
     };
   }
 
+  const isDuplicate = Boolean(prior);
   const draft = db
     .insert(imports)
     .values({
       filename,
       contentHash,
-      status: "completed",
+      status: isDuplicate ? "duplicate" : "completed",
       itemsFound: items.length,
+      notes: serializeImportLog(importLog),
     })
     .returning()
     .get();
@@ -198,12 +232,23 @@ export async function importExportArchive(
       return applyParsedItemsWithTx(tx, draft.id, items);
     });
 
+    persistImportSchemas(draft.id, schemaCatalog);
+
     db.update(imports)
       .set({
         itemsAdded: result.added,
         itemsUpdated: result.updated,
         itemsSkipped: result.skipped,
-        status: "completed",
+        status: isDuplicate ? "duplicate" : "completed",
+        notes: serializeImportLog({
+          ...importLog,
+          warnings: [
+            ...importLog.warnings,
+            ...(isDuplicate
+              ? [`Identical file to import #${prior!.id}; metadata refreshed.`]
+              : []),
+          ],
+        }),
       })
       .where(eq(imports.id, draft.id))
       .run();
@@ -213,16 +258,21 @@ export async function importExportArchive(
       result.changedIds,
     );
 
+    const message = isDuplicate
+      ? `Same file as import #${prior!.id}. Refreshed metadata for ${result.updated} items (${result.skipped} unchanged). ${embeddingMessage}`
+      : `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`;
+
     return {
       importId: draft.id,
-      status: "completed",
+      status: isDuplicate ? "duplicate" : "completed",
       filename,
       contentHash,
       itemsFound: items.length,
       itemsAdded: result.added,
       itemsUpdated: result.updated,
       itemsSkipped: result.skipped,
-      message: `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`,
+      message,
+      log: importLog,
     };
   } catch (error) {
     const message =
@@ -387,7 +437,6 @@ export async function importExportJson(
   content: string,
   filename: string,
 ): Promise<ImportResult> {
-  // Wrap a lone JSON file into the same pipeline via a synthetic zip-like path
   const buffer = Buffer.from(content, "utf8");
   const contentHash = hashBuffer(buffer);
   const db = getDb();
@@ -403,36 +452,17 @@ export async function importExportJson(
     )
     .get();
 
-  if (prior) {
-    const duplicate = db
-      .insert(imports)
-      .values({
-        filename,
-        contentHash,
-        status: "duplicate",
-        itemsFound: prior.itemsFound,
-        itemsAdded: 0,
-        itemsUpdated: 0,
-        itemsSkipped: prior.itemsFound,
-        notes: `Identical to import #${prior.id}`,
-      })
-      .returning()
-      .get();
+  const jsonFiles = [{ name: filename, content, byteSize: buffer.byteLength }];
+  const schemaCatalog = catalogSchemasFromFiles(jsonFiles);
+  const parsed = parseExportJsonFiles(jsonFiles);
+  const items = parsed.items;
+  const importLog = buildImportLogFromItems(
+    [{ name: filename }],
+    parsed.savedJsonFiles,
+    items,
+    parsed.warnings,
+  );
 
-    return {
-      importId: duplicate.id,
-      status: "duplicate",
-      filename,
-      contentHash,
-      itemsFound: prior.itemsFound,
-      itemsAdded: 0,
-      itemsUpdated: 0,
-      itemsSkipped: prior.itemsFound,
-      message: `This file was already imported (#${prior.id}). No changes made.`,
-    };
-  }
-
-  const items = parseExportJsonFiles([{ name: filename, content }]);
   if (items.length === 0) {
     const failed = db
       .insert(imports)
@@ -444,6 +474,12 @@ export async function importExportJson(
       })
       .returning()
       .get();
+
+    try {
+      persistImportSchemas(failed.id, schemaCatalog);
+    } catch {
+      // non-fatal
+    }
 
     return {
       importId: failed.id,
@@ -458,13 +494,15 @@ export async function importExportJson(
     };
   }
 
+  const isDuplicate = Boolean(prior);
   const draft = db
     .insert(imports)
     .values({
       filename,
       contentHash,
-      status: "completed",
+      status: isDuplicate ? "duplicate" : "completed",
       itemsFound: items.length,
+      notes: serializeImportLog(importLog),
     })
     .returning()
     .get();
@@ -474,11 +512,23 @@ export async function importExportJson(
       applyParsedItemsWithTx(tx, draft.id, items),
     );
 
+    persistImportSchemas(draft.id, schemaCatalog);
+
     db.update(imports)
       .set({
         itemsAdded: result.added,
         itemsUpdated: result.updated,
         itemsSkipped: result.skipped,
+        status: isDuplicate ? "duplicate" : "completed",
+        notes: serializeImportLog({
+          ...importLog,
+          warnings: [
+            ...importLog.warnings,
+            ...(isDuplicate
+              ? [`Identical file to import #${prior!.id}; metadata refreshed.`]
+              : []),
+          ],
+        }),
       })
       .where(eq(imports.id, draft.id))
       .run();
@@ -488,16 +538,21 @@ export async function importExportJson(
       result.changedIds,
     );
 
+    const message = isDuplicate
+      ? `Same file as import #${prior!.id}. Refreshed metadata for ${result.updated} items (${result.skipped} unchanged). ${embeddingMessage}`
+      : `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`;
+
     return {
       importId: draft.id,
-      status: "completed",
+      status: isDuplicate ? "duplicate" : "completed",
       filename,
       contentHash,
       itemsFound: items.length,
       itemsAdded: result.added,
       itemsUpdated: result.updated,
       itemsSkipped: result.skipped,
-      message: `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`,
+      message,
+      log: importLog,
     };
   } catch (error) {
     const message =

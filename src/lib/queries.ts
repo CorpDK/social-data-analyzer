@@ -260,6 +260,12 @@ export function listImports() {
   return db.select().from(imports).orderBy(desc(imports.importedAt)).all();
 }
 
+export function getImportById(id: number) {
+  ensureSearchReady();
+  const db = getDb();
+  return db.select().from(imports).where(eq(imports.id, id)).get();
+}
+
 export function listFilterOptions() {
   ensureSearchReady();
   const db = getDb();

@@ -4,7 +4,7 @@ import { cancelReindexJob } from "@/lib/search/jobs";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** Cooperative cancel for the active (or specified) reindex job. */
+/** Cooperative cancel for the active (or specified) running job; pending stay queued. */
 export async function POST(request: Request) {
   try {
     let jobId: number | undefined;

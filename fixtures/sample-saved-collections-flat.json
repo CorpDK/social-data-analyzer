@@ -1,0 +1,40 @@
+{
+  "saved_saved_collections": [
+    {
+      "string_map_data": {
+        "Name": {
+          "value": "Recipes"
+        }
+      }
+    },
+    {
+      "string_map_data": {
+        "Name": {
+          "href": "https://www.instagram.com/reel/FlatCollReel1/",
+          "value": "chef.daily"
+        },
+        "Added Time": {
+          "timestamp": 1720000000
+        }
+      }
+    },
+    {
+      "string_map_data": {
+        "Name": {
+          "value": "Travel"
+        }
+      }
+    },
+    {
+      "string_map_data": {
+        "Name": {
+          "href": "https://www.instagram.com/p/FlatCollPost1/",
+          "value": "wander.lust"
+        },
+        "Added Time": {
+          "timestamp": 1730000000
+        }
+      }
+    }
+  ]
+}

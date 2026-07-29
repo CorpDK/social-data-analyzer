@@ -36,7 +36,7 @@ type ProviderIndexStatus = {
 type EmbeddingJob = {
   id: number;
   target: string;
-  state: "running" | "completed" | "failed" | "cancelled";
+  state: "pending" | "running" | "completed" | "failed" | "cancelled";
   phase: string;
   processed: number;
   total: number;
@@ -55,6 +55,8 @@ type StatusPayload = {
   ftsCount: number;
   providers: ProviderIndexStatus[];
   job: EmbeddingJob | null;
+  pendingJobs: EmbeddingJob[];
+  recentJobs?: EmbeddingJob[];
   cancelSupported: boolean;
 };
 
@@ -109,6 +111,13 @@ function isStatusPayload(payload: unknown): payload is StatusPayload {
   );
 }
 
+function normalizeStatusPayload(payload: StatusPayload): StatusPayload {
+  return {
+    ...payload,
+    pendingJobs: Array.isArray(payload.pendingJobs) ? payload.pendingJobs : [],
+  };
+}
+
 const PROVIDER_LABELS: Record<EmbeddingProvider, string> = {
   local: "Local (basic)",
   ollama: "Ollama",
@@ -133,6 +142,8 @@ function healthStyles(health: IndexHealth): string {
 
 function jobStateStyles(state: EmbeddingJob["state"]): string {
   switch (state) {
+    case "pending":
+      return "bg-[var(--chip)] text-[var(--muted)]";
     case "running":
       return "bg-[var(--accent-soft)] text-[var(--accent)]";
     case "completed":
@@ -160,6 +171,35 @@ function providerAvailabilityLabel(provider: ProviderIndexStatus): string {
   return "Not configured";
 }
 
+function JobSummaryRow({ job }: { job: EmbeddingJob }) {
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-sm">
+      <span
+        className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${jobStateStyles(job.state)}`}
+      >
+        {job.state}
+      </span>
+      <span className="text-[var(--muted)]">
+        Target: <span className="text-[var(--ink)]">{job.target}</span>
+      </span>
+      {job.currentProvider && job.currentProvider !== job.target ? (
+        <span className="text-[var(--muted)]">
+          · Provider:{" "}
+          <span className="text-[var(--ink)]">{job.currentProvider}</span>
+        </span>
+      ) : null}
+      <span className="text-[var(--muted)]">
+        · Phase: <span className="text-[var(--ink)]">{job.phase}</span>
+      </span>
+      {job.state !== "pending" && job.state !== "running" ? (
+        <span className="text-[var(--muted)]">
+          · {job.processed}/{job.total} items
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
 export function IndexesStatusPanel() {
   const [data, setData] = useState<StatusPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -184,7 +224,7 @@ export function IndexesStatusPanel() {
       }
       consecutiveLoadFailures.current = 0;
       setPollingStopped(false);
-      setData(payload);
+      setData(normalizeStatusPayload(payload));
       setError(null);
     } catch (loadError) {
       consecutiveLoadFailures.current += 1;
@@ -200,13 +240,24 @@ export function IndexesStatusPanel() {
     return () => window.clearTimeout(timer);
   }, [load]);
 
+  const activeJob =
+    data?.job?.state === "running" ? data.job : null;
+  const pendingJobs = data?.pendingJobs ?? [];
+  const queueBusy = Boolean(activeJob) || pendingJobs.length > 0;
+  const openTargets = new Set(
+    [
+      ...(activeJob ? [activeJob.target] : []),
+      ...pendingJobs.map((job) => job.target),
+    ].filter(Boolean),
+  );
+
   useEffect(() => {
-    if (data?.job?.state !== "running" || pollingStopped) return;
+    if (!queueBusy || pollingStopped) return;
     const timer = window.setInterval(() => {
       void load();
     }, 1500);
     return () => window.clearInterval(timer);
-  }, [data?.job?.state, load, pollingStopped]);
+  }, [queueBusy, load, pollingStopped]);
 
   async function startReindex(provider: string) {
     setPending(provider);
@@ -248,8 +299,6 @@ export function IndexesStatusPanel() {
     }
   }
 
-  const job = data?.job ?? null;
-  const running = job?.state === "running";
   const cardClass =
     "rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4 sm:p-5";
   const secondaryButton =
@@ -302,8 +351,9 @@ export function IndexesStatusPanel() {
               Reindex progress
             </h2>
             <p className="mt-0.5 text-xs text-[var(--muted)]">
-              One job at a time. Progress is stored in SQLite so a refresh keeps
-              the latest state. Cancel is cooperative between items.
+              One job runs at a time; others queue per provider. Cancel stops
+              only the active job — queued jobs keep their place. Cancel is
+              cooperative between items.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -318,78 +368,102 @@ export function IndexesStatusPanel() {
             <button
               type="button"
               className={primaryButton}
-              disabled={running || pending !== null}
+              disabled={pending !== null}
               onClick={() => void startReindex("all-configured")}
             >
-              {pending === "all-configured" ? "Starting…" : "Reindex all configured"}
+              {pending === "all-configured"
+                ? "Queueing…"
+                : "Reindex all configured"}
             </button>
-            {running ? (
+            {activeJob ? (
               <button
                 type="button"
                 className={secondaryButton}
-                disabled={pending !== null || Boolean(job?.cancelRequested)}
+                disabled={pending !== null || Boolean(activeJob.cancelRequested)}
                 onClick={() => void cancelReindex()}
               >
-                {job?.cancelRequested
+                {activeJob.cancelRequested
                   ? "Cancelling…"
                   : pending === "cancel"
                     ? "Requesting…"
-                    : "Cancel"}
+                    : "Cancel active"}
               </button>
             ) : null}
           </div>
         </div>
 
-        {job ? (
+        {activeJob ? (
           <div className="mt-4 space-y-3">
-            <div className="flex flex-wrap items-center gap-2 text-sm">
-              <span className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${jobStateStyles(job.state)}`}>
-                {job.state}
-              </span>
-              <span className="text-[var(--muted)]">
-                Target: <span className="text-[var(--ink)]">{job.target}</span>
-              </span>
-              {job.currentProvider ? (
-                <span className="text-[var(--muted)]">
-                  · Provider:{" "}
-                  <span className="text-[var(--ink)]">{job.currentProvider}</span>
-                </span>
-              ) : null}
-              <span className="text-[var(--muted)]">
-                · Phase: <span className="text-[var(--ink)]">{job.phase}</span>
-              </span>
-            </div>
+            <p className="text-xs font-medium uppercase tracking-wide text-[var(--muted)]">
+              Active job
+            </p>
+            <JobSummaryRow job={activeJob} />
             <div>
               <div className="mb-1 flex justify-between text-xs text-[var(--muted)]">
                 <span>
-                  {job.processed} / {job.total} items
+                  {activeJob.processed} / {activeJob.total} items
                 </span>
-                <span>{job.percent}%</span>
+                <span>{activeJob.percent}%</span>
               </div>
               <div className="h-2 overflow-hidden rounded-full bg-[var(--chip)]">
                 <div
                   className="h-full rounded-full bg-[var(--accent)] transition-[width] duration-300"
-                  style={{ width: `${Math.min(100, job.percent)}%` }}
+                  style={{ width: `${Math.min(100, activeJob.percent)}%` }}
                 />
               </div>
             </div>
-            {job.message ? (
+            {activeJob.message ? (
               <p className="text-sm text-[var(--muted)]" role="status">
-                {job.message}
+                {activeJob.message}
               </p>
             ) : null}
-            {job.error ? (
+            {activeJob.error ? (
               <p className="text-sm text-[var(--danger)]" role="alert">
-                {job.error}
+                {activeJob.error}
               </p>
             ) : null}
           </div>
-        ) : (
+        ) : null}
+
+        {pendingJobs.length > 0 ? (
+          <div
+            className={`mt-4 space-y-2 ${activeJob ? "border-t border-[var(--line)] pt-4" : ""}`}
+          >
+            <p className="text-xs font-medium uppercase tracking-wide text-[var(--muted)]">
+              Queue ({pendingJobs.length})
+            </p>
+            <ul className="space-y-2">
+              {pendingJobs.map((job, index) => (
+                <li key={job.id} className="space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="text-[var(--muted)]">#{index + 1}</span>
+                    <span
+                      className={`rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${jobStateStyles(job.state)}`}
+                    >
+                      {job.state}
+                    </span>
+                    <span className="text-[var(--ink)]">{job.target}</span>
+                  </div>
+                  {job.message ? (
+                    <p className="text-xs text-[var(--muted)]">{job.message}</p>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+
+        {!queueBusy ? (
           <p className="mt-4 text-sm text-[var(--muted)]">
-            No reindex jobs yet. Use a provider Rebuild button or reindex all
-            configured indexes.
+            No active or queued jobs.{" "}
+            <Link
+              href="/indexes/history"
+              className="text-[var(--ink)] underline decoration-[var(--line)] underline-offset-2 transition hover:decoration-[var(--muted)]"
+            >
+              View history
+            </Link>
           </p>
-        )}
+        ) : null}
 
         {actionError ? (
           <p className="mt-3 text-sm text-[var(--danger)]" role="alert">
@@ -416,7 +490,9 @@ export function IndexesStatusPanel() {
       <div className="space-y-2">
         {(data?.providers ?? []).map((provider) => {
           const label = PROVIDER_LABELS[provider.provider];
-          const canReindex = provider.configured && !running && pending === null;
+          const providerBusy = openTargets.has(provider.provider);
+          const canReindex =
+            provider.configured && !providerBusy && pending === null;
           const model =
             provider.stored?.model ?? provider.expected?.model ?? "—";
           const dimensions =
@@ -454,6 +530,11 @@ export function IndexesStatusPanel() {
                 <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
                   {providerAvailabilityLabel(provider)}
                   {provider.indexPresent ? " · Index present" : " · No vectors yet"}
+                  {providerBusy
+                    ? activeJob?.target === provider.provider
+                      ? " · Reindexing"
+                      : " · Queued"
+                    : ""}
                 </p>
                 {provider.hint ? (
                   <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
@@ -539,9 +620,13 @@ export function IndexesStatusPanel() {
                   >
                     {pending === provider.provider
                       ? "Starting…"
-                      : provider.health === "ready"
-                        ? "Rebuild"
-                        : "Reindex"}
+                      : providerBusy
+                        ? activeJob?.target === provider.provider
+                          ? "Running…"
+                          : "Queued"
+                        : provider.health === "ready"
+                          ? "Rebuild"
+                          : "Reindex"}
                   </button>
                 ) : (
                   <Link className={secondaryButton} href="/settings">

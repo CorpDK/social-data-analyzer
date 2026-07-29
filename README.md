@@ -14,6 +14,7 @@ Local Next.js app that imports official Instagram data exports, stores saved pos
 - Deduping by media shortcode (and identical file content hash)
 - Periodic re-imports: adds new saves, updates metadata/collections, skips unchanged
 - Overview stats, filters by type/creator/collection
+- **Schema explorer** (`/schemas`): structural schemas for every JSON file in imported zips (types/keys/nesting only — not row payloads). Aggregated **All** view or per-import by filename. Captured automatically on import into `import_schemas`; older imports need a re-import to populate.
 
 ## Setup
 
@@ -108,9 +109,12 @@ pnpm run reindex -- --remote
 
 Or use **Indexes** in the nav (`/indexes`): per-provider status (coverage,
 model/dimensions, health) and **Reindex** / **Rebuild** buttons with live
-progress. Jobs persist in SQLite (`embedding_jobs`); only one runs at a time;
-cancel is cooperative between items. APIs: `GET /api/search/status`,
-`POST /api/search/reindex`, `GET /api/search/reindex`,
+progress. Jobs persist in SQLite (`embedding_jobs`); only one runs at a time,
+with additional per-provider jobs queued as `pending`. **Reindex all
+configured** enqueues one job per enabled provider (skipping providers that
+already have a pending/running job). Cancel stops the active job only; queued
+jobs keep their place. Cancel is cooperative between items. APIs:
+`GET /api/search/status`, `POST /api/search/reindex`, `GET /api/search/reindex`,
 `POST /api/search/reindex/cancel`.
 
 Imports update FTS in their data transaction, then update vectors only for
@@ -136,9 +140,19 @@ before paint to avoid a flash.
 
 | Layer | Behavior |
 |-------|----------|
-| File hash | Exact same zip/json content is recorded as `duplicate` and not re-applied |
+| File hash | Exact same zip/json content is recorded as `duplicate` |
 | Media key | Shortcode from `/p/…`, `/reel/…`, `/tv/…` URLs is unique in SQLite |
-| Re-import | Existing items get `last_seen_import_id` refreshed; new collections merge in |
+| Re-import | Re-uploading the same export refreshes authors, saved dates, and collections on existing items (no duplicate rows). Overview stats update after re-import. |
+
+### Export format notes
+
+Recent Instagram JSON exports (2024+) often store saved posts in `string_list_data`
+instead of `string_map_data`, with the creator username in `title` or
+`string_list_data[].value`. Collections may use a flat list in
+`saved_saved_collections` (collection header rows without URLs, followed by items).
+
+If you imported before parser support for these shapes, **re-upload the same zip**
+on the Import page — metadata will backfill without wiping your library.
 
 ## Stack
 
@@ -155,3 +169,4 @@ before paint to avoid a flash.
 - Database files under `data/` are local-only and gitignored (including `-wal` / `-shm`).
 - Infra-only env vars (not in Settings): `INSTAGRAM_SAVES_DB`, `INSTAGRAM_SAVES_KEYRING=memory` for tests.
 - Development schema changes apply on hot reload; bump `SCHEMA_VERSION` when adding or changing tables/indexes.
+- Schema explorer stores lightweight type trees in `import_schemas` (`import_id`, `file_path`, `schema_json`, sizes). Large JSON files are sampled (first ~512KB) so giant message dumps still yield structure without keeping PII-heavy content.

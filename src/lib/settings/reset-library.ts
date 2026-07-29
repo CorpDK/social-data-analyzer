@@ -58,7 +58,10 @@ export function resetLibrary(confirmation: string): ResetLibraryResult {
   };
 
   const wipeContent = sqlite.transaction(() => {
-    // Children first — FK from item_collections → saved_items → imports.
+    // Children first — FK from import_schemas/item_collections → saved_items → imports.
+    if (tableExists("import_schemas")) {
+      sqlite.exec(`DELETE FROM import_schemas`);
+    }
     sqlite.exec(`DELETE FROM item_collections`);
     sqlite.exec(`DELETE FROM saved_items`);
     sqlite.exec(`DELETE FROM imports`);
@@ -76,7 +79,8 @@ export function resetLibrary(confirmation: string): ResetLibraryResult {
           'imports',
           'saved_items',
           'item_collections',
-          'embedding_jobs'
+          'embedding_jobs',
+          'import_schemas'
         )
       `);
     }

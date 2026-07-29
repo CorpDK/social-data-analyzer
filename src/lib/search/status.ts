@@ -17,7 +17,13 @@ import {
   isProviderEnabled,
   providerHasCredentials,
 } from "./providers";
-import { getLatestEmbeddingJob, type EmbeddingJobRecord } from "./jobs";
+import {
+  ensureJobRunner,
+  getDisplayEmbeddingJob,
+  getPendingEmbeddingJobs,
+  getRecentEmbeddingJobs,
+  type EmbeddingJobRecord,
+} from "./jobs";
 
 export type IndexHealth =
   | "ready"
@@ -49,7 +55,12 @@ export type SearchIndexStatus = {
   totalItems: number;
   ftsCount: number;
   providers: ProviderIndexStatus[];
+  /** Active running job, or latest finished when idle. */
   job: EmbeddingJobRecord | null;
+  /** Jobs waiting to run (FIFO by id). */
+  pendingJobs: EmbeddingJobRecord[];
+  /** Recent terminal jobs (completed / failed / cancelled). */
+  recentJobs: EmbeddingJobRecord[];
   cancelSupported: true;
 };
 
@@ -154,6 +165,8 @@ export function getProviderIndexStatus(
 }
 
 export function getSearchIndexStatus(): SearchIndexStatus {
+  ensureJobRunner();
+
   const sqlite = getSqlite();
   const totalItems = (
     sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
@@ -179,7 +192,9 @@ export function getSearchIndexStatus(): SearchIndexStatus {
     providers: providers.map((provider) =>
       getProviderIndexStatus(provider, totalItems),
     ),
-    job: getLatestEmbeddingJob(),
+    job: getDisplayEmbeddingJob(),
+    pendingJobs: getPendingEmbeddingJobs(),
+    recentJobs: getRecentEmbeddingJobs(8),
     cancelSupported: true,
   };
 }
