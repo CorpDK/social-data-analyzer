@@ -10,6 +10,8 @@
   --line: #d5ddd7;
   --accent: #0f7a62;
   --accent-soft: #d8f0e7;
+  --control-active-bg: #1c2421;
+  --control-active-fg: #fffcf7;
   --warn: #9a5b16;
   --danger: #9b2c2c;
   --chip: #eef3ef;
@@ -27,6 +29,8 @@
   --line: #2c3933;
   --accent: #3dba95;
   --accent-soft: #1a3a30;
+  --control-active-bg: #e7eee9;
+  --control-active-fg: #101513;
   --warn: #e0a04a;
   --danger: #e07070;
   --chip: #222c27;
@@ -67,4 +71,14 @@ select,
 textarea,
 button {
   color-scheme: inherit;
+}
+
+.control-active {
+  background-color: #1c2421;
+  color: #fffcf7;
+}
+
+[data-theme="dark"] .control-active {
+  background-color: #e7eee9;
+  color: #101513;
 }

@@ -13,7 +13,19 @@ const dbPath =
   process.env.INSTAGRAM_SAVES_DB ??
   path.join(dataDir, "instagram-saves.db");
 
-function ensureDatabase() {
+/**
+ * Bump whenever the idempotent schema below gains or changes a table/index.
+ * Development re-applies it once per module evaluation for hot-reload safety.
+ */
+export const SCHEMA_VERSION = 2;
+
+const globalForDb = globalThis as unknown as {
+  sqlite?: Database.Database;
+  db?: ReturnType<typeof drizzle<typeof schema>>;
+  schemaVersion?: number;
+};
+
+function createDatabaseConnection() {
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -29,6 +41,10 @@ function ensureDatabase() {
 
   sqliteVec.load(sqlite);
 
+  return sqlite;
+}
+
+function ensureDatabaseSchema(sqlite: Database.Database) {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS imports (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -80,11 +96,45 @@ function ensureDatabase() {
       ON item_collections (item_id, collection_name);
     CREATE INDEX IF NOT EXISTS item_collections_name_idx
       ON item_collections (collection_name);
+
+    CREATE TABLE IF NOT EXISTS app_settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
   `);
 
+  ensureEmbeddingJobsTable(sqlite);
   ensureSearchSchema(sqlite);
+  sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
+  globalForDb.schemaVersion = SCHEMA_VERSION;
+}
 
-  return sqlite;
+const EMBEDDING_JOBS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS embedding_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    target TEXT NOT NULL,
+    state TEXT NOT NULL DEFAULT 'running',
+    phase TEXT NOT NULL DEFAULT 'queued',
+    processed INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0,
+    current_provider TEXT,
+    error TEXT,
+    message TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE INDEX IF NOT EXISTS embedding_jobs_state_idx
+    ON embedding_jobs (state);
+  CREATE INDEX IF NOT EXISTS embedding_jobs_started_idx
+    ON embedding_jobs (started_at DESC);
+`;
+
+function ensureEmbeddingJobsTable(sqlite: Database.Database) {
+  sqlite.exec(EMBEDDING_JOBS_SCHEMA);
 }
 
 function ensureSearchSchema(sqlite: Database.Database) {
@@ -110,10 +160,31 @@ function ensureSearchSchema(sqlite: Database.Database) {
   }
 
   ensureVectorTable(sqlite, "local");
+  ensureVectorTable(sqlite, "ollama");
   ensureVectorTable(sqlite, "openai");
   ensureVectorTable(sqlite, "voyage");
   migrateLegacyRemoteVectorTable(sqlite, legacyRemoteProvider);
+
 }
+
+function reclaimJobsAfterProcessRestart(sqlite: Database.Database) {
+  // This is intentionally connection-startup work, not schema-ensure work:
+  // HMR may re-run schema ensure while a real in-process job is still active.
+  sqlite
+    .prepare(
+      `UPDATE embedding_jobs
+       SET state = 'failed',
+           error = COALESCE(error, 'Interrupted by server restart'),
+           message = 'Job interrupted by server restart',
+           finished_at = unixepoch(),
+           updated_at = unixepoch()
+       WHERE state = 'running'`,
+    )
+    .run();
+}
+
+const PROFILE_INDEX_CHECK =
+  "('local', 'ollama', 'openai', 'voyage')";
 
 /** Returns the legacy remote provider when migrating off `saved_items_vec_remote`. */
 function migrateEmbeddingProfilesTable(
@@ -126,11 +197,14 @@ function migrateEmbeddingProfilesTable(
     )
     .get() as { sql: string | null } | undefined;
 
-  const needsMigration = table?.sql?.includes("'remote'") ?? false;
+  const needsRemoteMigration = table?.sql?.includes("'remote'") ?? false;
+  const needsOllama =
+    Boolean(table) && !(table?.sql?.includes("'ollama'") ?? false);
+
   if (!table) {
     sqlite.exec(`
       CREATE TABLE embedding_index_profiles (
-        index_name TEXT PRIMARY KEY CHECK (index_name IN ('local', 'openai', 'voyage')),
+        index_name TEXT PRIMARY KEY CHECK (index_name IN ${PROFILE_INDEX_CHECK}),
         provider TEXT NOT NULL,
         model TEXT NOT NULL,
         dimensions INTEGER NOT NULL,
@@ -141,26 +215,28 @@ function migrateEmbeddingProfilesTable(
     return null;
   }
 
-  if (!needsMigration) return null;
+  if (!needsRemoteMigration && !needsOllama) return null;
 
-  const legacyRemote = sqlite
-    .prepare(
-      `SELECT provider, model, dimensions, endpoint, updated_at
-       FROM embedding_index_profiles WHERE index_name = 'remote'`,
-    )
-    .get() as
-    | {
-        provider: string;
-        model: string;
-        dimensions: number;
-        endpoint: string | null;
-        updated_at: number;
-      }
-    | undefined;
+  const legacyRemote = needsRemoteMigration
+    ? (sqlite
+        .prepare(
+          `SELECT provider, model, dimensions, endpoint, updated_at
+           FROM embedding_index_profiles WHERE index_name = 'remote'`,
+        )
+        .get() as
+        | {
+            provider: string;
+            model: string;
+            dimensions: number;
+            endpoint: string | null;
+            updated_at: number;
+          }
+        | undefined)
+    : undefined;
 
   sqlite.exec(`
     CREATE TABLE embedding_index_profiles_new (
-      index_name TEXT PRIMARY KEY CHECK (index_name IN ('local', 'openai', 'voyage')),
+      index_name TEXT PRIMARY KEY CHECK (index_name IN ${PROFILE_INDEX_CHECK}),
       provider TEXT NOT NULL,
       model TEXT NOT NULL,
       dimensions INTEGER NOT NULL,
@@ -172,7 +248,7 @@ function migrateEmbeddingProfilesTable(
     )
     SELECT index_name, provider, model, dimensions, endpoint, updated_at
     FROM embedding_index_profiles
-    WHERE index_name IN ('local', 'openai', 'voyage');
+    WHERE index_name IN ('local', 'ollama', 'openai', 'voyage');
   `);
 
   let migratedProvider: "openai" | "voyage" | null = null;
@@ -206,7 +282,7 @@ function migrateEmbeddingProfilesTable(
 
 function ensureVectorTable(
   sqlite: Database.Database,
-  index: "local" | "openai" | "voyage",
+  index: "local" | "ollama" | "openai" | "voyage",
 ) {
   const table = `saved_items_vec_${index}`;
   const definition = sqlite
@@ -262,16 +338,37 @@ function migrateLegacyRemoteVectorTable(
   sqlite.exec(`DROP TABLE IF EXISTS saved_items_vec_remote;`);
 }
 
-const globalForDb = globalThis as unknown as {
-  sqlite?: Database.Database;
-  db?: ReturnType<typeof drizzle<typeof schema>>;
-};
+let schemaEnsuredForModule = false;
 
 export function getSqlite() {
   if (!globalForDb.sqlite) {
-    globalForDb.sqlite = ensureDatabase();
+    const sqlite = createDatabaseConnection();
+    ensureDatabaseSchema(sqlite);
+    reclaimJobsAfterProcessRestart(sqlite);
+    globalForDb.sqlite = sqlite;
+    schemaEnsuredForModule = true;
+  } else if (!schemaEnsuredForModule) {
+    const persistedVersion = globalForDb.sqlite.pragma("user_version", {
+      simple: true,
+    }) as number;
+    if (
+      process.env.NODE_ENV !== "production" ||
+      globalForDb.schemaVersion !== SCHEMA_VERSION ||
+      persistedVersion !== SCHEMA_VERSION
+    ) {
+      ensureDatabaseSchema(globalForDb.sqlite);
+    }
+    schemaEnsuredForModule = true;
   }
   return globalForDb.sqlite;
+}
+
+// Next.js preserves the connection on globalThis across HMR. Re-ensure once as
+// soon as this module is re-evaluated so newly added idempotent DDL takes effect
+// without opening another Database handle or requiring a server restart.
+if (globalForDb.sqlite && process.env.NODE_ENV !== "production") {
+  ensureDatabaseSchema(globalForDb.sqlite);
+  schemaEnsuredForModule = true;
 }
 
 export function getDb() {
@@ -279,6 +376,39 @@ export function getDb() {
     globalForDb.db = drizzle(getSqlite(), { schema });
   }
   return globalForDb.db;
+}
+
+/**
+ * Drop and recreate empty FTS + vector indexes so the app stays usable after
+ * a content wipe. Does not touch `app_settings` or keyring secrets.
+ */
+export function recreateEmptySearchIndexes(
+  sqlite: Database.Database = getSqlite(),
+) {
+  sqlite.exec(`
+    DROP TABLE IF EXISTS saved_items_fts;
+    CREATE VIRTUAL TABLE saved_items_fts USING fts5(
+      author_username,
+      shortcode,
+      media_key,
+      media_type,
+      collections,
+      tokenize = 'porter unicode61 remove_diacritics 1'
+    );
+  `);
+
+  for (const index of ["local", "ollama", "openai", "voyage"] as const) {
+    const table = `saved_items_vec_${index}`;
+    sqlite.exec(`
+      DROP TABLE IF EXISTS ${table};
+      CREATE VIRTUAL TABLE ${table} USING vec0(
+        item_id INTEGER PRIMARY KEY,
+        embedding FLOAT[${VEC_DIMENSIONS}]
+      );
+    `);
+  }
+
+  sqlite.exec(`DROP TABLE IF EXISTS saved_items_vec_remote;`);
 }
 
 export { schema };

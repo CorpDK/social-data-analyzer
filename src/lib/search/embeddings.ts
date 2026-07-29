@@ -1,4 +1,17 @@
-export type EmbeddingProvider = "local" | "openai" | "voyage";
+import {
+  getOllamaApiKey,
+  getOpenAiApiKey,
+  getVoyageApiKey,
+} from "../settings/credentials";
+import {
+  getEmbeddingTimeoutMs,
+  getOllamaSettings,
+  getOpenAiSettings,
+  getPreferredEmbeddingProvider,
+  getVoyageSettings,
+} from "../settings/app-settings";
+
+export type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
 export type EmbeddingInputType = "document" | "query";
 
 export type EmbeddingProfile = {
@@ -14,28 +27,49 @@ export type EmbeddingConfig = {
 };
 
 const LOCAL_MODEL = "feature-hash-v1";
-const OPENAI_BASE_URL = "https://api.openai.com/v1";
 const VOYAGE_ENDPOINT = "https://api.voyageai.com/v1/embeddings";
 export const EMBEDDING_DIMENSIONS = 1024;
+
+const ALL_PROVIDERS: EmbeddingProvider[] = [
+  "local",
+  "ollama",
+  "openai",
+  "voyage",
+];
 
 export function assertValidEmbeddingProvider(
   value: string,
 ): EmbeddingProvider {
-  if (value === "local" || value === "openai" || value === "voyage") {
+  if (
+    value === "local" ||
+    value === "ollama" ||
+    value === "openai" ||
+    value === "voyage"
+  ) {
     return value;
   }
   throw new Error(
-    "EMBEDDING_PROVIDER must be one of: local, openai, voyage",
+    "EMBEDDING_PROVIDER must be one of: local, ollama, openai, voyage",
   );
 }
 
-function openAiEndpoint(): string {
-  const configured =
-    process.env.EMBEDDING_BASE_URL?.trim() || OPENAI_BASE_URL;
-  const normalized = configured.replace(/\/+$/, "");
+export function isEmbeddingProvider(value: string): value is EmbeddingProvider {
+  return ALL_PROVIDERS.includes(value as EmbeddingProvider);
+}
+
+function openAiCompatibleEndpoint(baseUrl: string): string {
+  const normalized = baseUrl.replace(/\/+$/, "");
   return normalized.endsWith("/embeddings")
     ? normalized
     : `${normalized}/embeddings`;
+}
+
+function openAiEndpoint(): string {
+  return openAiCompatibleEndpoint(getOpenAiSettings().baseUrl);
+}
+
+function ollamaEndpoint(): string {
+  return openAiCompatibleEndpoint(getOllamaSettings().baseUrl);
 }
 
 export function localEmbeddingConfig(): EmbeddingConfig {
@@ -65,7 +99,6 @@ function tokenize(text: string): string[] {
     tokens.add(word);
     const compact = word.replace(/[_-]/g, "");
     if (compact && compact !== word) tokens.add(compact);
-    // Character trigrams help short usernames / typos.
     const padded = ` ${compact || word} `;
     for (let i = 0; i < padded.length - 2; i += 1) {
       tokens.add(padded.slice(i, i + 3));
@@ -85,8 +118,7 @@ function fnv1a(token: string, seed: number): number {
 
 /**
  * Deterministic local embedding (feature hashing + L2 normalize).
- * Good enough for hybrid retrieval over usernames/collections without an API.
- * Used when no remote embedding API is configured.
+ * Weaker than neural models; always available offline with FTS5 hybrid.
  */
 export function embedTextLocal(
   text: string,
@@ -121,46 +153,59 @@ export function embeddingConfigForProvider(
   provider: EmbeddingProvider,
 ): EmbeddingConfig {
   if (provider === "local") return localEmbeddingConfig();
+  if (provider === "ollama") {
+    const settings = getOllamaSettings();
+    return {
+      profile: {
+        provider,
+        model: settings.model,
+        dimensions: EMBEDDING_DIMENSIONS,
+        endpoint: ollamaEndpoint(),
+      },
+      apiKey: getOllamaApiKey(),
+    };
+  }
   if (provider === "voyage") {
     return {
       profile: {
         provider,
-        model: process.env.VOYAGE_MODEL?.trim() || "voyage-4-lite",
+        model: getVoyageSettings().model,
         dimensions: EMBEDDING_DIMENSIONS,
         endpoint: VOYAGE_ENDPOINT,
       },
-      apiKey: process.env.VOYAGE_API_KEY?.trim() || null,
+      apiKey: getVoyageApiKey(),
     };
   }
   return {
     profile: {
       provider,
-      model: process.env.EMBEDDING_MODEL?.trim() || "text-embedding-3-small",
+      model: getOpenAiSettings().model,
       dimensions: EMBEDDING_DIMENSIONS,
       endpoint: openAiEndpoint(),
     },
-    apiKey: process.env.OPENAI_API_KEY?.trim() || null,
+    apiKey: getOpenAiApiKey(),
   };
 }
 
 /** @deprecated Prefer embeddingConfigForProvider or resolveSearchProvider */
 export function embeddingConfig(): EmbeddingConfig {
-  const explicit = process.env.EMBEDDING_PROVIDER?.trim().toLowerCase();
-  if (explicit) {
-    return embeddingConfigForProvider(assertValidEmbeddingProvider(explicit));
+  const preferred = getPreferredEmbeddingProvider();
+  if (preferred) {
+    return embeddingConfigForProvider(preferred);
   }
-  if (process.env.OPENAI_API_KEY?.trim()) {
-    return embeddingConfigForProvider("openai");
-  }
-  if (process.env.VOYAGE_API_KEY?.trim()) {
-    return embeddingConfigForProvider("voyage");
+  if (getOpenAiApiKey()) return embeddingConfigForProvider("openai");
+  if (getVoyageApiKey()) return embeddingConfigForProvider("voyage");
+  if (getOllamaSettings().configured) {
+    return embeddingConfigForProvider("ollama");
   }
   return localEmbeddingConfig();
 }
 
 export function isRemoteEmbeddingConfigured(): boolean {
   return Boolean(
-    process.env.OPENAI_API_KEY?.trim() || process.env.VOYAGE_API_KEY?.trim(),
+    getOpenAiApiKey() ||
+      getVoyageApiKey() ||
+      getOllamaSettings().configured,
   );
 }
 
@@ -177,10 +222,7 @@ export async function embedText(
     throw new Error(`${profile.provider} embedding endpoint is not configured`);
   }
 
-  const timeout = Number(process.env.EMBEDDING_TIMEOUT_MS ?? 10_000);
-  if (!Number.isFinite(timeout) || timeout <= 0) {
-    throw new Error("EMBEDDING_TIMEOUT_MS must be a positive number");
-  }
+  const timeout = getEmbeddingTimeoutMs();
 
   const response = await fetch(profile.endpoint, {
     method: "POST",
@@ -200,6 +242,7 @@ export async function embedText(
             output_dtype: "float",
           }
         : {
+            // OpenAI + Ollama OpenAI-compatible /embeddings
             model: profile.model,
             input: text,
             dimensions: profile.dimensions,

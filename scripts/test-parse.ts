@@ -8,9 +8,18 @@ async function main() {
     `instagram-saves-test-${Date.now()}.db`,
   );
   process.env.INSTAGRAM_SAVES_DB = tmpDb;
+  process.env.INSTAGRAM_SAVES_KEYRING = "memory";
   delete process.env.EMBEDDING_PROVIDER;
   delete process.env.OPENAI_API_KEY;
   delete process.env.VOYAGE_API_KEY;
+  delete process.env.OLLAMA_BASE_URL;
+  delete process.env.OLLAMA_API_KEY;
+  delete process.env.EMBEDDING_OLLAMA;
+  delete process.env.OLLAMA_EMBEDDING_MODEL;
+  delete process.env.EMBEDDING_BASE_URL;
+  delete process.env.EMBEDDING_MODEL;
+  delete process.env.VOYAGE_MODEL;
+  delete process.env.EMBEDDING_TIMEOUT_MS;
 
   const { parseExportJsonFiles } = await import("../src/lib/parse-export");
   const { importExportJson } = await import("../src/lib/import-export");
@@ -20,6 +29,13 @@ async function main() {
     "../src/lib/search/providers"
   );
   const { getSqlite } = await import("../src/lib/db");
+  const {
+    getSettingsKeysStatus,
+    updateSettingsKeys,
+  } = await import("../src/lib/settings/credentials");
+  const { resetKeyringForTests } = await import("../src/lib/settings/keyring");
+
+  resetKeyringForTests();
 
   const fixtures = path.join(process.cwd(), "fixtures");
 
@@ -99,17 +115,59 @@ async function main() {
     throw new Error("Without API keys only local should be available");
   }
 
-  process.env.OPENAI_API_KEY = "test-key";
-  process.env.EMBEDDING_MODEL = "text-embedding-3-small";
-  process.env.VOYAGE_API_KEY = "test-voyage-key";
-  process.env.VOYAGE_MODEL = "voyage-4-lite";
-
-  const availabilityBoth = getProviderAvailability();
+  const settingsBefore = getSettingsKeysStatus();
   if (
-    availabilityBoth.available.join(",") !== "local,openai,voyage" ||
-    availabilityBoth.default !== "openai"
+    !settingsBefore.keyring.available ||
+    settingsBefore.keyring.backend !== "memory" ||
+    settingsBefore.openai.configured ||
+    settingsBefore.voyage.configured
   ) {
-    throw new Error("Both remote keys should expose openai+voyage modes");
+    throw new Error("Memory keyring should start empty for cloud keys");
+  }
+
+  updateSettingsKeys({
+    openaiApiKey: "test-key",
+    voyageApiKey: "test-voyage-key",
+    ollamaBaseUrl: "http://127.0.0.1:11434/v1",
+    ollamaModel: "qwen3-embedding:0.6b",
+    ollamaEnabled: true,
+    openaiBaseUrl: "https://api.openai.com/v1",
+    openaiModel: "text-embedding-3-small",
+    voyageModel: "voyage-4-lite",
+    preferredProvider: "openai",
+    timeoutMs: 10000,
+  });
+
+  const settingsAfter = getSettingsKeysStatus();
+  if (
+    !settingsAfter.openai.configured ||
+    settingsAfter.openai.source !== "keyring" ||
+    !settingsAfter.voyage.configured ||
+    !settingsAfter.ollama.available ||
+    settingsAfter.ollama.model !== "qwen3-embedding:0.6b" ||
+    settingsAfter.openai.model !== "text-embedding-3-small" ||
+    settingsAfter.voyage.model !== "voyage-4-lite" ||
+    settingsAfter.preferredProvider !== "openai" ||
+    settingsAfter.timeoutMs !== 10000
+  ) {
+    throw new Error("Settings should persist keys in keyring and non-secrets in SQLite");
+  }
+  if (JSON.stringify(settingsAfter).includes("test-key")) {
+    throw new Error("Settings status must never echo secret values");
+  }
+
+  // Models come from Settings (sqlite), not env.
+  delete process.env.EMBEDDING_MODEL;
+  delete process.env.VOYAGE_MODEL;
+
+  const availabilityAll = getProviderAvailability();
+  if (
+    availabilityAll.available.join(",") !== "local,ollama,openai,voyage" ||
+    availabilityAll.default !== "openai"
+  ) {
+    throw new Error(
+      `Expected local,ollama,openai,voyage (got ${availabilityAll.available.join(",")})`,
+    );
   }
 
   let embeddingRequests = 0;
@@ -158,8 +216,13 @@ async function main() {
       .prepare("SELECT count(*) AS count FROM saved_items_vec_voyage")
       .get() as { count: number }
   ).count;
-  if (openAiCount !== 3 || voyageCount !== 3) {
-    throw new Error("Reindex should cover openai and voyage indexes");
+  const ollamaCount = (
+    sqlite
+      .prepare("SELECT count(*) AS count FROM saved_items_vec_ollama")
+      .get() as { count: number }
+  ).count;
+  if (openAiCount !== 3 || voyageCount !== 3 || ollamaCount !== 3) {
+    throw new Error("Reindex should cover openai, voyage, and ollama indexes");
   }
 
   const remoteSearch = await listSaves({
@@ -172,6 +235,22 @@ async function main() {
     embeddingRequests < 1
   ) {
     throw new Error("OpenAI index and query should use the mock OpenAI path");
+  }
+
+  const ollamaSearch = await listSaves({
+    q: "chef.daily",
+    provider: "ollama",
+  });
+  const ollamaQueryUrl = embeddingUrls.at(-1);
+  const ollamaQueryBody = embeddingBodies.at(-1);
+  if (
+    !["hybrid", "vec"].includes(ollamaSearch.searchMode ?? "") ||
+    ollamaSearch.searchProvider !== "ollama" ||
+    ollamaQueryUrl !== "http://127.0.0.1:11434/v1/embeddings" ||
+    ollamaQueryBody?.dimensions !== 1024 ||
+    ollamaQueryBody?.model !== "qwen3-embedding:0.6b"
+  ) {
+    throw new Error("Ollama search should hit OpenAI-compatible embeddings API");
   }
 
   const requestsBeforeFailure = embeddingRequests;
@@ -195,41 +274,44 @@ async function main() {
     files[0].content.replace("AbCdEfGhIjK", "OpenAITst12"),
     "saved_posts_openai.json",
   );
-  console.log("OpenAI+Voyage import:", remoteImport);
+  console.log("OpenAI+Voyage+Ollama import:", remoteImport);
   if (
     remoteImport.status !== "completed" ||
-    embeddingRequests !== requestsBeforeRemoteImport + 2 ||
+    embeddingRequests !== requestsBeforeRemoteImport + 3 ||
     !remoteImport.message.includes("openai") ||
-    !remoteImport.message.includes("voyage")
+    !remoteImport.message.includes("voyage") ||
+    !remoteImport.message.includes("ollama")
   ) {
-    throw new Error("Changed imports should update both remote indexes");
+    throw new Error("Changed imports should update ollama, openai, and voyage");
   }
   const vectorCounts = sqlite
     .prepare(
       `SELECT
         (SELECT count(*) FROM saved_items_vec_local) AS localCount,
+        (SELECT count(*) FROM saved_items_vec_ollama) AS ollamaCount,
         (SELECT count(*) FROM saved_items_vec_openai) AS openAiCount,
         (SELECT count(*) FROM saved_items_vec_voyage) AS voyageCount`,
     )
     .get() as {
     localCount: number;
+    ollamaCount: number;
     openAiCount: number;
     voyageCount: number;
   };
   if (
     vectorCounts.localCount !== 4 ||
+    vectorCounts.ollamaCount !== 4 ||
     vectorCounts.openAiCount !== 4 ||
     vectorCounts.voyageCount !== 4
   ) {
-    throw new Error("Imports must update local, openai, and voyage indexes");
+    throw new Error("Imports must update all four vector indexes");
   }
-  if (
-    embeddingUrls.some(
-      (url) =>
-        url !== "https://api.openai.com/v1/embeddings" &&
-        url !== "https://api.voyageai.com/v1/embeddings",
-    )
-  ) {
+  const allowedEndpoints = new Set([
+    "https://api.openai.com/v1/embeddings",
+    "https://api.voyageai.com/v1/embeddings",
+    "http://127.0.0.1:11434/v1/embeddings",
+  ]);
+  if (embeddingUrls.some((url) => !allowedEndpoints.has(url))) {
     throw new Error("Unexpected embedding endpoint in mock requests");
   }
 
@@ -239,7 +321,7 @@ async function main() {
   });
   const voyageQueryBody = embeddingBodies.at(-1);
   if (
-    !["hybrid", "vec"].includes(voyageSearch.searchMode) ||
+    !["hybrid", "vec"].includes(voyageSearch.searchMode ?? "") ||
     voyageSearch.searchProvider !== "voyage" ||
     voyageQueryBody?.input_type !== "query" ||
     voyageQueryBody?.output_dimension !== 1024
@@ -249,7 +331,7 @@ async function main() {
     );
   }
 
-  delete process.env.OPENAI_API_KEY;
+  updateSettingsKeys({ openaiApiKey: "" });
   const forcedFallback = await listSaves({
     q: "chef.daily",
     provider: "openai",
@@ -260,6 +342,180 @@ async function main() {
     !forcedFallback.providerFallbackReason
   ) {
     throw new Error("Unconfigured provider request must fall back to local");
+  }
+
+  // Env fallback still works when keyring entry is cleared.
+  process.env.OPENAI_API_KEY = "env-fallback-key";
+  const envAvailability = getProviderAvailability();
+  if (!envAvailability.configured.openai) {
+    throw new Error("OPENAI_API_KEY env fallback should configure openai");
+  }
+  delete process.env.OPENAI_API_KEY;
+
+  // --- Indexes status + background reindex jobs ---
+  updateSettingsKeys({
+    openaiApiKey: "test-openai-key",
+    voyageApiKey: "test-voyage-key",
+    ollamaEnabled: true,
+  });
+  const { getSearchIndexStatus } = await import("../src/lib/search/status");
+  const {
+    startReindexJob,
+    waitForIdleJob,
+    cancelReindexJob,
+    getLatestEmbeddingJob,
+  } = await import("../src/lib/search/jobs");
+
+  const statusBefore = getSearchIndexStatus();
+  if (statusBefore.providers.length !== 4) {
+    throw new Error("Status should include all four embedding providers");
+  }
+  const localStatus = statusBefore.providers.find((p) => p.provider === "local");
+  if (!localStatus?.configured || localStatus.health === "unavailable") {
+    throw new Error("Local provider should always be configured");
+  }
+  const openaiStatus = statusBefore.providers.find((p) => p.provider === "openai");
+  if (!openaiStatus?.configured) {
+    throw new Error("OpenAI should be configured for status test");
+  }
+
+  // Clear openai vectors to simulate a newly enabled / empty index.
+  sqlite.exec(`DELETE FROM saved_items_vec_openai`);
+  sqlite
+    .prepare(`DELETE FROM embedding_index_profiles WHERE index_name = 'openai'`)
+    .run();
+  const emptyOpenAi = getSearchIndexStatus().providers.find(
+    (p) => p.provider === "openai",
+  );
+  if (emptyOpenAi?.health !== "empty" || emptyOpenAi.embeddedCount !== 0) {
+    throw new Error("Cleared openai index should report empty coverage");
+  }
+
+  const started = startReindexJob("openai");
+  if (!started.ok) {
+    throw new Error(`Failed to start openai reindex: ${started.error}`);
+  }
+  if (started.job.state !== "running") {
+    throw new Error("Started job should be running");
+  }
+  const conflict = startReindexJob("local");
+  if (conflict.ok || conflict.status !== 409) {
+    throw new Error("Second concurrent job should be rejected with 409");
+  }
+
+  const finished = await waitForIdleJob(60_000);
+  if (!finished || finished.state !== "completed") {
+    throw new Error(
+      `OpenAI reindex job should complete (got ${finished?.state}: ${finished?.error})`,
+    );
+  }
+  if (finished.processed < 1 || finished.percent < 100) {
+    throw new Error("Completed job should report full progress");
+  }
+  const openaiAfter = getSearchIndexStatus().providers.find(
+    (p) => p.provider === "openai",
+  );
+  if (
+    openaiAfter?.health !== "ready" ||
+    openaiAfter.embeddedCount !== statusBefore.totalItems
+  ) {
+    throw new Error("OpenAI reindex via job should restore full coverage");
+  }
+
+  // Cooperative cancel: start all-configured and cancel immediately.
+  const allJob = startReindexJob("all-configured");
+  if (!allJob.ok) {
+    throw new Error(`Failed to start all-configured reindex: ${allJob.error}`);
+  }
+  const cancelled = cancelReindexJob(allJob.job.id);
+  if (!cancelled.ok) {
+    throw new Error(`Cancel should succeed: ${cancelled.error}`);
+  }
+  const afterCancel = await waitForIdleJob(60_000);
+  if (!afterCancel || afterCancel.state !== "cancelled") {
+    throw new Error(
+      `Cancelled job should end as cancelled (got ${afterCancel?.state})`,
+    );
+  }
+  if (getLatestEmbeddingJob()?.id !== afterCancel.id) {
+    throw new Error("Latest job should be the cancelled all-configured run");
+  }
+
+  const { resetLibrary, RESET_LIBRARY_CONFIRMATION_PHRASE } = await import(
+    "../src/lib/settings/reset-library"
+  );
+
+  let rejectedBadPhrase = false;
+  try {
+    resetLibrary("wrong phrase");
+  } catch {
+    rejectedBadPhrase = true;
+  }
+  if (!rejectedBadPhrase) {
+    throw new Error("resetLibrary must reject a wrong confirmation phrase");
+  }
+
+  const settingsBeforeReset = getSettingsKeysStatus();
+  const reset = resetLibrary(RESET_LIBRARY_CONFIRMATION_PHRASE);
+  if (!reset.ok || reset.wiped.savedItems < 1 || reset.wiped.imports < 1) {
+    throw new Error("resetLibrary should wipe existing content rows");
+  }
+
+  const afterReset = sqlite
+    .prepare(
+      `SELECT
+        (SELECT count(*) FROM saved_items) AS items,
+        (SELECT count(*) FROM imports) AS imports,
+        (SELECT count(*) FROM item_collections) AS collections,
+        (SELECT count(*) FROM saved_items_fts) AS fts,
+        (SELECT count(*) FROM saved_items_vec_local) AS localVec,
+        (SELECT count(*) FROM embedding_index_profiles) AS profiles,
+        (SELECT count(*) FROM app_settings) AS settings`,
+    )
+    .get() as {
+    items: number;
+    imports: number;
+    collections: number;
+    fts: number;
+    localVec: number;
+    profiles: number;
+    settings: number;
+  };
+
+  if (
+    afterReset.items !== 0 ||
+    afterReset.imports !== 0 ||
+    afterReset.collections !== 0 ||
+    afterReset.fts !== 0 ||
+    afterReset.localVec !== 0 ||
+    afterReset.profiles !== 0
+  ) {
+    throw new Error("resetLibrary must empty content and search indexes");
+  }
+  if (afterReset.settings < 1) {
+    throw new Error("resetLibrary must keep app_settings");
+  }
+
+  const settingsAfterReset = getSettingsKeysStatus();
+  if (
+    settingsAfterReset.preferredProvider !==
+      settingsBeforeReset.preferredProvider ||
+    settingsAfterReset.openai.configured !==
+      settingsBeforeReset.openai.configured ||
+    settingsAfterReset.voyage.configured !==
+      settingsBeforeReset.voyage.configured ||
+    settingsAfterReset.openai.model !== settingsBeforeReset.openai.model
+  ) {
+    throw new Error("resetLibrary must keep settings and keyring secrets");
+  }
+
+  // Empty schemas must still accept a fresh import.
+  const afterWipeImport = await importExportJson(
+    files[0].content,
+    "sample-saved-posts.json",
+  );
+  if (afterWipeImport.status !== "completed" || afterWipeImport.itemsAdded < 1) {
+    throw new Error("Import after resetLibrary should succeed on empty schemas");
   }
 
   try {

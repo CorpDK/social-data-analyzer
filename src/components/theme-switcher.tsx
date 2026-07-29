@@ -76,8 +76,8 @@ export function ThemeSwitcher() {
             onClick={() => select(option.value)}
             className={`rounded-full px-2.5 py-1 text-xs transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
               selected
-                ? "bg-[var(--ink)] text-[var(--surface)]"
-                : "text-[var(--muted)] hover:text-[var(--ink)]"
+                ? "control-active"
+                : "text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
             }`}
           >
             {option.label}

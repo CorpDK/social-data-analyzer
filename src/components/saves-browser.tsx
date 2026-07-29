@@ -14,7 +14,7 @@ type SaveRow = {
   collections: string[];
 };
 
-type EmbeddingProvider = "local" | "openai" | "voyage";
+type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
 
 type ProviderInfo = {
   available: EmbeddingProvider[];
@@ -49,7 +49,8 @@ type FilterOptions = {
 const PROVIDER_STORAGE_KEY = "instagram-saves-search-provider";
 
 const PROVIDER_LABELS: Record<EmbeddingProvider, string> = {
-  local: "Local (offline)",
+  local: "Local (basic)",
+  ollama: "Ollama",
   openai: "OpenAI",
   voyage: "Voyage",
 };
@@ -62,13 +63,19 @@ function formatDate(value: string | null) {
   });
 }
 
+function isProvider(value: string | null): value is EmbeddingProvider {
+  return (
+    value === "local" ||
+    value === "ollama" ||
+    value === "openai" ||
+    value === "voyage"
+  );
+}
+
 function readStoredProvider(): EmbeddingProvider | null {
   if (typeof window === "undefined") return null;
   const stored = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
-  if (stored === "local" || stored === "openai" || stored === "voyage") {
-    return stored;
-  }
-  return null;
+  return isProvider(stored) ? stored : null;
 }
 
 export function SavesBrowser() {
@@ -108,11 +115,7 @@ export function SavesBrowser() {
       if ("provider" in patch) {
         const providerValue =
           patch.provider ?? providers?.default ?? "local";
-        if (
-          providerValue === "local" ||
-          providerValue === "openai" ||
-          providerValue === "voyage"
-        ) {
+        if (isProvider(providerValue)) {
           window.localStorage.setItem(PROVIDER_STORAGE_KEY, providerValue);
         }
       }

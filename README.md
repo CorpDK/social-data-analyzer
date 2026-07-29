@@ -7,7 +7,9 @@ Local Next.js app that imports official Instagram data exports, stores saved pos
 - Upload Instagram JSON exports (`.zip` or `.json`)
 - SQLite persistence with **WAL** (`data/instagram-saves.db`)
 - Hybrid search: **FTS5** keyword + **sqlite-vec** semantic (RRF merge)
-- Live semantic providers: **local** (always), plus **OpenAI** / **Voyage** when API keys are set
+- Semantic providers: **Local (basic)** hasher (always), **Ollama**, **OpenAI**, **Voyage**
+- **Indexes** page: per-provider coverage/health + UI reindex with live progress
+- Runtime config via **Settings** (keys → system keyring; models/URLs → SQLite); env vars are optional fallbacks
 - Light / dark / system theme (header switcher; preference in localStorage)
 - Deduping by media shortcode (and identical file content hash)
 - Periodic re-imports: adds new saves, updates metadata/collections, skips unchanged
@@ -20,71 +22,99 @@ pnpm install
 pnpm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
+Open [http://localhost:3000](http://localhost:3000), then **Settings** to configure providers.
 
 ### Search index
 
 Search always keeps offline layers: FTS5 keyword search and a deterministic
-1024-dimension local feature-hash index. The local semantic model is weaker than
-a hosted embedding model, but needs no network or secret.
+1024-dimension local feature-hash index (**Local (basic)**). That hasher is
+weaker than a neural model, but needs no network or secret.
 
-OpenAI and Voyage are available in the UI only when their keys are configured.
-Both can be live at once. On the **Saves** page, switch semantic provider with
-the segmented control (or `?provider=openai|voyage|local`). The choice is stored
-in localStorage and validated server-side; an unavailable provider falls back to
-local and reports that in the response.
+Neural providers are available in the UI when configured:
 
-`EMBEDDING_PROVIDER` sets the default when no UI/URL override is present:
+| Mode | Availability |
+|------|----------------|
+| `local` | Always (hasher + FTS5) |
+| `ollama` | Settings enable (or env `OLLAMA_BASE_URL` / `EMBEDDING_OLLAMA=1`) |
+| `openai` | Keyring / Settings (or env `OPENAI_API_KEY`) |
+| `voyage` | Keyring / Settings (or env `VOYAGE_API_KEY`) |
 
-- `local` — offline local vectors
-- `openai` — prefer OpenAI when `OPENAI_API_KEY` is set
-- `voyage` — prefer Voyage when `VOYAGE_API_KEY` is set
+On the **Saves** page, switch semantic provider with the segmented control (or
+`?provider=local|ollama|openai|voyage`). The choice is stored in localStorage
+and validated server-side; an unavailable provider falls back to local and
+reports that in the response.
 
-If omitted, the app selects OpenAI when `OPENAI_API_KEY` is set, otherwise
-Voyage when `VOYAGE_API_KEY` is set, otherwise local. Remote embedding and KNN
-errors—including timeouts and network/5xx failures—fall back to the matching
-local query vector and local document index. Remote and local vector spaces are
-never mixed. Search reports `hybrid`/`vec` for the preferred path,
-`hybrid-local-fallback`/`vec-local-fallback` after failover, and `fts` when only
-keyword results are available.
+**Settings → Preferred provider** (or env `EMBEDDING_PROVIDER`) sets the default
+when no UI/URL override is present. If omitted (Auto), the app prefers OpenAI,
+then Voyage, then Ollama, then local.
+
+Remote embedding and KNN errors—including timeouts and network/5xx
+failures—fall back to the matching local query vector and local document index.
+Vector spaces are never mixed across providers. Search reports `hybrid`/`vec`
+for the preferred path, `hybrid-local-fallback`/`vec-local-fallback` after
+failover, and `fts` when only keyword results are available.
 
 `GET /api/search/providers` returns `{ available, configured, default }` without
 leaking key values.
 
+### API keys & Settings
+
+Prefer **Settings** in the nav. Configure:
+
+| Setting | Persistence |
+|---------|-------------|
+| OpenAI / Voyage / optional Ollama API keys | OS keyring (`@napi-rs/keyring`) |
+| OpenAI base URL & model | SQLite `app_settings` |
+| Voyage model | SQLite `app_settings` |
+| Ollama enable / base URL / model | SQLite `app_settings` |
+| Preferred provider & embedding timeout | SQLite `app_settings` |
+
+The API never returns secret values to the browser after save—only configured
+booleans / masked status. Changes apply on the next request (no restart).
+
+If the keyring is unavailable (headless/CI), non-secret settings still save to
+SQLite; API keys fall back to environment variables.
+
+**Danger zone** (Settings): wipe all saves, imports, collections, FTS, and
+vector indexes via `POST /api/settings/reset-library` with body
+`{ "confirmation": "DELETE ALL SAVES" }`. Keeps `app_settings` and keyring
+secrets. Local single-user — the typed phrase is the deliberate safeguard.
+
 ```bash
+# optional — only for CI/headless overrides; see .env.example
 cp .env.example .env.local
-# set OPENAI_API_KEY and/or VOYAGE_API_KEY
 pnpm run reindex
 ```
 
-OpenAI defaults to `text-embedding-3-small` at 1024 dimensions. Override its
-model with `EMBEDDING_MODEL`; set `EMBEDDING_BASE_URL` to an OpenAI-compatible
-base URL (default `https://api.openai.com/v1`) or full `/embeddings` URL.
-`OPENAI_API_KEY` is used as the bearer token.
+Defaults (editable in Settings):
 
-Voyage uses its native `https://api.voyageai.com/v1/embeddings` API with
-`input_type=document` while indexing and `input_type=query` while searching.
-Set `VOYAGE_API_KEY`; `VOYAGE_MODEL` defaults to the current cost/latency model
-`voyage-4-lite`, with 1024 dimensions. Voyage's supported Matryoshka dimensions
-are 256, 512, 1024, and 2048.
+- OpenAI: `https://api.openai.com/v1`, `text-embedding-3-small` at 1024 dims
+- Voyage: native `https://api.voyageai.com/v1/embeddings`, `voyage-4-lite` at 1024 dims (`input_type=document` while indexing, `query` while searching)
+- Ollama: `http://127.0.0.1:11434/v1`, `qwen3-embedding:0.6b` (pull with `ollama pull qwen3-embedding:0.6b`)
+- Remote timeout: 10000 ms
 
-Local, OpenAI, and Voyage vectors all use the same fixed 1024 dimensions.
-`EMBEDDING_TIMEOUT_MS` controls the remote request timeout (default 10000).
+All four vector indexes use fixed 1024 dimensions. Tables:
+`saved_items_vec_local`, `saved_items_vec_ollama`, `saved_items_vec_openai`,
+`saved_items_vec_voyage`.
+
 `pnpm run reindex` always rebuilds FTS and local vectors, and also rebuilds every
-configured remote provider. `--remote` asserts that at least one remote key is
-configured:
+configured neural provider. `--remote` asserts that at least one neural provider
+is configured:
 
 ```bash
 pnpm run reindex -- --remote
 ```
 
-The database stores vectors in `saved_items_vec_local`, `saved_items_vec_openai`,
-and `saved_items_vec_voyage` as needed (`FLOAT[1024]`), with separate provenance
-metadata. A mismatch disables only that index path. Run `pnpm run reindex` after
-changing a remote model or endpoint. Imports update FTS in their data
-transaction, then write local vectors and attempt each configured remote index
-after commit. No SQLite transaction is held over a network call, and remote
-failures do not roll back the import or its offline search indexes.
+Or use **Indexes** in the nav (`/indexes`): per-provider status (coverage,
+model/dimensions, health) and **Reindex** / **Rebuild** buttons with live
+progress. Jobs persist in SQLite (`embedding_jobs`); only one runs at a time;
+cancel is cooperative between items. APIs: `GET /api/search/status`,
+`POST /api/search/reindex`, `GET /api/search/reindex`,
+`POST /api/search/reindex/cancel`.
+
+Imports update FTS in their data transaction, then write local vectors and
+attempt each configured neural index after commit. No SQLite transaction is held
+over a network call.
 
 ### Theme
 
@@ -114,6 +144,7 @@ before paint to avoid a flash.
 - Next.js (App Router)
 - better-sqlite3 + Drizzle schema
 - SQLite **WAL**, **FTS5**, and **sqlite-vec**
+- `@napi-rs/keyring` for OS credential storage
 - adm-zip for archive extraction
 
 ## Notes
@@ -121,3 +152,5 @@ before paint to avoid a flash.
 - This uses Meta's official data download only — not the live Instagram API (saved posts are not exposed there).
 - Media CDN URLs inside exports can expire; the app stores Instagram permalinks.
 - Database files under `data/` are local-only and gitignored (including `-wal` / `-shm`).
+- Infra-only env vars (not in Settings): `INSTAGRAM_SAVES_DB`, `INSTAGRAM_SAVES_KEYRING=memory` for tests.
+- Development schema changes apply on hot reload; bump `SCHEMA_VERSION` when adding or changing tables/indexes.

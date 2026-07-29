@@ -7,7 +7,9 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 const links = [
   { href: "/", label: "Overview" },
   { href: "/saves", label: "Saves" },
+  { href: "/indexes", label: "Indexes" },
   { href: "/import", label: "Import" },
+  { href: "/settings", label: "Settings" },
 ];
 
 export function AppNav() {
@@ -15,7 +17,7 @@ export function AppNav() {
 
   return (
     <header className="border-b border-[var(--line)]/80 bg-[var(--surface)]/80 backdrop-blur-md">
-      <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-4 sm:px-6">
+      <div className="mx-auto flex w-full max-w-6xl flex-wrap items-center justify-between gap-3 px-4 py-3 sm:px-6 sm:py-4">
         <Link href="/" className="group flex items-baseline gap-2">
           <span className="font-[family-name:var(--font-fraunces)] text-xl tracking-tight text-[var(--ink)]">
             Saves Ledger
@@ -24,9 +26,9 @@ export function AppNav() {
             Instagram archive
           </span>
         </Link>
-        <div className="flex flex-wrap items-center gap-2 sm:gap-3">
+        <div className="flex min-w-0 max-w-full flex-wrap items-center gap-2 sm:gap-3">
           <nav
-            className="flex items-center gap-1 rounded-full bg-[var(--chip)] p-1"
+            className="flex max-w-full items-center gap-0.5 overflow-x-auto rounded-full border border-transparent bg-[var(--chip)] p-1 sm:gap-1"
             aria-label="Primary"
           >
             {links.map((link) => {
@@ -38,10 +40,11 @@ export function AppNav() {
                 <Link
                   key={link.href}
                   href={link.href}
-                  className={`rounded-full px-3.5 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
+                  aria-current={active ? "page" : undefined}
+                  className={`shrink-0 rounded-full px-2.5 py-1.5 text-sm font-medium transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--chip)] sm:px-3.5 ${
                     active
-                      ? "bg-[var(--ink)] text-[var(--surface)]"
-                      : "text-[var(--muted)] hover:text-[var(--ink)]"
+                      ? "control-active"
+                      : "text-[var(--muted)] hover:bg-[var(--surface)] hover:text-[var(--ink)]"
                   }`}
                 >
                   {link.label}

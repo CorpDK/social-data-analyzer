@@ -12,10 +12,32 @@ import {
   type EmbeddingProfile,
   type EmbeddingProvider,
 } from "./embeddings";
-import { configuredRemoteProviders } from "./providers";
+import {
+  configuredRemoteProviders,
+  isProviderConfigured,
+} from "./providers";
+
+export type RebuildProgress = {
+  phase: "preparing" | "fts" | "embedding" | "storing" | "done";
+  processed: number;
+  total: number;
+  currentProvider?: EmbeddingProvider;
+  message?: string;
+};
+
+export type RebuildProgressCallback = (
+  progress: RebuildProgress,
+) => void | Promise<void>;
+
+export class RebuildCancelledError extends Error {
+  constructor(message = "Reindex cancelled") {
+    super(message);
+    this.name = "RebuildCancelledError";
+  }
+}
 
 type SearchRow = SearchableItem & { id: number };
-export type VectorIndexName = "local" | "openai" | "voyage";
+export type VectorIndexName = "local" | "ollama" | "openai" | "voyage";
 
 export type EmbeddingSyncResult = {
   status: "updated" | "skipped";
@@ -24,7 +46,12 @@ export type EmbeddingSyncResult = {
   message: string;
 };
 
-const ALL_VECTOR_INDEXES: VectorIndexName[] = ["local", "openai", "voyage"];
+const ALL_VECTOR_INDEXES: VectorIndexName[] = [
+  "local",
+  "ollama",
+  "openai",
+  "voyage",
+];
 
 function vectorTable(index: VectorIndexName): string {
   return `saved_items_vec_${index}`;
@@ -166,18 +193,35 @@ function recreateVectorTable(
   `);
 }
 
+export type IndexedEmbeddingProfileMeta = EmbeddingProfile & {
+  updatedAt: number;
+};
+
+export function getIndexedEmbeddingProfileMeta(
+  index: VectorIndexName,
+  sqlite: Database.Database = getSqlite(),
+): IndexedEmbeddingProfileMeta | null {
+  const row = sqlite
+    .prepare(
+      `SELECT provider, model, dimensions, endpoint, updated_at AS updatedAt
+       FROM embedding_index_profiles WHERE index_name = ?`,
+    )
+    .get(index) as IndexedEmbeddingProfileMeta | undefined;
+  return row ?? null;
+}
+
 export function getIndexedEmbeddingProfile(
   index: VectorIndexName,
   sqlite: Database.Database = getSqlite(),
 ): EmbeddingProfile | null {
-  return (
-    sqlite
-      .prepare(
-        `SELECT provider, model, dimensions, endpoint
-         FROM embedding_index_profiles WHERE index_name = ?`,
-      )
-      .get(index) as EmbeddingProfile | undefined
-  ) ?? null;
+  const meta = getIndexedEmbeddingProfileMeta(index, sqlite);
+  if (!meta) return null;
+  return {
+    provider: meta.provider,
+    model: meta.model,
+    dimensions: meta.dimensions,
+    endpoint: meta.endpoint,
+  };
 }
 
 export function embeddingProfilesMatch(
@@ -301,7 +345,8 @@ async function syncProviderIndex(
     return { updated: true };
   }
 
-  if (!config.apiKey) return { updated: false };
+  // Cloud providers need a real key; Ollama accepts a dummy bearer token.
+  if (provider !== "ollama" && !config.apiKey) return { updated: false };
 
   if (!replace && !canExtendRemoteIndex(provider, config, rows, sqlite)) {
     return {
@@ -381,11 +426,120 @@ export async function syncItemEmbeddings(
   };
 }
 
+function assertProviderRebuildable(provider: EmbeddingProvider) {
+  if (!isProviderConfigured(provider)) {
+    throw new Error(
+      `${provider} is not configured — enable it in Settings before reindexing`,
+    );
+  }
+  if (provider !== "local" && provider !== "ollama") {
+    const config = embeddingConfigForProvider(provider);
+    if (!config.apiKey) {
+      throw new Error(`${provider} API key is missing`);
+    }
+  }
+}
+
+async function emitProgress(
+  onProgress: RebuildProgressCallback | undefined,
+  progress: RebuildProgress,
+) {
+  await onProgress?.(progress);
+}
+
+function throwIfCancelled(shouldCancel?: () => boolean) {
+  if (shouldCancel?.()) throw new RebuildCancelledError();
+}
+
 /**
- * Rebuild FTS and local vectors unconditionally, then rebuild every configured
- * remote index. Network calls never hold a transaction.
+ * Rebuild a single provider's vector index with incremental progress.
+ * Embedding network calls never run inside a SQLite write transaction.
  */
-export async function rebuildSearchIndex(options?: {
+export async function rebuildProviderIndex(
+  provider: EmbeddingProvider,
+  options?: {
+    onProgress?: RebuildProgressCallback;
+    shouldCancel?: () => boolean;
+  },
+): Promise<{ items: number }> {
+  assertProviderRebuildable(provider);
+
+  const sqlite = getSqlite();
+  const rows = allSearchRows(sqlite);
+  const config = embeddingConfigForProvider(provider);
+  const total = rows.length;
+  const onProgress = options?.onProgress;
+  const shouldCancel = options?.shouldCancel;
+
+  await emitProgress(onProgress, {
+    phase: "preparing",
+    processed: 0,
+    total,
+    currentProvider: provider,
+    message: `Preparing ${provider} index…`,
+  });
+  throwIfCancelled(shouldCancel);
+
+  // Recreate the empty table in a short transaction before any network work.
+  sqlite.transaction(() => {
+    recreateVectorTable(provider, config.profile.dimensions, sqlite);
+  })();
+
+  let processed = 0;
+  for (const row of rows) {
+    throwIfCancelled(shouldCancel);
+    await emitProgress(onProgress, {
+      phase: "embedding",
+      processed,
+      total,
+      currentProvider: provider,
+      message: `Embedding ${provider} ${processed + 1}/${total}…`,
+    });
+
+    const embedding = await embedText(
+      buildSearchDocument(row).combined,
+      config,
+    );
+
+    throwIfCancelled(shouldCancel);
+
+    // Short write only — never held across embedText/network.
+    sqlite.transaction(() => {
+      upsertItemEmbedding(provider, row.id, embedding, sqlite);
+    })();
+
+    processed += 1;
+    await emitProgress(onProgress, {
+      phase: "embedding",
+      processed,
+      total,
+      currentProvider: provider,
+      message: `Embedded ${provider} ${processed}/${total}`,
+    });
+  }
+
+  sqlite.transaction(() => {
+    writeEmbeddingProfile(provider, config.profile, sqlite);
+  })();
+
+  await emitProgress(onProgress, {
+    phase: "done",
+    processed,
+    total,
+    currentProvider: provider,
+    message: `${provider} index rebuilt (${processed} items)`,
+  });
+
+  return { items: processed };
+}
+
+/**
+ * Rebuild FTS, then every configured provider (local + remotes).
+ * Network calls never hold a transaction.
+ */
+export async function rebuildConfiguredIndexes(options?: {
+  onProgress?: RebuildProgressCallback;
+  shouldCancel?: () => boolean;
   requireRemote?: boolean;
 }): Promise<{
   items: number;
@@ -394,33 +548,81 @@ export async function rebuildSearchIndex(options?: {
 }> {
   if (options?.requireRemote && !isRemoteEmbeddingConfigured()) {
     throw new Error(
-      "--remote requires OPENAI_API_KEY and/or VOYAGE_API_KEY",
+      "--remote requires OpenAI/Voyage keys (Settings or env) and/or Ollama configured",
     );
   }
 
   const sqlite = getSqlite();
   const rows = allSearchRows(sqlite);
+  const onProgress = options?.onProgress;
+  const shouldCancel = options?.shouldCancel;
+  const total = rows.length;
+
+  await emitProgress(onProgress, {
+    phase: "fts",
+    processed: 0,
+    total: Math.max(1, total * Math.max(1, 1 + configuredRemoteProviders().length)),
+    message: "Rebuilding keyword (FTS) index…",
+  });
+  throwIfCancelled(shouldCancel);
+
   sqlite.transaction(() => {
     sqlite.exec(`DELETE FROM saved_items_fts`);
     for (const row of rows) upsertItemFts(row.id, row, sqlite);
   })();
 
+  const providers: EmbeddingProvider[] = [
+    "local",
+    ...configuredRemoteProviders(),
+  ];
   const remoteUpdated: string[] = [];
-  await syncProviderIndex("local", rows, true, sqlite);
+  const overallTotal = Math.max(1, total * providers.length || 1);
+  let overallBase = 0;
 
-  for (const provider of configuredRemoteProviders()) {
-    const result = await syncProviderIndex(provider, rows, true, sqlite);
-    if (result.updated) remoteUpdated.push(provider);
-    else if (result.error) {
-      throw new Error(`Failed to rebuild ${provider} index: ${result.error}`);
-    }
+  for (const provider of providers) {
+    throwIfCancelled(shouldCancel);
+    await rebuildProviderIndex(provider, {
+      onProgress: async (progress) => {
+        await emitProgress(onProgress, {
+          ...progress,
+          processed: overallBase + progress.processed,
+          total: overallTotal,
+        });
+      },
+      shouldCancel,
+    });
+    overallBase += total;
+    if (provider !== "local") remoteUpdated.push(provider);
   }
 
+  await emitProgress(onProgress, {
+    phase: "done",
+    processed: overallTotal,
+    total: overallTotal,
+    message: `Rebuilt FTS and ${providers.join(", ")}`,
+  });
+
   return {
-    items: rows.length,
-    providers: ["local", ...remoteUpdated],
+    items: total,
+    providers,
     remoteUpdated,
   };
+}
+
+/**
+ * Rebuild FTS and local vectors unconditionally, then rebuild every configured
+ * remote index. Network calls never hold a transaction.
+ */
+export async function rebuildSearchIndex(options?: {
+  requireRemote?: boolean;
+  onProgress?: RebuildProgressCallback;
+  shouldCancel?: () => boolean;
+}): Promise<{
+  items: number;
+  providers: string[];
+  remoteUpdated: string[];
+}> {
+  return rebuildConfiguredIndexes(options);
 }
 
 /** Backfill keyword and fixed local vectors without startup network calls. */
