@@ -1,0 +1,27 @@
+{
+  "saved_saved_collections": [
+    {
+      "title": "Recipes",
+      "media_list_data": [
+        {
+          "title": "chef.daily",
+          "string_map_data": {
+            "Saved on": {
+              "href": "https://www.instagram.com/reel/XyZ12345678/",
+              "timestamp": 1710000000
+            }
+          }
+        },
+        {
+          "title": "bake.lab",
+          "string_map_data": {
+            "Saved on": {
+              "href": "https://www.instagram.com/p/NewPost99999/",
+              "timestamp": 1720000000
+            }
+          }
+        }
+      ]
+    }
+  ]
+}
