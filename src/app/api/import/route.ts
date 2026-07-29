@@ -36,9 +36,9 @@ export async function POST(request: Request) {
 
     let result;
     if (lower.endsWith(".zip")) {
-      result = importExportArchive(buffer, filename);
+      result = await importExportArchive(buffer, filename);
     } else if (lower.endsWith(".json")) {
-      result = importExportJson(buffer.toString("utf8"), filename);
+      result = await importExportJson(buffer.toString("utf8"), filename);
     } else {
       return NextResponse.json(
         { error: "Only .zip and .json exports are supported." },

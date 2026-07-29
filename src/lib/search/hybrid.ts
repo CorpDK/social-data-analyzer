@@ -1,0 +1,243 @@
+import { getSqlite } from "../db";
+import {
+  embedText,
+  embeddingConfigForProvider,
+  embeddingToBuffer,
+  localEmbeddingConfig,
+  type EmbeddingConfig,
+  type EmbeddingProvider,
+} from "./embeddings";
+import { resolveSearchProvider } from "./providers";
+import {
+  vectorIndexMatchesConfig,
+  type VectorIndexName,
+} from "./sync";
+
+export type SearchMode =
+  | "hybrid"
+  | "vec"
+  | "hybrid-local-fallback"
+  | "vec-local-fallback"
+  | "fts"
+  | "none";
+
+export type RankedHit = {
+  id: number;
+  score: number;
+  source: "fts" | "vec" | "both";
+};
+
+const RRF_K = 60;
+
+function ftsToken(raw: string): string | null {
+  const cleaned = raw.replace(/["]/g, "").trim();
+  if (!cleaned) return null;
+  return `"${cleaned}"*`;
+}
+
+export function buildFtsQuery(input: string): string | null {
+  const trimmed = input.trim();
+  if (!trimmed) return null;
+  if (/\b(AND|OR|NOT|NEAR)\b|"|\*/i.test(trimmed)) return trimmed;
+
+  const parts = trimmed
+    .split(/\s+/)
+    .map(ftsToken)
+    .filter((part): part is string => Boolean(part));
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+function rrfMerge(
+  ftsHits: Array<{ id: number; rank: number }>,
+  vecHits: Array<{ id: number; distance: number }>,
+): RankedHit[] {
+  const scores = new Map<number, { score: number; sources: Set<"fts" | "vec"> }>();
+  ftsHits.forEach((hit, index) => {
+    const entry = scores.get(hit.id) ?? { score: 0, sources: new Set() };
+    entry.score += 1 / (RRF_K + index + 1);
+    entry.sources.add("fts");
+    scores.set(hit.id, entry);
+  });
+  vecHits.forEach((hit, index) => {
+    const entry = scores.get(hit.id) ?? { score: 0, sources: new Set() };
+    entry.score += 1 / (RRF_K + index + 1);
+    entry.sources.add("vec");
+    scores.set(hit.id, entry);
+  });
+  return [...scores.entries()]
+    .map(([id, entry]) => ({
+      id,
+      score: entry.score,
+      source:
+        entry.sources.size === 2
+          ? ("both" as const)
+          : entry.sources.has("fts")
+            ? ("fts" as const)
+            : ("vec" as const),
+    }))
+    .sort((a, b) => b.score - a.score);
+}
+
+export function searchFts(
+  query: string,
+  limit = 200,
+): Array<{ id: number; rank: number }> {
+  const match = buildFtsQuery(query);
+  if (!match) return [];
+  try {
+    return getSqlite()
+      .prepare(
+        `SELECT rowid AS id, rank
+         FROM saved_items_fts
+         WHERE saved_items_fts MATCH ?
+         ORDER BY rank
+         LIMIT ?`,
+      )
+      .all(match, limit) as Array<{ id: number; rank: number }>;
+  } catch {
+    return [];
+  }
+}
+
+type VecSearchResult = {
+  hits: Array<{ id: number; distance: number }>;
+  status: "ok" | "unavailable" | "failed";
+};
+
+async function searchVectorIndex(
+  index: VectorIndexName,
+  config: EmbeddingConfig,
+  query: string,
+  limit: number,
+): Promise<VecSearchResult> {
+  const sqlite = getSqlite();
+  if (!vectorIndexMatchesConfig(index, config, sqlite)) {
+    return { hits: [], status: "unavailable" };
+  }
+
+  const table = vectorTable(index);
+  const fetchK = Math.min(Math.max(limit * 2, 32), 500);
+  try {
+    const embedding = await embedText(query, config, "query");
+    const rows = sqlite
+      .prepare(
+        `SELECT item_id AS id, distance
+         FROM ${table}
+         WHERE embedding MATCH ?
+           AND k = ?
+         ORDER BY distance`,
+      )
+      .all(embeddingToBuffer(embedding), fetchK) as Array<{
+      id: number;
+      distance: number;
+    }>;
+    if (rows.length === 0) return { hits: [], status: "ok" };
+
+    const best = rows[0].distance;
+    const absoluteMax = Number(process.env.VEC_DISTANCE_MAX ?? 1.22);
+    const relativeMax = best + Number(process.env.VEC_DISTANCE_SLACK ?? 0.12);
+    const cutoff = Math.min(absoluteMax, relativeMax);
+    return {
+      hits: rows.filter((row) => row.distance <= cutoff).slice(0, limit),
+      status: "ok",
+    };
+  } catch {
+    return { hits: [], status: "failed" };
+  }
+}
+
+function vectorTable(index: VectorIndexName): string {
+  return `saved_items_vec_${index}`;
+}
+
+export type HybridSearchResult = {
+  hits: RankedHit[];
+  mode: SearchMode;
+  provider: EmbeddingProvider;
+  providerFallback: boolean;
+  providerFallbackReason?: string;
+};
+
+export async function hybridSearchIds(
+  query: string,
+  limit = 200,
+  requestedProvider?: EmbeddingProvider | null,
+): Promise<HybridSearchResult> {
+  const resolved = resolveSearchProvider(requestedProvider ?? null);
+  const ftsHits = searchFts(query, limit);
+  let vecResult: VecSearchResult;
+  let usedFallback = false;
+  let activeProvider = resolved.provider;
+
+  if (resolved.provider === "local") {
+    vecResult = await searchVectorIndex(
+      "local",
+      localEmbeddingConfig(),
+      query,
+      limit,
+    );
+  } else {
+    const remoteConfig = embeddingConfigForProvider(resolved.provider);
+    vecResult = await searchVectorIndex(
+      resolved.provider,
+      remoteConfig,
+      query,
+      limit,
+    );
+    if (vecResult.status !== "ok") {
+      usedFallback = true;
+      activeProvider = "local";
+      vecResult = await searchVectorIndex(
+        "local",
+        localEmbeddingConfig(),
+        query,
+        limit,
+      );
+    }
+  }
+
+  if (ftsHits.length === 0 && vecResult.hits.length === 0) {
+    return {
+      hits: [],
+      mode: "none",
+      provider: activeProvider,
+      providerFallback: resolved.fallback || usedFallback,
+      providerFallbackReason:
+        resolved.reason ??
+        (usedFallback
+          ? `${resolved.provider} semantic search failed; using local vectors.`
+          : undefined),
+    };
+  }
+
+  const hits = rrfMerge(ftsHits, vecResult.hits).slice(0, limit);
+  if (vecResult.hits.length === 0) {
+    return {
+      hits,
+      mode: "fts",
+      provider: activeProvider,
+      providerFallback: resolved.fallback || usedFallback,
+      providerFallbackReason: resolved.reason,
+    };
+  }
+  if (usedFallback || resolved.fallback) {
+    return {
+      hits,
+      mode:
+        ftsHits.length > 0
+          ? "hybrid-local-fallback"
+          : "vec-local-fallback",
+      provider: activeProvider,
+      providerFallback: true,
+      providerFallbackReason:
+        resolved.reason ??
+        `${resolved.provider} semantic search unavailable; using local vectors.`,
+    };
+  }
+  return {
+    hits,
+    mode: ftsHits.length > 0 ? "hybrid" : "vec",
+    provider: activeProvider,
+    providerFallback: false,
+  };
+}

@@ -1,6 +1,7 @@
 @import "tailwindcss";
 
-:root {
+:root,
+[data-theme="light"] {
   --bg: #f3f1ec;
   --bg-accent: #e7efe9;
   --surface: #fffcf7;
@@ -12,6 +13,26 @@
   --warn: #9a5b16;
   --danger: #9b2c2c;
   --chip: #eef3ef;
+  --glow-a: #dceee4;
+  --glow-b: #efe6d6;
+  color-scheme: light;
+}
+
+[data-theme="dark"] {
+  --bg: #101513;
+  --bg-accent: #18201c;
+  --surface: #171e1b;
+  --ink: #e7eee9;
+  --muted: #9aaba3;
+  --line: #2c3933;
+  --accent: #3dba95;
+  --accent-soft: #1a3a30;
+  --warn: #e0a04a;
+  --danger: #e07070;
+  --chip: #222c27;
+  --glow-a: #163028;
+  --glow-b: #2a2418;
+  color-scheme: dark;
 }
 
 @theme inline {
@@ -24,8 +45,8 @@
 
 body {
   background:
-    radial-gradient(1200px 500px at 10% -10%, #dceee4 0%, transparent 55%),
-    radial-gradient(900px 400px at 100% 0%, #efe6d6 0%, transparent 45%),
+    radial-gradient(1200px 500px at 10% -10%, var(--glow-a) 0%, transparent 55%),
+    radial-gradient(900px 400px at 100% 0%, var(--glow-b) 0%, transparent 45%),
     var(--bg);
   color: var(--ink);
   font-family: var(--font-outfit), sans-serif;
@@ -38,4 +59,12 @@ a {
 
 ::selection {
   background: var(--accent-soft);
+  color: var(--ink);
+}
+
+input,
+select,
+textarea,
+button {
+  color-scheme: inherit;
 }

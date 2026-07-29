@@ -7,15 +7,18 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "test:parse": "npx tsx scripts/test-parse.ts"
+    "test:parse": "pnpm exec tsx scripts/test-parse.ts",
+    "reindex": "pnpm exec tsx scripts/reindex-search.ts"
   },
   "dependencies": {
+    "@next/env": "^16.2.12",
     "adm-zip": "^0.6.0",
     "better-sqlite3": "^13.0.2",
     "drizzle-orm": "^0.45.2",
     "next": "16.2.12",
     "react": "19.2.4",
-    "react-dom": "19.2.4"
+    "react-dom": "19.2.4",
+    "sqlite-vec": "^0.1.9"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
@@ -30,5 +33,6 @@
     "tailwindcss": "^4",
     "tsx": "^4.23.1",
     "typescript": "^5"
-  }
+  },
+  "packageManager": "pnpm@10.13.1"
 }

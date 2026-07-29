@@ -1,9 +1,22 @@
 import { and, count, desc, eq, sql } from "drizzle-orm";
 import { getDb, schema } from "./db";
+import { hybridSearchIds, type SearchMode } from "./search/hybrid";
+import type { EmbeddingProvider } from "./search/embeddings";
+import { parseProviderParam } from "./search/providers";
+import { ensureSearchIndexBackfill } from "./search/sync";
 
 const { imports, savedItems, itemCollections } = schema;
 
+let didBackfill = false;
+
+function ensureSearchReady() {
+  if (didBackfill) return;
+  ensureSearchIndexBackfill();
+  didBackfill = true;
+}
+
 export function getStats() {
+  ensureSearchReady();
   const db = getDb();
 
   const totals = db
@@ -73,30 +86,66 @@ export type SavesQuery = {
   collection?: string;
   page?: number;
   pageSize?: number;
+  provider?: string;
 };
 
-export function listSaves(query: SavesQuery) {
+export async function listSaves(query: SavesQuery) {
+  ensureSearchReady();
   const db = getDb();
   const page = Math.max(1, query.page ?? 1);
   const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 25));
   const offset = (page - 1) * pageSize;
 
   const conditions = [];
+  let searchMode: SearchMode | "like" = "none";
+  let searchProvider: EmbeddingProvider | null = null;
+  let providerFallback = false;
+  let providerFallbackReason: string | undefined;
+  let rankedIds: number[] | null = null;
 
-  if (query.q) {
-    const term = `%${query.q}%`;
-    conditions.push(
-      sql`(
-        ${savedItems.authorUsername} like ${term}
-        or ${savedItems.href} like ${term}
-        or ${savedItems.shortcode} like ${term}
-        or ${savedItems.mediaKey} like ${term}
-      )`,
-    );
+  if (query.q?.trim()) {
+    const requestedProvider = parseProviderParam(query.provider);
+    const {
+      hits,
+      mode,
+      provider,
+      providerFallback: fallback,
+      providerFallbackReason: fallbackReason,
+    } = await hybridSearchIds(query.q.trim(), 500, requestedProvider);
+    searchProvider = provider;
+    providerFallback = fallback;
+    providerFallbackReason = fallbackReason;
+    if (hits.length > 0) {
+      rankedIds = hits.map((hit) => hit.id);
+      searchMode = mode;
+      conditions.push(
+        sql`${savedItems.id} in (${sql.join(
+          rankedIds.map((id) => sql`${id}`),
+          sql`, `,
+        )})`,
+      );
+    } else {
+      // Fallback LIKE if FTS/vec miss (e.g. partial media keys).
+      const term = `%${query.q.trim()}%`;
+      searchMode = "like";
+      conditions.push(
+        sql`(
+          ${savedItems.authorUsername} like ${term}
+          or ${savedItems.href} like ${term}
+          or ${savedItems.shortcode} like ${term}
+          or ${savedItems.mediaKey} like ${term}
+        )`,
+      );
+    }
   }
 
   if (query.type && query.type !== "all") {
-    conditions.push(eq(savedItems.mediaType, query.type as "post" | "reel" | "igtv" | "unknown"));
+    conditions.push(
+      eq(
+        savedItems.mediaType,
+        query.type as "post" | "reel" | "igtv" | "unknown",
+      ),
+    );
   }
 
   if (query.author) {
@@ -119,6 +168,10 @@ export function listSaves(query: SavesQuery) {
         page,
         pageSize,
         totalPages: 0,
+        searchMode,
+        searchProvider,
+        providerFallback,
+        providerFallbackReason,
       };
     }
 
@@ -138,14 +191,25 @@ export function listSaves(query: SavesQuery) {
     .where(where)
     .get();
 
-  const rows = db
-    .select()
-    .from(savedItems)
-    .where(where)
-    .orderBy(desc(savedItems.savedAt), desc(savedItems.id))
-    .limit(pageSize)
-    .offset(offset)
-    .all();
+  let rows;
+  if (rankedIds && rankedIds.length > 0) {
+    // Preserve hybrid RRF order, then paginate in JS after filter.
+    const filtered = db.select().from(savedItems).where(where).all();
+    const byId = new Map(filtered.map((row) => [row.id, row]));
+    const ordered = rankedIds
+      .map((id) => byId.get(id))
+      .filter((row): row is NonNullable<typeof row> => Boolean(row));
+    rows = ordered.slice(offset, offset + pageSize);
+  } else {
+    rows = db
+      .select()
+      .from(savedItems)
+      .where(where)
+      .orderBy(desc(savedItems.savedAt), desc(savedItems.id))
+      .limit(pageSize)
+      .offset(offset)
+      .all();
+  }
 
   const ids = rows.map((row) => row.id);
   const collectionRows =
@@ -183,15 +247,21 @@ export function listSaves(query: SavesQuery) {
     page,
     pageSize,
     totalPages: Math.ceil(total / pageSize),
+    searchMode,
+    searchProvider,
+    providerFallback,
+    providerFallbackReason,
   };
 }
 
 export function listImports() {
+  ensureSearchReady();
   const db = getDb();
   return db.select().from(imports).orderBy(desc(imports.importedAt)).all();
 }
 
 export function listFilterOptions() {
+  ensureSearchReady();
   const db = getDb();
 
   const authors = db

@@ -1,0 +1,454 @@
+import type Database from "better-sqlite3";
+import { getSqlite } from "../db";
+import { buildSearchDocument, type SearchableItem } from "./document";
+import {
+  embedText,
+  embedTextLocal,
+  embeddingConfigForProvider,
+  embeddingToBuffer,
+  isRemoteEmbeddingConfigured,
+  localEmbeddingConfig,
+  type EmbeddingConfig,
+  type EmbeddingProfile,
+  type EmbeddingProvider,
+} from "./embeddings";
+import { configuredRemoteProviders } from "./providers";
+
+type SearchRow = SearchableItem & { id: number };
+export type VectorIndexName = "local" | "openai" | "voyage";
+
+export type EmbeddingSyncResult = {
+  status: "updated" | "skipped";
+  items: number;
+  providers: string[];
+  message: string;
+};
+
+const ALL_VECTOR_INDEXES: VectorIndexName[] = ["local", "openai", "voyage"];
+
+function vectorTable(index: VectorIndexName): string {
+  return `saved_items_vec_${index}`;
+}
+
+function allSearchRows(
+  sqlite: Database.Database = getSqlite(),
+  itemIds?: number[],
+): SearchRow[] {
+  if (itemIds?.length === 0) return [];
+  const where = itemIds
+    ? `WHERE si.id IN (${itemIds.map(() => "?").join(", ")})`
+    : "";
+  return sqlite
+    .prepare(
+      `SELECT
+        si.id,
+        si.author_username AS authorUsername,
+        si.shortcode AS shortcode,
+        si.media_key AS mediaKey,
+        si.media_type AS mediaType,
+        COALESCE(group_concat(ic.collection_name, char(31)), '') AS collections
+      FROM saved_items si
+      LEFT JOIN item_collections ic ON ic.item_id = si.id
+      ${where}
+      GROUP BY si.id`,
+    )
+    .all(...(itemIds ?? []))
+    .map((row) => {
+      const typed = row as Omit<SearchRow, "collections"> & {
+        collections: string;
+      };
+      return {
+        ...typed,
+        collections: typed.collections
+          ? typed.collections.split("\u001f").filter(Boolean)
+          : [],
+      };
+    });
+}
+
+export function upsertItemFts(
+  itemId: number,
+  item: SearchableItem,
+  sqlite: Database.Database = getSqlite(),
+) {
+  const doc = buildSearchDocument(item);
+  sqlite.prepare(`DELETE FROM saved_items_fts WHERE rowid = ?`).run(itemId);
+  sqlite
+    .prepare(
+      `INSERT INTO saved_items_fts(
+        rowid, author_username, shortcode, media_key, media_type, collections
+      ) VALUES (?, ?, ?, ?, ?, ?)`,
+    )
+    .run(
+      itemId,
+      doc.authorUsername,
+      doc.shortcode,
+      doc.mediaKey,
+      doc.mediaType,
+      doc.collections,
+    );
+}
+
+export function upsertItemEmbedding(
+  index: VectorIndexName,
+  itemId: number,
+  embedding: Float32Array,
+  sqlite: Database.Database = getSqlite(),
+) {
+  const table = vectorTable(index);
+  const id = BigInt(itemId);
+  sqlite.prepare(`DELETE FROM ${table} WHERE item_id = ?`).run(id);
+  sqlite
+    .prepare(`INSERT INTO ${table}(item_id, embedding) VALUES (?, ?)`)
+    .run(id, embeddingToBuffer(embedding));
+}
+
+export function removeItemSearch(
+  itemId: number,
+  sqlite: Database.Database = getSqlite(),
+) {
+  sqlite.prepare(`DELETE FROM saved_items_fts WHERE rowid = ?`).run(itemId);
+  for (const index of ALL_VECTOR_INDEXES) {
+    if (vectorTableDimensions(index, sqlite) !== null) {
+      sqlite
+        .prepare(`DELETE FROM ${vectorTable(index)} WHERE item_id = ?`)
+        .run(BigInt(itemId));
+    }
+  }
+}
+
+export function ftsCount(sqlite: Database.Database = getSqlite()): number {
+  return (
+    sqlite.prepare(`SELECT count(*) AS c FROM saved_items_fts`).get() as {
+      c: number;
+    }
+  ).c;
+}
+
+export function vecCount(
+  index: VectorIndexName,
+  sqlite: Database.Database = getSqlite(),
+): number {
+  if (vectorTableDimensions(index, sqlite) === null) return 0;
+  return (
+    sqlite
+      .prepare(`SELECT count(*) AS c FROM ${vectorTable(index)}`)
+      .get() as { c: number }
+  ).c;
+}
+
+export function vectorTableDimensions(
+  index: VectorIndexName,
+  sqlite: Database.Database = getSqlite(),
+): number | null {
+  const row = sqlite
+    .prepare(
+      `SELECT sql FROM sqlite_master
+       WHERE type = 'table' AND name = ?`,
+    )
+    .get(vectorTable(index)) as { sql: string | null } | undefined;
+  const match = row?.sql?.match(/embedding\s+FLOAT\[(\d+)\]/i);
+  return match ? Number(match[1]) : null;
+}
+
+function recreateVectorTable(
+  index: VectorIndexName,
+  dimensions: number,
+  sqlite: Database.Database,
+) {
+  const table = vectorTable(index);
+  sqlite.exec(`
+    DROP TABLE IF EXISTS ${table};
+    CREATE VIRTUAL TABLE ${table} USING vec0(
+      item_id INTEGER PRIMARY KEY,
+      embedding FLOAT[${dimensions}]
+    );
+  `);
+}
+
+export function getIndexedEmbeddingProfile(
+  index: VectorIndexName,
+  sqlite: Database.Database = getSqlite(),
+): EmbeddingProfile | null {
+  return (
+    sqlite
+      .prepare(
+        `SELECT provider, model, dimensions, endpoint
+         FROM embedding_index_profiles WHERE index_name = ?`,
+      )
+      .get(index) as EmbeddingProfile | undefined
+  ) ?? null;
+}
+
+export function embeddingProfilesMatch(
+  left: EmbeddingProfile,
+  right: EmbeddingProfile,
+): boolean {
+  return (
+    left.provider === right.provider &&
+    left.model === right.model &&
+    left.dimensions === right.dimensions &&
+    left.endpoint === right.endpoint
+  );
+}
+
+function writeEmbeddingProfile(
+  index: VectorIndexName,
+  profile: EmbeddingProfile,
+  sqlite: Database.Database,
+) {
+  sqlite
+    .prepare(
+      `INSERT INTO embedding_index_profiles(
+        index_name, provider, model, dimensions, endpoint, updated_at
+      ) VALUES (?, ?, ?, ?, ?, unixepoch())
+      ON CONFLICT(index_name) DO UPDATE SET
+        provider = excluded.provider,
+        model = excluded.model,
+        dimensions = excluded.dimensions,
+        endpoint = excluded.endpoint,
+        updated_at = unixepoch()`,
+    )
+    .run(
+      index,
+      profile.provider,
+      profile.model,
+      profile.dimensions,
+      profile.endpoint,
+    );
+}
+
+export function vectorIndexMatchesConfig(
+  index: VectorIndexName,
+  config: EmbeddingConfig,
+  sqlite: Database.Database = getSqlite(),
+): boolean {
+  const indexed = getIndexedEmbeddingProfile(index, sqlite);
+  return Boolean(
+    indexed &&
+      vecCount(index, sqlite) > 0 &&
+      vectorTableDimensions(index, sqlite) === config.profile.dimensions &&
+      embeddingProfilesMatch(indexed, config.profile),
+  );
+}
+
+async function generateEmbeddings(rows: SearchRow[], config: EmbeddingConfig) {
+  const generated: Array<{ id: number; embedding: Float32Array }> = [];
+  for (const row of rows) {
+    generated.push({
+      id: row.id,
+      embedding: await embedText(buildSearchDocument(row).combined, config),
+    });
+  }
+  return generated;
+}
+
+function storeEmbeddings(
+  index: VectorIndexName,
+  generated: Array<{ id: number; embedding: Float32Array }>,
+  config: EmbeddingConfig,
+  replace: boolean,
+  sqlite: Database.Database,
+) {
+  sqlite.transaction(() => {
+    if (
+      replace ||
+      vectorTableDimensions(index, sqlite) !== config.profile.dimensions
+    ) {
+      recreateVectorTable(index, config.profile.dimensions, sqlite);
+    }
+    for (const result of generated) {
+      upsertItemEmbedding(index, result.id, result.embedding, sqlite);
+    }
+    writeEmbeddingProfile(index, config.profile, sqlite);
+  })();
+}
+
+function canExtendRemoteIndex(
+  provider: EmbeddingProvider,
+  config: EmbeddingConfig,
+  rows: SearchRow[],
+  sqlite: Database.Database,
+): boolean {
+  const indexed = getIndexedEmbeddingProfile(provider, sqlite);
+  const totalItems = (
+    sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
+      c: number;
+    }
+  ).c;
+  return (
+    totalItems === rows.length ||
+    Boolean(
+      indexed &&
+        embeddingProfilesMatch(indexed, config.profile) &&
+        vectorTableDimensions(provider, sqlite) ===
+          config.profile.dimensions &&
+        vecCount(provider, sqlite) >= totalItems - rows.length,
+    )
+  );
+}
+
+async function syncProviderIndex(
+  provider: EmbeddingProvider,
+  rows: SearchRow[],
+  replace: boolean,
+  sqlite: Database.Database,
+): Promise<{ updated: boolean; error?: string }> {
+  const config = embeddingConfigForProvider(provider);
+  if (provider === "local") {
+    const generated = await generateEmbeddings(rows, config);
+    storeEmbeddings("local", generated, config, replace, sqlite);
+    return { updated: true };
+  }
+
+  if (!config.apiKey) return { updated: false };
+
+  if (!replace && !canExtendRemoteIndex(provider, config, rows, sqlite)) {
+    return {
+      updated: false,
+      error: `${provider} index provenance differs or is incomplete`,
+    };
+  }
+
+  try {
+    const generated = await generateEmbeddings(rows, config);
+    storeEmbeddings(provider, generated, config, replace, sqlite);
+    return { updated: true };
+  } catch (error) {
+    return {
+      updated: false,
+      error: error instanceof Error ? error.message : "unknown error",
+    };
+  }
+}
+
+/**
+ * Always writes local vectors first. Remote providers run afterward and outside
+ * SQLite transactions; a remote failure cannot remove the offline index.
+ */
+export async function syncItemEmbeddings(
+  itemIds: number[],
+): Promise<EmbeddingSyncResult> {
+  const uniqueIds = [...new Set(itemIds)];
+  const sqlite = getSqlite();
+  const rows = allSearchRows(sqlite, uniqueIds);
+  const updatedProviders: string[] = [];
+  const notes: string[] = [];
+
+  const localResult = await syncProviderIndex("local", rows, false, sqlite);
+  if (localResult.updated) updatedProviders.push("local");
+
+  for (const provider of configuredRemoteProviders()) {
+    const result = await syncProviderIndex(provider, rows, false, sqlite);
+    if (result.updated) {
+      updatedProviders.push(provider);
+    } else if (result.error) {
+      notes.push(`${provider}: ${result.error}`);
+    }
+  }
+
+  if (rows.length === 0) {
+    return {
+      status: "updated",
+      items: 0,
+      providers: updatedProviders,
+      message: "No changed items needed semantic indexing.",
+    };
+  }
+
+  const remoteConfigured = configuredRemoteProviders();
+  const remoteUpdated = remoteConfigured.filter((p) =>
+    updatedProviders.includes(p),
+  );
+  const skippedRemote = remoteConfigured.filter(
+    (p) => !updatedProviders.includes(p),
+  );
+
+  let message = `Offline semantic index updated for ${rows.length} item${rows.length === 1 ? "" : "s"}`;
+  if (remoteUpdated.length > 0) {
+    message += `; ${remoteUpdated.join(", ")} indexes updated`;
+  }
+  if (skippedRemote.length > 0) {
+    message += `; ${skippedRemote.join(", ")} skipped (${notes.join("; ") || "run pnpm run reindex"})`;
+  }
+  message += ".";
+
+  return {
+    status: skippedRemote.length > 0 && remoteUpdated.length === 0 ? "skipped" : "updated",
+    items: rows.length,
+    providers: updatedProviders,
+    message,
+  };
+}
+
+/**
+ * Rebuild FTS and local vectors unconditionally, then rebuild every configured
+ * remote index. Network calls never hold a transaction.
+ */
+export async function rebuildSearchIndex(options?: {
+  requireRemote?: boolean;
+}): Promise<{
+  items: number;
+  providers: string[];
+  remoteUpdated: string[];
+}> {
+  if (options?.requireRemote && !isRemoteEmbeddingConfigured()) {
+    throw new Error(
+      "--remote requires OPENAI_API_KEY and/or VOYAGE_API_KEY",
+    );
+  }
+
+  const sqlite = getSqlite();
+  const rows = allSearchRows(sqlite);
+  sqlite.transaction(() => {
+    sqlite.exec(`DELETE FROM saved_items_fts`);
+    for (const row of rows) upsertItemFts(row.id, row, sqlite);
+  })();
+
+  const remoteUpdated: string[] = [];
+  await syncProviderIndex("local", rows, true, sqlite);
+
+  for (const provider of configuredRemoteProviders()) {
+    const result = await syncProviderIndex(provider, rows, true, sqlite);
+    if (result.updated) remoteUpdated.push(provider);
+    else if (result.error) {
+      throw new Error(`Failed to rebuild ${provider} index: ${result.error}`);
+    }
+  }
+
+  return {
+    items: rows.length,
+    providers: ["local", ...remoteUpdated],
+    remoteUpdated,
+  };
+}
+
+/** Backfill keyword and fixed local vectors without startup network calls. */
+export function ensureSearchIndexBackfill() {
+  const sqlite = getSqlite();
+  const rows = allSearchRows(sqlite);
+  if (rows.length === 0) return;
+
+  if (ftsCount(sqlite) < rows.length) {
+    sqlite.transaction(() => {
+      for (const row of rows) upsertItemFts(row.id, row, sqlite);
+    })();
+  }
+
+  const localConfig = localEmbeddingConfig();
+  if (
+    vecCount("local", sqlite) >= rows.length &&
+    vectorIndexMatchesConfig("local", localConfig, sqlite)
+  ) {
+    return;
+  }
+
+  const generated = rows.map((row) => ({
+    id: row.id,
+    embedding: embedTextLocal(
+      buildSearchDocument(row).combined,
+      localConfig.profile.dimensions,
+    ),
+  }));
+  storeEmbeddings("local", generated, localConfig, true, sqlite);
+}

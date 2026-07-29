@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import AdmZip from "adm-zip";
 import { and, eq } from "drizzle-orm";
-import { getDb, schema } from "./db";
+import { getDb, getSqlite, schema } from "./db";
 import { parseExportJsonFiles, type ParsedSavedItem } from "./parse-export";
+import { syncItemEmbeddings, upsertItemFts } from "./search/sync";
 
 const { imports, savedItems, itemCollections } = schema;
 
@@ -20,6 +21,26 @@ export type ImportResult = {
 
 function hashBuffer(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+async function syncEmbeddingsAfterImport(
+  importId: number,
+  changedIds: number[],
+): Promise<string> {
+  try {
+    const result = await syncItemEmbeddings(changedIds);
+    return result.message;
+  } catch (error) {
+    const message = `Semantic indexing failed; imported data and keyword search are available. ${
+      error instanceof Error ? error.message : "Unknown embedding error"
+    }`;
+    getDb()
+      .update(imports)
+      .set({ notes: message })
+      .where(eq(imports.id, importId))
+      .run();
+    return message;
+  }
 }
 
 function extractJsonFilesFromZip(buffer: Buffer): Array<{
@@ -51,10 +72,10 @@ function extractJsonFilesFromZip(buffer: Buffer): Array<{
   return files;
 }
 
-export function importExportArchive(
+export async function importExportArchive(
   buffer: Buffer,
   filename: string,
-): ImportResult {
+): Promise<ImportResult> {
   const db = getDb();
   const contentHash = hashBuffer(buffer);
 
@@ -187,6 +208,11 @@ export function importExportArchive(
       .where(eq(imports.id, draft.id))
       .run();
 
+    const embeddingMessage = await syncEmbeddingsAfterImport(
+      draft.id,
+      result.changedIds,
+    );
+
     return {
       importId: draft.id,
       status: "completed",
@@ -196,7 +222,7 @@ export function importExportArchive(
       itemsAdded: result.added,
       itemsUpdated: result.updated,
       itemsSkipped: result.skipped,
-      message: `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}.`,
+      message: `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`,
     };
   } catch (error) {
     const message =
@@ -230,6 +256,8 @@ function applyParsedItemsWithTx(
   let added = 0;
   let updated = 0;
   let skipped = 0;
+  const changedIds: number[] = [];
+  const sqlite = getSqlite();
 
   for (const item of items) {
     const existing = tx
@@ -254,14 +282,30 @@ function applyParsedItemsWithTx(
         .returning({ id: savedItems.id })
         .get();
 
+      const collections: string[] = [];
       for (const name of item.collections) {
         const trimmed = name.trim();
         if (!trimmed) continue;
+        collections.push(trimmed);
         tx.insert(itemCollections)
           .values({ itemId: inserted.id, collectionName: trimmed })
           .onConflictDoNothing()
           .run();
       }
+
+      upsertItemFts(
+        inserted.id,
+        {
+          authorUsername: item.authorUsername,
+          shortcode: item.shortcode,
+          mediaKey: item.mediaKey,
+          mediaType: item.mediaType,
+          collections,
+        },
+        sqlite,
+      );
+
+      changedIds.push(inserted.id);
       added += 1;
       continue;
     }
@@ -294,14 +338,18 @@ function applyParsedItemsWithTx(
       shouldUpdateHref ||
       newCollections.length > 0;
 
+    const nextAuthor = shouldUpdateAuthor
+      ? item.authorUsername
+      : existing.authorUsername;
+    const nextType = shouldUpdateType ? item.mediaType : existing.mediaType;
+    const nextHref = shouldUpdateHref ? item.href : existing.href;
+
     tx.update(savedItems)
       .set({
         lastSeenImportId: importId,
-        href: shouldUpdateHref ? item.href : existing.href,
-        authorUsername: shouldUpdateAuthor
-          ? item.authorUsername
-          : existing.authorUsername,
-        mediaType: shouldUpdateType ? item.mediaType : existing.mediaType,
+        href: nextHref,
+        authorUsername: nextAuthor,
+        mediaType: nextType,
         savedAt: shouldUpdateSavedAt ? item.savedAt : existing.savedAt,
         updatedAt: new Date(),
       })
@@ -315,17 +363,30 @@ function applyParsedItemsWithTx(
         .run();
     }
 
-    if (hasChanges) updated += 1;
-    else skipped += 1;
+    if (hasChanges) {
+      upsertItemFts(
+        existing.id,
+        {
+          authorUsername: nextAuthor,
+          shortcode: existing.shortcode,
+          mediaKey: existing.mediaKey,
+          mediaType: nextType,
+          collections: [...existingCollections, ...newCollections],
+        },
+        sqlite,
+      );
+      changedIds.push(existing.id);
+      updated += 1;
+    } else skipped += 1;
   }
 
-  return { added, updated, skipped };
+  return { added, updated, skipped, changedIds };
 }
 
-export function importExportJson(
+export async function importExportJson(
   content: string,
   filename: string,
-): ImportResult {
+): Promise<ImportResult> {
   // Wrap a lone JSON file into the same pipeline via a synthetic zip-like path
   const buffer = Buffer.from(content, "utf8");
   const contentHash = hashBuffer(buffer);
@@ -422,6 +483,11 @@ export function importExportJson(
       .where(eq(imports.id, draft.id))
       .run();
 
+    const embeddingMessage = await syncEmbeddingsAfterImport(
+      draft.id,
+      result.changedIds,
+    );
+
     return {
       importId: draft.id,
       status: "completed",
@@ -431,7 +497,7 @@ export function importExportJson(
       itemsAdded: result.added,
       itemsUpdated: result.updated,
       itemsSkipped: result.skipped,
-      message: `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}.`,
+      message: `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`,
     };
   } catch (error) {
     const message =

@@ -14,17 +14,44 @@ type SaveRow = {
   collections: string[];
 };
 
+type EmbeddingProvider = "local" | "openai" | "voyage";
+
+type ProviderInfo = {
+  available: EmbeddingProvider[];
+  configured: Record<EmbeddingProvider, boolean>;
+  default: EmbeddingProvider;
+};
+
 type SavesResponse = {
   items: SaveRow[];
   total: number;
   page: number;
   pageSize: number;
   totalPages: number;
+  searchMode?:
+    | "hybrid"
+    | "vec"
+    | "hybrid-local-fallback"
+    | "vec-local-fallback"
+    | "fts"
+    | "like"
+    | "none";
+  searchProvider?: EmbeddingProvider | null;
+  providerFallback?: boolean;
+  providerFallbackReason?: string;
 };
 
 type FilterOptions = {
   authors: string[];
   collections: string[];
+};
+
+const PROVIDER_STORAGE_KEY = "instagram-saves-search-provider";
+
+const PROVIDER_LABELS: Record<EmbeddingProvider, string> = {
+  local: "Local (offline)",
+  openai: "OpenAI",
+  voyage: "Voyage",
 };
 
 function formatDate(value: string | null) {
@@ -35,12 +62,22 @@ function formatDate(value: string | null) {
   });
 }
 
+function readStoredProvider(): EmbeddingProvider | null {
+  if (typeof window === "undefined") return null;
+  const stored = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+  if (stored === "local" || stored === "openai" || stored === "voyage") {
+    return stored;
+  }
+  return null;
+}
+
 export function SavesBrowser() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
 
   const [data, setData] = useState<SavesResponse | null>(null);
+  const [providers, setProviders] = useState<ProviderInfo | null>(null);
   const [filters, setFilters] = useState<FilterOptions>({
     authors: [],
     collections: [],
@@ -52,6 +89,13 @@ export function SavesBrowser() {
   const author = searchParams.get("author") ?? "";
   const collection = searchParams.get("collection") ?? "";
   const page = Number(searchParams.get("page") ?? "1");
+  const providerParam = searchParams.get("provider");
+
+  const activeProvider =
+    (providerParam as EmbeddingProvider | null) ??
+    readStoredProvider() ??
+    providers?.default ??
+    "local";
 
   const updateParams = useCallback(
     (patch: Record<string, string | null>) => {
@@ -61,12 +105,69 @@ export function SavesBrowser() {
         else next.set(key, value);
       }
       if (!("page" in patch)) next.delete("page");
+      if ("provider" in patch) {
+        const providerValue =
+          patch.provider ?? providers?.default ?? "local";
+        if (
+          providerValue === "local" ||
+          providerValue === "openai" ||
+          providerValue === "voyage"
+        ) {
+          window.localStorage.setItem(PROVIDER_STORAGE_KEY, providerValue);
+        }
+      }
       startTransition(() => {
         router.push(`/saves?${next.toString()}`);
       });
     },
-    [router, searchParams],
+    [router, searchParams, providers],
   );
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadProviders() {
+      try {
+        const res = await fetch("/api/search/providers");
+        if (!res.ok) return;
+        const json = (await res.json()) as ProviderInfo;
+        if (!cancelled) setProviders(json);
+      } catch {
+        // Provider metadata is optional for rendering.
+      }
+    }
+
+    void loadProviders();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!providers) return;
+    const fromUrl = providerParam as EmbeddingProvider | null;
+    const stored = readStoredProvider();
+    const desired =
+      fromUrl && providers.available.includes(fromUrl)
+        ? fromUrl
+        : stored && providers.available.includes(stored)
+          ? stored
+          : providers.default;
+
+    if (
+      desired &&
+      desired !== providerParam &&
+      (providerParam || stored || desired !== "local")
+    ) {
+      const next = new URLSearchParams(searchParams.toString());
+      if (desired === providers.default) next.delete("provider");
+      else next.set("provider", desired);
+      window.localStorage.setItem(PROVIDER_STORAGE_KEY, desired);
+      startTransition(() => {
+        router.replace(`/saves?${next.toString()}`);
+      });
+    }
+  }, [providers, providerParam, router, searchParams]);
 
   useEffect(() => {
     let cancelled = false;
@@ -79,6 +180,7 @@ export function SavesBrowser() {
         if (type) params.set("type", type);
         if (author) params.set("author", author);
         if (collection) params.set("collection", collection);
+        if (activeProvider) params.set("provider", activeProvider);
         params.set("page", String(page || 1));
         params.set("pageSize", "25");
 
@@ -108,7 +210,10 @@ export function SavesBrowser() {
     return () => {
       cancelled = true;
     };
-  }, [q, type, author, collection, page]);
+  }, [q, type, author, collection, page, activeProvider]);
+
+  const providerOptions = providers?.available ?? ["local"];
+  const showProviderControl = providerOptions.length > 1;
 
   return (
     <div className="space-y-6">
@@ -120,7 +225,8 @@ export function SavesBrowser() {
           Saved media
         </h1>
         <p className="text-[var(--muted)]">
-          Filter by type, creator, or collection. Open any item on Instagram.
+          Keyword (FTS5) and semantic (sqlite-vec) search over creators,
+          shortcodes, and collections.
         </p>
       </section>
 
@@ -142,7 +248,7 @@ export function SavesBrowser() {
           <input
             name="q"
             defaultValue={q}
-            placeholder="username, shortcode…"
+            placeholder="creator, collection, shortcode…"
             className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-2 outline-none ring-[var(--accent)] focus:ring-2"
           />
         </label>
@@ -200,16 +306,74 @@ export function SavesBrowser() {
         </div>
       </form>
 
+      {showProviderControl ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] px-4 py-3">
+          <div>
+            <p className="text-sm font-medium text-[var(--ink)]">
+              Semantic search provider
+            </p>
+            <p className="text-xs text-[var(--muted)]">
+              Keyword search stays on FTS5. Only the vector path changes.
+            </p>
+          </div>
+          <div
+            className="flex flex-wrap items-center gap-1 rounded-full bg-[var(--chip)] p-1"
+            role="group"
+            aria-label="Semantic search provider"
+          >
+            {providerOptions.map((option) => {
+              const selected = activeProvider === option;
+              return (
+                <button
+                  key={option}
+                  type="button"
+                  aria-pressed={selected}
+                  onClick={() => {
+                    window.localStorage.setItem(PROVIDER_STORAGE_KEY, option);
+                    updateParams({
+                      provider:
+                        option === providers?.default ? null : option,
+                    });
+                  }}
+                  className={`rounded-full px-3 py-1.5 text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)] ${
+                    selected
+                      ? "bg-[var(--ink)] text-[var(--surface)]"
+                      : "text-[var(--muted)] hover:text-[var(--ink)]"
+                  }`}
+                >
+                  {PROVIDER_LABELS[option]}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      ) : null}
+
       {error ? (
         <p className="text-sm text-[var(--danger)]">{error}</p>
       ) : null}
 
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--surface)]">
-        <div className="flex items-center justify-between border-b border-[var(--line)] px-4 py-3 text-sm text-[var(--muted)]">
+        <div className="flex flex-col gap-1 border-b border-[var(--line)] px-4 py-3 text-sm text-[var(--muted)] sm:flex-row sm:items-center sm:justify-between">
           <span>
-            {data ? `${data.total} item${data.total === 1 ? "" : "s"}` : "Loading…"}
+            {data
+              ? `${data.total} item${data.total === 1 ? "" : "s"}`
+              : "Loading…"}
+            {data?.searchMode &&
+            data.searchMode !== "none" &&
+            q.trim() !== ""
+              ? ` · ${data.searchMode} search`
+              : ""}
+            {data?.searchProvider && q.trim() !== ""
+              ? ` · ${PROVIDER_LABELS[data.searchProvider]}`
+              : ""}
             {pending ? " · updating" : ""}
           </span>
+          {data?.providerFallback && data.providerFallbackReason ? (
+            <span className="text-xs text-[var(--danger)]">
+              {data.providerFallbackReason}
+            </span>
+          ) : null}
           {data && data.totalPages > 1 ? (
             <span>
               Page {data.page} / {data.totalPages}

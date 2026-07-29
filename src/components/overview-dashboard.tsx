@@ -19,11 +19,11 @@ export function OverviewDashboard() {
           Library
         </p>
         <h1 className="max-w-2xl font-[family-name:var(--font-fraunces)] text-4xl leading-tight tracking-tight sm:text-5xl">
-          Your saved posts and reels, searchable offline.
+          Your saved posts and reels, searchable offline with FTS5 + vectors.
         </h1>
         <p className="max-w-2xl text-[var(--muted)]">
-          Load periodic Instagram data exports. Each import merges new items and
-          leaves existing ones untouched when nothing changed.
+          Load periodic Instagram data exports. Each import merges new items,
+          refreshes the search index, and leaves unchanged rows untouched.
         </p>
         <div className="flex flex-wrap gap-3 pt-2">
           <Link
