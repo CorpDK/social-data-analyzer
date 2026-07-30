@@ -17,7 +17,7 @@ const dbPath =
  * Bump whenever the idempotent schema below gains or changes a table/index.
  * Development re-applies it once per module evaluation for hot-reload safety.
  */
-export const SCHEMA_VERSION = 3;
+export const SCHEMA_VERSION = 6;
 
 const globalForDb = globalThis as unknown as {
   sqlite?: Database.Database;
@@ -120,9 +120,36 @@ function ensureDatabaseSchema(sqlite: Database.Database) {
       ON import_schemas (import_id);
     CREATE INDEX IF NOT EXISTS import_schemas_file_path_idx
       ON import_schemas (file_path);
+
+    CREATE TABLE IF NOT EXISTS liked_items (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      media_key TEXT NOT NULL,
+      href TEXT NOT NULL,
+      shortcode TEXT,
+      media_type TEXT NOT NULL DEFAULT 'unknown',
+      author_username TEXT,
+      liked_at INTEGER,
+      source TEXT NOT NULL DEFAULT 'liked_posts',
+      first_seen_import_id INTEGER NOT NULL REFERENCES imports(id),
+      last_seen_import_id INTEGER NOT NULL REFERENCES imports(id),
+      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
+      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+    );
+
+    CREATE UNIQUE INDEX IF NOT EXISTS liked_items_media_key_uidx
+      ON liked_items (media_key);
+    CREATE INDEX IF NOT EXISTS liked_items_author_idx
+      ON liked_items (author_username);
+    CREATE INDEX IF NOT EXISTS liked_items_type_idx
+      ON liked_items (media_type);
+    CREATE INDEX IF NOT EXISTS liked_items_liked_at_idx
+      ON liked_items (liked_at);
+    CREATE INDEX IF NOT EXISTS liked_items_source_idx
+      ON liked_items (source);
   `);
 
   ensureEmbeddingJobsTable(sqlite);
+  ensureImportJobsTable(sqlite);
   ensureSearchSchema(sqlite);
   sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
   globalForDb.schemaVersion = SCHEMA_VERSION;
@@ -155,6 +182,38 @@ function ensureEmbeddingJobsTable(sqlite: Database.Database) {
   sqlite.exec(EMBEDDING_JOBS_SCHEMA);
 }
 
+const IMPORT_JOBS_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS import_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    filename TEXT NOT NULL,
+    content_hash TEXT,
+    spool_path TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'zip',
+    state TEXT NOT NULL DEFAULT 'pending',
+    phase TEXT NOT NULL DEFAULT 'queued',
+    processed INTEGER NOT NULL DEFAULT 0,
+    total INTEGER NOT NULL DEFAULT 0,
+    message TEXT,
+    error TEXT,
+    details TEXT,
+    result TEXT,
+    import_id INTEGER REFERENCES imports(id),
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    started_at INTEGER NOT NULL DEFAULT (unixepoch()),
+    finished_at INTEGER,
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  );
+
+  CREATE INDEX IF NOT EXISTS import_jobs_state_idx
+    ON import_jobs (state);
+  CREATE INDEX IF NOT EXISTS import_jobs_started_idx
+    ON import_jobs (started_at DESC);
+`;
+
+function ensureImportJobsTable(sqlite: Database.Database) {
+  sqlite.exec(IMPORT_JOBS_SCHEMA);
+}
+
 function ensureSearchSchema(sqlite: Database.Database) {
   const legacyRemoteProvider = migrateEmbeddingProfilesTable(sqlite);
 
@@ -177,12 +236,30 @@ function ensureSearchSchema(sqlite: Database.Database) {
     `);
   }
 
-  ensureVectorTable(sqlite, "local");
-  ensureVectorTable(sqlite, "ollama");
-  ensureVectorTable(sqlite, "openai");
-  ensureVectorTable(sqlite, "voyage");
-  migrateLegacyRemoteVectorTable(sqlite, legacyRemoteProvider);
+  const likesFtsExists = sqlite
+    .prepare(
+      `SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'liked_items_fts'`,
+    )
+    .get();
 
+  if (!likesFtsExists) {
+    sqlite.exec(`
+      CREATE VIRTUAL TABLE liked_items_fts USING fts5(
+        author_username,
+        shortcode,
+        media_key,
+        media_type,
+        source,
+        tokenize = 'porter unicode61 remove_diacritics 1'
+      );
+    `);
+  }
+
+  for (const index of ["local", "ollama", "openai", "voyage"] as const) {
+    ensureVectorTable(sqlite, "saves", index);
+    ensureVectorTable(sqlite, "likes", index);
+  }
+  migrateLegacyRemoteVectorTable(sqlite, legacyRemoteProvider);
 }
 
 function reclaimJobsAfterProcessRestart(sqlite: Database.Database) {
@@ -199,10 +276,64 @@ function reclaimJobsAfterProcessRestart(sqlite: Database.Database) {
        WHERE state = 'running'`,
     )
     .run();
+
+  // Import jobs: re-queue when the spool file is still on disk; otherwise fail.
+  // Full re-run from spool (idempotent merge) — not mid-phase resume.
+  const orphaned = sqlite
+    .prepare(
+      `SELECT id, spool_path FROM import_jobs WHERE state = 'running'`,
+    )
+    .all() as Array<{ id: number; spool_path: string }>;
+
+  for (const row of orphaned) {
+    const spoolExists =
+      typeof row.spool_path === "string" &&
+      row.spool_path.length > 0 &&
+      fs.existsSync(row.spool_path);
+
+    if (spoolExists) {
+      sqlite
+        .prepare(
+          `UPDATE import_jobs
+           SET state = 'pending',
+               phase = 'queued',
+               cancel_requested = 0,
+               message = 'Re-queued after server restart',
+               error = NULL,
+               finished_at = NULL,
+               updated_at = unixepoch()
+           WHERE id = ?`,
+        )
+        .run(row.id);
+    } else {
+      sqlite
+        .prepare(
+          `UPDATE import_jobs
+           SET state = 'failed',
+               error = 'Interrupted by server restart (upload spool missing)',
+               message = 'Job interrupted by server restart',
+               finished_at = unixepoch(),
+               updated_at = unixepoch()
+           WHERE id = ?`,
+        )
+        .run(row.id);
+    }
+  }
 }
 
 const PROFILE_INDEX_CHECK =
-  "('local', 'ollama', 'openai', 'voyage')";
+  "('local', 'ollama', 'openai', 'voyage', 'likes-local', 'likes-ollama', 'likes-openai', 'likes-voyage')";
+
+const PROFILE_INDEX_NAMES = [
+  "local",
+  "ollama",
+  "openai",
+  "voyage",
+  "likes-local",
+  "likes-ollama",
+  "likes-openai",
+  "likes-voyage",
+] as const;
 
 /** Returns the legacy remote provider when migrating off `saved_items_vec_remote`. */
 function migrateEmbeddingProfilesTable(
@@ -218,6 +349,8 @@ function migrateEmbeddingProfilesTable(
   const needsRemoteMigration = table?.sql?.includes("'remote'") ?? false;
   const needsOllama =
     Boolean(table) && !(table?.sql?.includes("'ollama'") ?? false);
+  const needsLikesProfiles =
+    Boolean(table) && !(table?.sql?.includes("'likes-local'") ?? false);
 
   if (!table) {
     sqlite.exec(`
@@ -233,7 +366,7 @@ function migrateEmbeddingProfilesTable(
     return null;
   }
 
-  if (!needsRemoteMigration && !needsOllama) return null;
+  if (!needsRemoteMigration && !needsOllama && !needsLikesProfiles) return null;
 
   const legacyRemote = needsRemoteMigration
     ? (sqlite
@@ -252,6 +385,8 @@ function migrateEmbeddingProfilesTable(
         | undefined)
     : undefined;
 
+  const allowed = PROFILE_INDEX_NAMES.map((name) => `'${name}'`).join(", ");
+
   sqlite.exec(`
     CREATE TABLE embedding_index_profiles_new (
       index_name TEXT PRIMARY KEY CHECK (index_name IN ${PROFILE_INDEX_CHECK}),
@@ -266,7 +401,7 @@ function migrateEmbeddingProfilesTable(
     )
     SELECT index_name, provider, model, dimensions, endpoint, updated_at
     FROM embedding_index_profiles
-    WHERE index_name IN ('local', 'ollama', 'openai', 'voyage');
+    WHERE index_name IN (${allowed});
   `);
 
   let migratedProvider: "openai" | "voyage" | null = null;
@@ -300,9 +435,14 @@ function migrateEmbeddingProfilesTable(
 
 function ensureVectorTable(
   sqlite: Database.Database,
+  library: "saves" | "likes",
   index: "local" | "ollama" | "openai" | "voyage",
 ) {
-  const table = `saved_items_vec_${index}`;
+  const table =
+    library === "saves"
+      ? `saved_items_vec_${index}`
+      : `liked_items_vec_${index}`;
+  const profileKey = library === "saves" ? index : `likes-${index}`;
   const definition = sqlite
     .prepare(
       `SELECT sql FROM sqlite_master
@@ -320,7 +460,7 @@ function ensureVectorTable(
         item_id INTEGER PRIMARY KEY,
         embedding FLOAT[${VEC_DIMENSIONS}]
       );
-      DELETE FROM embedding_index_profiles WHERE index_name = '${index}';
+      DELETE FROM embedding_index_profiles WHERE index_name = '${profileKey}';
     `);
   }
 }
@@ -415,15 +555,29 @@ export function recreateEmptySearchIndexes(
     );
   `);
 
+  sqlite.exec(`
+    DROP TABLE IF EXISTS liked_items_fts;
+    CREATE VIRTUAL TABLE liked_items_fts USING fts5(
+      author_username,
+      shortcode,
+      media_key,
+      media_type,
+      source,
+      tokenize = 'porter unicode61 remove_diacritics 1'
+    );
+  `);
+
   for (const index of ["local", "ollama", "openai", "voyage"] as const) {
-    const table = `saved_items_vec_${index}`;
-    sqlite.exec(`
-      DROP TABLE IF EXISTS ${table};
-      CREATE VIRTUAL TABLE ${table} USING vec0(
-        item_id INTEGER PRIMARY KEY,
-        embedding FLOAT[${VEC_DIMENSIONS}]
-      );
-    `);
+    for (const prefix of ["saved_items_vec", "liked_items_vec"] as const) {
+      const table = `${prefix}_${index}`;
+      sqlite.exec(`
+        DROP TABLE IF EXISTS ${table};
+        CREATE VIRTUAL TABLE ${table} USING vec0(
+          item_id INTEGER PRIMARY KEY,
+          embedding FLOAT[${VEC_DIMENSIONS}]
+        );
+      `);
+    }
   }
 
   sqlite.exec(`DROP TABLE IF EXISTS saved_items_vec_remote;`);

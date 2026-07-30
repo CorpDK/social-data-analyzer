@@ -8,13 +8,24 @@ import {
   type ImportLog,
 } from "./import-log";
 import {
-  catalogSchemasFromFiles,
+  inferFileSchema,
   type FileSchemaCatalogEntry,
 } from "./json-schema-infer";
-import { parseExportJsonFiles, type ParsedSavedItem } from "./parse-export";
-import { syncItemEmbeddings, upsertItemFts } from "./search/sync";
+import {
+  parseExportJsonFiles,
+  parseLikedExportJsonFiles,
+  type ParsedLikedItem,
+  type ParsedSavedItem,
+} from "./parse-export";
+import { upsertLikedItemFts } from "./likes-fts";
+import {
+  syncItemEmbeddings,
+  syncLikedItemEmbeddings,
+  upsertItemFts,
+} from "./search/sync";
 
-const { imports, savedItems, itemCollections, importSchemas } = schema;
+const { imports, savedItems, itemCollections, importSchemas, likedItems } =
+  schema;
 
 export type ImportResult = {
   importId: number | null;
@@ -25,12 +36,80 @@ export type ImportResult = {
   itemsAdded: number;
   itemsUpdated: number;
   itemsSkipped: number;
+  likesFound: number;
+  likesAdded: number;
+  likesUpdated: number;
+  likesSkipped: number;
   message: string;
   log?: ImportLog;
 };
 
+export type ImportProgressPhase =
+  | "queued"
+  | "received"
+  | "extracting"
+  | "inferring_schemas"
+  | "parsing_saves"
+  | "parsing_likes"
+  | "writing"
+  | "indexing"
+  | "completed"
+  | "failed";
+
+export type ImportProgressDetails = {
+  filesScanned?: number;
+  jsonFiles?: number;
+  schemasInferred?: number;
+  itemsParsed?: number;
+  likesParsed?: number;
+  itemsAdded?: number;
+  itemsUpdated?: number;
+  itemsSkipped?: number;
+  likesAdded?: number;
+  likesUpdated?: number;
+  likesSkipped?: number;
+  importId?: number | null;
+};
+
+export type ImportProgress = {
+  phase: ImportProgressPhase;
+  processed: number;
+  total: number;
+  message?: string;
+  details?: ImportProgressDetails;
+};
+
+export type ImportRunOptions = {
+  onProgress?: (progress: ImportProgress) => void | Promise<void>;
+  shouldCancel?: () => boolean;
+  /** Precomputed hash when the spool writer already hashed the bytes. */
+  contentHash?: string;
+};
+
+export class ImportCancelledError extends Error {
+  constructor(message = "Import cancelled") {
+    super(message);
+    this.name = "ImportCancelledError";
+  }
+}
+
 function hashBuffer(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
+}
+
+async function emitProgress(
+  onProgress: ImportRunOptions["onProgress"],
+  progress: ImportProgress,
+) {
+  await onProgress?.(progress);
+}
+
+function throwIfCancelled(shouldCancel?: () => boolean) {
+  if (shouldCancel?.()) throw new ImportCancelledError();
+}
+
+async function yieldToEventLoop() {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 function appendImportNotes(importId: number, extra: string) {
@@ -50,9 +129,35 @@ function appendImportNotes(importId: number, extra: string) {
 async function syncEmbeddingsAfterImport(
   importId: number,
   changedIds: number[],
+  options?: ImportRunOptions,
+  kind: "saves" | "likes" = "saves",
 ): Promise<string> {
+  const total = changedIds.length;
+  const label = kind === "saves" ? "item" : "like";
+  await emitProgress(options?.onProgress, {
+    phase: "indexing",
+    processed: 0,
+    total: Math.max(1, total),
+    message:
+      total === 0
+        ? `No changed ${label}s need semantic indexing`
+        : `Indexing ${total} changed ${label}${total === 1 ? "" : "s"}…`,
+    details: { importId },
+  });
+  throwIfCancelled(options?.shouldCancel);
+
   try {
-    const result = await syncItemEmbeddings(changedIds);
+    const result =
+      kind === "saves"
+        ? await syncItemEmbeddings(changedIds)
+        : await syncLikedItemEmbeddings(changedIds);
+    await emitProgress(options?.onProgress, {
+      phase: "indexing",
+      processed: Math.max(1, total),
+      total: Math.max(1, total),
+      message: result.message,
+      details: { importId },
+    });
     return result.message;
   } catch (error) {
     const message = `Semantic indexing failed; imported data and keyword search are available. ${
@@ -63,7 +168,10 @@ async function syncEmbeddingsAfterImport(
   }
 }
 
-function extractJsonFilesFromZip(buffer: Buffer): Array<{
+function extractJsonFilesFromZip(
+  buffer: Buffer,
+  options?: ImportRunOptions,
+): Array<{
   name: string;
   content: string;
   byteSize: number;
@@ -71,9 +179,16 @@ function extractJsonFilesFromZip(buffer: Buffer): Array<{
   const zip = new AdmZip(buffer);
   const entries = zip.getEntries();
   const files: Array<{ name: string; content: string; byteSize: number }> = [];
+  const total = entries.length;
+  let scanned = 0;
 
   for (const entry of entries) {
-    if (entry.isDirectory) continue;
+    throwIfCancelled(options?.shouldCancel);
+    scanned += 1;
+
+    if (entry.isDirectory) {
+      continue;
+    }
     const name = entry.entryName.replace(/\\/g, "/");
     if (!name.toLowerCase().endsWith(".json")) continue;
     // Skip Mac metadata / junk
@@ -90,9 +205,122 @@ function extractJsonFilesFromZip(buffer: Buffer): Array<{
     } catch {
       // Skip unreadable entries
     }
+
+    if (scanned % 25 === 0 || scanned === total) {
+      void options?.onProgress?.({
+        phase: "extracting",
+        processed: scanned,
+        total: Math.max(1, total),
+        message: `Scanning zip… ${files.length} JSON file${files.length === 1 ? "" : "s"} found`,
+        details: { filesScanned: scanned, jsonFiles: files.length },
+      });
+    }
   }
 
   return files;
+}
+
+async function catalogSchemasWithProgress(
+  files: Array<{ name: string; content: string; byteSize?: number }>,
+  options?: ImportRunOptions,
+): Promise<FileSchemaCatalogEntry[]> {
+  const catalog: FileSchemaCatalogEntry[] = [];
+  const total = files.length;
+
+  if (total === 0) {
+    await emitProgress(options?.onProgress, {
+      phase: "inferring_schemas",
+      processed: 0,
+      total: 1,
+      message: "No JSON files to infer schemas from",
+      details: { schemasInferred: 0, jsonFiles: 0 },
+    });
+    return catalog;
+  }
+
+  for (let i = 0; i < files.length; i++) {
+    throwIfCancelled(options?.shouldCancel);
+    const file = files[i]!;
+    const size = file.byteSize ?? Buffer.byteLength(file.content, "utf8");
+    catalog.push(
+      inferFileSchema(file.name, file.content, {
+        byteSize: size,
+        truncatedRead: false,
+      }),
+    );
+    await emitProgress(options?.onProgress, {
+      phase: "inferring_schemas",
+      processed: i + 1,
+      total,
+      message: `Inferring schemas… ${i + 1}/${total}`,
+      details: {
+        schemasInferred: i + 1,
+        jsonFiles: total,
+      },
+    });
+    if ((i + 1) % 5 === 0) await yieldToEventLoop();
+  }
+
+  return catalog;
+}
+
+async function parseExportJsonFilesWithProgress(
+  files: Array<{ name: string; content: string }>,
+  options?: ImportRunOptions,
+) {
+  // parseExportJsonFiles is synchronous; report before/after and yield.
+  await emitProgress(options?.onProgress, {
+    phase: "parsing_saves",
+    processed: 0,
+    total: Math.max(1, files.length),
+    message: `Parsing ${files.length} JSON file${files.length === 1 ? "" : "s"}…`,
+    details: { jsonFiles: files.length },
+  });
+  throwIfCancelled(options?.shouldCancel);
+
+  const parsed = parseExportJsonFiles(files);
+
+  await emitProgress(options?.onProgress, {
+    phase: "parsing_saves",
+    processed: Math.max(1, files.length),
+    total: Math.max(1, files.length),
+    message: `Parsed ${parsed.items.length} saved item${parsed.items.length === 1 ? "" : "s"}`,
+    details: {
+      jsonFiles: files.length,
+      itemsParsed: parsed.items.length,
+    },
+  });
+
+  return parsed;
+}
+
+async function parseLikedExportJsonFilesWithProgress(
+  files: Array<{ name: string; content: string }>,
+  options?: ImportRunOptions,
+) {
+  await emitProgress(options?.onProgress, {
+    phase: "parsing_likes",
+    processed: 0,
+    total: Math.max(1, files.length),
+    message: "Parsing likes…",
+    details: { jsonFiles: files.length },
+  });
+  throwIfCancelled(options?.shouldCancel);
+
+  const parsed = parseLikedExportJsonFiles(files);
+
+  await emitProgress(options?.onProgress, {
+    phase: "parsing_likes",
+    processed: Math.max(1, files.length),
+    total: Math.max(1, files.length),
+    message: `Parsed ${parsed.items.length} liked item${parsed.items.length === 1 ? "" : "s"}`,
+    details: {
+      jsonFiles: files.length,
+      likesParsed: parsed.items.length,
+    },
+  });
+
+  return parsed;
 }
 
 function persistImportSchemas(
@@ -119,12 +347,553 @@ function persistImportSchemas(
   }
 }
 
+type DbTx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
+
+function applyOneParsedItem(tx: DbTx, importId: number, item: ParsedSavedItem) {
+  const sqlite = getSqlite();
+  const existing = tx
+    .select()
+    .from(savedItems)
+    .where(eq(savedItems.mediaKey, item.mediaKey))
+    .get();
+
+  if (!existing) {
+    const inserted = tx
+      .insert(savedItems)
+      .values({
+        mediaKey: item.mediaKey,
+        href: item.href,
+        shortcode: item.shortcode,
+        mediaType: item.mediaType,
+        authorUsername: item.authorUsername,
+        savedAt: item.savedAt,
+        firstSeenImportId: importId,
+        lastSeenImportId: importId,
+      })
+      .returning({ id: savedItems.id })
+      .get();
+
+    const collections: string[] = [];
+    for (const name of item.collections) {
+      const trimmed = name.trim();
+      if (!trimmed) continue;
+      collections.push(trimmed);
+      tx.insert(itemCollections)
+        .values({ itemId: inserted.id, collectionName: trimmed })
+        .onConflictDoNothing()
+        .run();
+    }
+
+    upsertItemFts(
+      inserted.id,
+      {
+        authorUsername: item.authorUsername,
+        shortcode: item.shortcode,
+        mediaKey: item.mediaKey,
+        mediaType: item.mediaType,
+        collections,
+      },
+      sqlite,
+    );
+
+    return { kind: "added" as const, id: inserted.id };
+  }
+
+  const shouldUpdateSavedAt =
+    item.savedAt &&
+    (!existing.savedAt || item.savedAt.getTime() > existing.savedAt.getTime());
+  // Backfill missing author, or replace when the export supplies a different one.
+  const shouldUpdateAuthor =
+    !!item.authorUsername &&
+    (!existing.authorUsername ||
+      item.authorUsername !== existing.authorUsername);
+  const shouldUpdateType =
+    item.mediaType !== "unknown" && item.mediaType !== existing.mediaType;
+  const shouldUpdateHref = item.href !== existing.href;
+
+  const existingCollections = tx
+    .select()
+    .from(itemCollections)
+    .where(eq(itemCollections.itemId, existing.id))
+    .all()
+    .map((row) => row.collectionName);
+
+  const newCollections = item.collections.filter(
+    (name) => !existingCollections.includes(name),
+  );
+
+  const hasChanges =
+    shouldUpdateSavedAt ||
+    shouldUpdateAuthor ||
+    shouldUpdateType ||
+    shouldUpdateHref ||
+    newCollections.length > 0;
+
+  const nextAuthor = shouldUpdateAuthor
+    ? item.authorUsername
+    : existing.authorUsername;
+  const nextType = shouldUpdateType ? item.mediaType : existing.mediaType;
+  const nextHref = shouldUpdateHref ? item.href : existing.href;
+
+  tx.update(savedItems)
+    .set({
+      lastSeenImportId: importId,
+      href: nextHref,
+      authorUsername: nextAuthor,
+      mediaType: nextType,
+      savedAt: shouldUpdateSavedAt ? item.savedAt : existing.savedAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(savedItems.id, existing.id))
+    .run();
+
+  for (const name of newCollections) {
+    tx.insert(itemCollections)
+      .values({ itemId: existing.id, collectionName: name })
+      .onConflictDoNothing()
+      .run();
+  }
+
+  if (hasChanges) {
+    upsertItemFts(
+      existing.id,
+      {
+        authorUsername: nextAuthor,
+        shortcode: existing.shortcode,
+        mediaKey: existing.mediaKey,
+        mediaType: nextType,
+        collections: [...existingCollections, ...newCollections],
+      },
+      sqlite,
+    );
+    return { kind: "updated" as const, id: existing.id };
+  }
+
+  return { kind: "skipped" as const, id: existing.id };
+}
+
+function applyOneLikedItem(tx: DbTx, importId: number, item: ParsedLikedItem) {
+  const sqlite = getSqlite();
+  const existing = tx
+    .select()
+    .from(likedItems)
+    .where(eq(likedItems.mediaKey, item.mediaKey))
+    .get();
+
+  if (!existing) {
+    const inserted = tx
+      .insert(likedItems)
+      .values({
+        mediaKey: item.mediaKey,
+        href: item.href,
+        shortcode: item.shortcode,
+        mediaType: item.mediaType,
+        authorUsername: item.authorUsername,
+        likedAt: item.likedAt,
+        source: item.source,
+        firstSeenImportId: importId,
+        lastSeenImportId: importId,
+      })
+      .returning({ id: likedItems.id })
+      .get();
+
+    upsertLikedItemFts(
+      inserted.id,
+      {
+        authorUsername: item.authorUsername,
+        shortcode: item.shortcode,
+        mediaKey: item.mediaKey,
+        mediaType: item.mediaType,
+        source: item.source,
+      },
+      sqlite,
+    );
+
+    return { kind: "added" as const, id: inserted.id };
+  }
+
+  const shouldUpdateLikedAt =
+    item.likedAt &&
+    (!existing.likedAt || item.likedAt.getTime() > existing.likedAt.getTime());
+  const shouldUpdateAuthor =
+    !!item.authorUsername &&
+    (!existing.authorUsername ||
+      item.authorUsername !== existing.authorUsername);
+  const shouldUpdateType =
+    item.mediaType !== "unknown" && item.mediaType !== existing.mediaType;
+  const shouldUpdateHref = item.href !== existing.href;
+  const shouldUpdateSource = item.source !== existing.source;
+
+  const hasChanges =
+    shouldUpdateLikedAt ||
+    shouldUpdateAuthor ||
+    shouldUpdateType ||
+    shouldUpdateHref ||
+    shouldUpdateSource;
+
+  const nextAuthor = shouldUpdateAuthor
+    ? item.authorUsername
+    : existing.authorUsername;
+  const nextType = shouldUpdateType ? item.mediaType : existing.mediaType;
+  const nextHref = shouldUpdateHref ? item.href : existing.href;
+  const nextSource = shouldUpdateSource ? item.source : existing.source;
+
+  tx.update(likedItems)
+    .set({
+      lastSeenImportId: importId,
+      href: nextHref,
+      authorUsername: nextAuthor,
+      mediaType: nextType,
+      source: nextSource,
+      likedAt: shouldUpdateLikedAt ? item.likedAt : existing.likedAt,
+      updatedAt: new Date(),
+    })
+    .where(eq(likedItems.id, existing.id))
+    .run();
+
+  if (hasChanges) {
+    upsertLikedItemFts(
+      existing.id,
+      {
+        authorUsername: nextAuthor,
+        shortcode: existing.shortcode,
+        mediaKey: existing.mediaKey,
+        mediaType: nextType,
+        source: nextSource,
+      },
+      sqlite,
+    );
+    return { kind: "updated" as const, id: existing.id };
+  }
+
+  return { kind: "skipped" as const, id: existing.id };
+}
+
+async function applyParsedItems(
+  importId: number,
+  items: ParsedSavedItem[],
+  options?: ImportRunOptions,
+) {
+  const db = getDb();
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+  const changedIds: number[] = [];
+  const total = items.length;
+
+  await emitProgress(options?.onProgress, {
+    phase: "writing",
+    processed: 0,
+    total: Math.max(1, total),
+    message: `Writing ${total} item${total === 1 ? "" : "s"}…`,
+    details: {
+      importId,
+      itemsParsed: total,
+      itemsAdded: 0,
+      itemsUpdated: 0,
+      itemsSkipped: 0,
+    },
+  });
+
+  for (let i = 0; i < items.length; i++) {
+    throwIfCancelled(options?.shouldCancel);
+    const item = items[i]!;
+    const outcome = db.transaction((tx) =>
+      applyOneParsedItem(tx, importId, item),
+    );
+
+    if (outcome.kind === "added") {
+      added += 1;
+      changedIds.push(outcome.id);
+    } else if (outcome.kind === "updated") {
+      updated += 1;
+      changedIds.push(outcome.id);
+    } else {
+      skipped += 1;
+    }
+
+    const processed = i + 1;
+    if (processed === total || processed % 20 === 0) {
+      await emitProgress(options?.onProgress, {
+        phase: "writing",
+        processed,
+        total: Math.max(1, total),
+        message: `Writing items… ${processed}/${total} (added ${added}, updated ${updated}, skipped ${skipped})`,
+        details: {
+          importId,
+          itemsParsed: total,
+          itemsAdded: added,
+          itemsUpdated: updated,
+          itemsSkipped: skipped,
+        },
+      });
+    }
+    if (processed % 50 === 0) await yieldToEventLoop();
+  }
+
+  return { added, updated, skipped, changedIds };
+}
+
+async function applyLikedItems(
+  importId: number,
+  items: ParsedLikedItem[],
+  options?: ImportRunOptions,
+) {
+  const db = getDb();
+  let added = 0;
+  let updated = 0;
+  let skipped = 0;
+  const changedIds: number[] = [];
+  const total = items.length;
+
+  if (total === 0) {
+    return { added: 0, updated: 0, skipped: 0, changedIds };
+  }
+
+  await emitProgress(options?.onProgress, {
+    phase: "writing",
+    processed: 0,
+    total: Math.max(1, total),
+    message: `Writing ${total} liked item${total === 1 ? "" : "s"}…`,
+    details: {
+      importId,
+      likesParsed: total,
+      likesAdded: 0,
+      likesUpdated: 0,
+      likesSkipped: 0,
+    },
+  });
+
+  for (let i = 0; i < items.length; i++) {
+    throwIfCancelled(options?.shouldCancel);
+    const item = items[i]!;
+    const outcome = db.transaction((tx) =>
+      applyOneLikedItem(tx, importId, item),
+    );
+
+    if (outcome.kind === "added") {
+      added += 1;
+      changedIds.push(outcome.id);
+    } else if (outcome.kind === "updated") {
+      updated += 1;
+      changedIds.push(outcome.id);
+    } else {
+      skipped += 1;
+    }
+
+    const processed = i + 1;
+    if (processed === total || processed % 50 === 0) {
+      await emitProgress(options?.onProgress, {
+        phase: "writing",
+        processed,
+        total: Math.max(1, total),
+        message: `Writing likes… ${processed}/${total} (added ${added}, updated ${updated}, skipped ${skipped})`,
+        details: {
+          importId,
+          likesParsed: total,
+          likesAdded: added,
+          likesUpdated: updated,
+          likesSkipped: skipped,
+        },
+      });
+    }
+    if (processed % 50 === 0) await yieldToEventLoop();
+  }
+
+  return { added, updated, skipped, changedIds };
+}
+
+async function finishSuccessfulImport(args: {
+  draftId: number;
+  filename: string;
+  contentHash: string;
+  items: ParsedSavedItem[];
+  liked: ParsedLikedItem[];
+  importLog: ImportLog;
+  schemaCatalog: FileSchemaCatalogEntry[];
+  isDuplicate: boolean;
+  priorId: number | null;
+  options?: ImportRunOptions;
+}): Promise<ImportResult> {
+  const {
+    draftId,
+    filename,
+    contentHash,
+    items,
+    liked,
+    importLog,
+    schemaCatalog,
+    isDuplicate,
+    priorId,
+    options,
+  } = args;
+  const db = getDb();
+
+  try {
+    const result =
+      items.length > 0
+        ? await applyParsedItems(draftId, items, options)
+        : { added: 0, updated: 0, skipped: 0, changedIds: [] as number[] };
+
+    const likesResult = await applyLikedItems(draftId, liked, options);
+
+    persistImportSchemas(draftId, schemaCatalog);
+
+    const completedLog: ImportLog = {
+      ...importLog,
+      likesAdded: likesResult.added,
+      likesUpdated: likesResult.updated,
+      likesSkipped: likesResult.skipped,
+      warnings: [
+        ...importLog.warnings,
+        ...(isDuplicate && priorId
+          ? [`Identical file to import #${priorId}; metadata refreshed.`]
+          : []),
+        ...(liked.length > 0
+          ? [
+              `Likes: ${likesResult.added} added, ${likesResult.updated} updated, ${likesResult.skipped} unchanged.`,
+            ]
+          : []),
+      ],
+    };
+
+    db.update(imports)
+      .set({
+        itemsAdded: result.added,
+        itemsUpdated: result.updated,
+        itemsSkipped: result.skipped,
+        status: isDuplicate ? "duplicate" : "completed",
+        notes: serializeImportLog(completedLog),
+      })
+      .where(eq(imports.id, draftId))
+      .run();
+
+    const embeddingMessage =
+      result.changedIds.length > 0
+        ? await syncEmbeddingsAfterImport(
+            draftId,
+            result.changedIds,
+            options,
+            "saves",
+          )
+        : "No saved items to embed.";
+
+    const likesEmbeddingMessage =
+      likesResult.changedIds.length > 0
+        ? await syncEmbeddingsAfterImport(
+            draftId,
+            likesResult.changedIds,
+            options,
+            "likes",
+          )
+        : liked.length > 0
+          ? " No liked items needed embedding."
+          : "";
+
+    const likesSummary =
+      liked.length > 0
+        ? ` Likes: ${likesResult.added} new, ${likesResult.updated} updated, ${likesResult.skipped} unchanged.`
+        : "";
+
+    const message = isDuplicate
+      ? `Same file as import #${priorId}. Refreshed metadata for ${result.updated} saves (${result.skipped} unchanged).${likesSummary} ${embeddingMessage}${likesEmbeddingMessage}`
+      : `Imported ${result.added} new saves, updated ${result.updated}, unchanged ${result.skipped}.${likesSummary} ${embeddingMessage}${likesEmbeddingMessage}`;
+
+    await emitProgress(options?.onProgress, {
+      phase: "completed",
+      processed: items.length + liked.length,
+      total: Math.max(1, items.length + liked.length),
+      message,
+      details: {
+        importId: draftId,
+        itemsParsed: items.length,
+        likesParsed: liked.length,
+        itemsAdded: result.added,
+        itemsUpdated: result.updated,
+        itemsSkipped: result.skipped,
+        likesAdded: likesResult.added,
+        likesUpdated: likesResult.updated,
+        likesSkipped: likesResult.skipped,
+      },
+    });
+
+    return {
+      importId: draftId,
+      status: isDuplicate ? "duplicate" : "completed",
+      filename,
+      contentHash,
+      itemsFound: items.length,
+      itemsAdded: result.added,
+      itemsUpdated: result.updated,
+      itemsSkipped: result.skipped,
+      likesFound: liked.length,
+      likesAdded: likesResult.added,
+      likesUpdated: likesResult.updated,
+      likesSkipped: likesResult.skipped,
+      message,
+      log: completedLog,
+    };
+  } catch (error) {
+    if (error instanceof ImportCancelledError) {
+      db.update(imports)
+        .set({ status: "failed", error: "Import cancelled" })
+        .where(eq(imports.id, draftId))
+        .run();
+      throw error;
+    }
+
+    const message =
+      error instanceof Error ? error.message : "Import failed unexpectedly";
+    db.update(imports)
+      .set({ status: "failed", error: message })
+      .where(eq(imports.id, draftId))
+      .run();
+
+    await emitProgress(options?.onProgress, {
+      phase: "failed",
+      processed: 0,
+      total: Math.max(1, items.length + liked.length),
+      message,
+      details: {
+        importId: draftId,
+        itemsParsed: items.length,
+        likesParsed: liked.length,
+      },
+    });
+
+    return {
+      importId: draftId,
+      status: "failed",
+      filename,
+      contentHash,
+      itemsFound: items.length,
+      itemsAdded: 0,
+      itemsUpdated: 0,
+      itemsSkipped: 0,
+      likesFound: liked.length,
+      likesAdded: 0,
+      likesUpdated: 0,
+      likesSkipped: 0,
+      message,
+    };
+  }
+}
+
 export async function importExportArchive(
   buffer: Buffer,
   filename: string,
+  options?: ImportRunOptions,
 ): Promise<ImportResult> {
   const db = getDb();
-  const contentHash = hashBuffer(buffer);
+  const contentHash = options?.contentHash ?? hashBuffer(buffer);
+
+  await emitProgress(options?.onProgress, {
+    phase: "received",
+    processed: 0,
+    total: 1,
+    message: `Received ${filename}`,
+  });
+  throwIfCancelled(options?.shouldCancel);
 
   const prior = db
     .select()
@@ -137,10 +906,19 @@ export async function importExportArchive(
     )
     .get();
 
-  let files: Array<{ name: string; content: string }>;
+  await emitProgress(options?.onProgress, {
+    phase: "extracting",
+    processed: 0,
+    total: 1,
+    message: "Opening zip archive…",
+    details: { filesScanned: 0, jsonFiles: 0 },
+  });
+
+  let files: Array<{ name: string; content: string; byteSize: number }>;
   try {
-    files = extractJsonFilesFromZip(buffer);
+    files = extractJsonFilesFromZip(buffer, options);
   } catch (error) {
+    if (error instanceof ImportCancelledError) throw error;
     const message =
       error instanceof Error ? error.message : "Failed to read zip archive";
     const failed = db
@@ -154,6 +932,14 @@ export async function importExportArchive(
       .returning()
       .get();
 
+    await emitProgress(options?.onProgress, {
+      phase: "failed",
+      processed: 0,
+      total: 1,
+      message,
+      details: { importId: failed.id },
+    });
+
     return {
       importId: failed.id,
       status: "failed",
@@ -163,21 +949,43 @@ export async function importExportArchive(
       itemsAdded: 0,
       itemsUpdated: 0,
       itemsSkipped: 0,
+      likesFound: 0,
+      likesAdded: 0,
+      likesUpdated: 0,
+      likesSkipped: 0,
       message,
     };
   }
 
-  const schemaCatalog = catalogSchemasFromFiles(files);
-  const parsed = parseExportJsonFiles(files);
+  await emitProgress(options?.onProgress, {
+    phase: "extracting",
+    processed: 1,
+    total: 1,
+    message: `Found ${files.length} JSON file${files.length === 1 ? "" : "s"}`,
+    details: { jsonFiles: files.length, filesScanned: files.length },
+  });
+
+  const schemaCatalog = await catalogSchemasWithProgress(files, options);
+  const parsed = await parseExportJsonFilesWithProgress(files, options);
+  const likedParsed = await parseLikedExportJsonFilesWithProgress(
+    files,
+    options,
+  );
   const items = parsed.items;
+  const liked = likedParsed.items;
   const importLog = buildImportLogFromItems(
     files,
     parsed.savedJsonFiles,
     items,
     parsed.warnings,
+    {
+      likedJsonFiles: likedParsed.likedJsonFiles,
+      items: liked,
+      warnings: likedParsed.warnings,
+    },
   );
 
-  if (items.length === 0) {
+  if (items.length === 0 && liked.length === 0) {
     const failed = db
       .insert(imports)
       .values({
@@ -185,7 +993,7 @@ export async function importExportArchive(
         contentHash,
         status: "failed",
         error:
-          "No saved posts/reels found. Ensure the zip is an Instagram data export (JSON) that includes saved activity.",
+          "No saved or liked posts found. Ensure the zip is an Instagram data export (JSON) that includes saved and/or likes activity.",
         itemsFound: 0,
       })
       .returning()
@@ -198,6 +1006,18 @@ export async function importExportArchive(
       // non-fatal
     }
 
+    await emitProgress(options?.onProgress, {
+      phase: "failed",
+      processed: 0,
+      total: 1,
+      message: failed.error ?? "No saved or liked items found",
+      details: {
+        importId: failed.id,
+        schemasInferred: schemaCatalog.length,
+        jsonFiles: files.length,
+      },
+    });
+
     return {
       importId: failed.id,
       status: "failed",
@@ -207,7 +1027,11 @@ export async function importExportArchive(
       itemsAdded: 0,
       itemsUpdated: 0,
       itemsSkipped: 0,
-      message: failed.error ?? "No saved items found",
+      likesFound: 0,
+      likesAdded: 0,
+      likesUpdated: 0,
+      likesSkipped: 0,
+      message: failed.error ?? "No saved or liked items found",
     };
   }
 
@@ -224,222 +1048,36 @@ export async function importExportArchive(
     .returning()
     .get();
 
-  try {
-    const result = db.transaction((tx) => {
-      // Use the same connection via getDb inside helpers — better-sqlite3
-      // transactions need ops on the same Database. drizzle transaction callback
-      // provides tx; reimplement with tx for correctness.
-      return applyParsedItemsWithTx(tx, draft.id, items);
-    });
-
-    persistImportSchemas(draft.id, schemaCatalog);
-
-    db.update(imports)
-      .set({
-        itemsAdded: result.added,
-        itemsUpdated: result.updated,
-        itemsSkipped: result.skipped,
-        status: isDuplicate ? "duplicate" : "completed",
-        notes: serializeImportLog({
-          ...importLog,
-          warnings: [
-            ...importLog.warnings,
-            ...(isDuplicate
-              ? [`Identical file to import #${prior!.id}; metadata refreshed.`]
-              : []),
-          ],
-        }),
-      })
-      .where(eq(imports.id, draft.id))
-      .run();
-
-    const embeddingMessage = await syncEmbeddingsAfterImport(
-      draft.id,
-      result.changedIds,
-    );
-
-    const message = isDuplicate
-      ? `Same file as import #${prior!.id}. Refreshed metadata for ${result.updated} items (${result.skipped} unchanged). ${embeddingMessage}`
-      : `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`;
-
-    return {
-      importId: draft.id,
-      status: isDuplicate ? "duplicate" : "completed",
-      filename,
-      contentHash,
-      itemsFound: items.length,
-      itemsAdded: result.added,
-      itemsUpdated: result.updated,
-      itemsSkipped: result.skipped,
-      message,
-      log: importLog,
-    };
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Import failed unexpectedly";
-    db.update(imports)
-      .set({ status: "failed", error: message })
-      .where(eq(imports.id, draft.id))
-      .run();
-
-    return {
-      importId: draft.id,
-      status: "failed",
-      filename,
-      contentHash,
-      itemsFound: items.length,
-      itemsAdded: 0,
-      itemsUpdated: 0,
-      itemsSkipped: 0,
-      message,
-    };
-  }
-}
-
-type DbTx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0];
-
-function applyParsedItemsWithTx(
-  tx: DbTx,
-  importId: number,
-  items: ParsedSavedItem[],
-) {
-  let added = 0;
-  let updated = 0;
-  let skipped = 0;
-  const changedIds: number[] = [];
-  const sqlite = getSqlite();
-
-  for (const item of items) {
-    const existing = tx
-      .select()
-      .from(savedItems)
-      .where(eq(savedItems.mediaKey, item.mediaKey))
-      .get();
-
-    if (!existing) {
-      const inserted = tx
-        .insert(savedItems)
-        .values({
-          mediaKey: item.mediaKey,
-          href: item.href,
-          shortcode: item.shortcode,
-          mediaType: item.mediaType,
-          authorUsername: item.authorUsername,
-          savedAt: item.savedAt,
-          firstSeenImportId: importId,
-          lastSeenImportId: importId,
-        })
-        .returning({ id: savedItems.id })
-        .get();
-
-      const collections: string[] = [];
-      for (const name of item.collections) {
-        const trimmed = name.trim();
-        if (!trimmed) continue;
-        collections.push(trimmed);
-        tx.insert(itemCollections)
-          .values({ itemId: inserted.id, collectionName: trimmed })
-          .onConflictDoNothing()
-          .run();
-      }
-
-      upsertItemFts(
-        inserted.id,
-        {
-          authorUsername: item.authorUsername,
-          shortcode: item.shortcode,
-          mediaKey: item.mediaKey,
-          mediaType: item.mediaType,
-          collections,
-        },
-        sqlite,
-      );
-
-      changedIds.push(inserted.id);
-      added += 1;
-      continue;
-    }
-
-    const shouldUpdateSavedAt =
-      item.savedAt &&
-      (!existing.savedAt || item.savedAt.getTime() > existing.savedAt.getTime());
-    const shouldUpdateAuthor =
-      !!item.authorUsername &&
-      item.authorUsername !== existing.authorUsername;
-    const shouldUpdateType =
-      item.mediaType !== "unknown" && item.mediaType !== existing.mediaType;
-    const shouldUpdateHref = item.href !== existing.href;
-
-    const existingCollections = tx
-      .select()
-      .from(itemCollections)
-      .where(eq(itemCollections.itemId, existing.id))
-      .all()
-      .map((row) => row.collectionName);
-
-    const newCollections = item.collections.filter(
-      (name) => !existingCollections.includes(name),
-    );
-
-    const hasChanges =
-      shouldUpdateSavedAt ||
-      shouldUpdateAuthor ||
-      shouldUpdateType ||
-      shouldUpdateHref ||
-      newCollections.length > 0;
-
-    const nextAuthor = shouldUpdateAuthor
-      ? item.authorUsername
-      : existing.authorUsername;
-    const nextType = shouldUpdateType ? item.mediaType : existing.mediaType;
-    const nextHref = shouldUpdateHref ? item.href : existing.href;
-
-    tx.update(savedItems)
-      .set({
-        lastSeenImportId: importId,
-        href: nextHref,
-        authorUsername: nextAuthor,
-        mediaType: nextType,
-        savedAt: shouldUpdateSavedAt ? item.savedAt : existing.savedAt,
-        updatedAt: new Date(),
-      })
-      .where(eq(savedItems.id, existing.id))
-      .run();
-
-    for (const name of newCollections) {
-      tx.insert(itemCollections)
-        .values({ itemId: existing.id, collectionName: name })
-        .onConflictDoNothing()
-        .run();
-    }
-
-    if (hasChanges) {
-      upsertItemFts(
-        existing.id,
-        {
-          authorUsername: nextAuthor,
-          shortcode: existing.shortcode,
-          mediaKey: existing.mediaKey,
-          mediaType: nextType,
-          collections: [...existingCollections, ...newCollections],
-        },
-        sqlite,
-      );
-      changedIds.push(existing.id);
-      updated += 1;
-    } else skipped += 1;
-  }
-
-  return { added, updated, skipped, changedIds };
+  return finishSuccessfulImport({
+    draftId: draft.id,
+    filename,
+    contentHash,
+    items,
+    liked,
+    importLog,
+    schemaCatalog,
+    isDuplicate,
+    priorId: prior?.id ?? null,
+    options,
+  });
 }
 
 export async function importExportJson(
   content: string,
   filename: string,
+  options?: ImportRunOptions,
 ): Promise<ImportResult> {
   const buffer = Buffer.from(content, "utf8");
-  const contentHash = hashBuffer(buffer);
+  const contentHash = options?.contentHash ?? hashBuffer(buffer);
   const db = getDb();
+
+  await emitProgress(options?.onProgress, {
+    phase: "received",
+    processed: 0,
+    total: 1,
+    message: `Received ${filename}`,
+  });
+  throwIfCancelled(options?.shouldCancel);
 
   const prior = db
     .select()
@@ -453,24 +1091,34 @@ export async function importExportJson(
     .get();
 
   const jsonFiles = [{ name: filename, content, byteSize: buffer.byteLength }];
-  const schemaCatalog = catalogSchemasFromFiles(jsonFiles);
-  const parsed = parseExportJsonFiles(jsonFiles);
+  const schemaCatalog = await catalogSchemasWithProgress(jsonFiles, options);
+  const parsed = await parseExportJsonFilesWithProgress(jsonFiles, options);
+  const likedParsed = await parseLikedExportJsonFilesWithProgress(
+    jsonFiles,
+    options,
+  );
   const items = parsed.items;
+  const liked = likedParsed.items;
   const importLog = buildImportLogFromItems(
     [{ name: filename }],
     parsed.savedJsonFiles,
     items,
     parsed.warnings,
+    {
+      likedJsonFiles: likedParsed.likedJsonFiles,
+      items: liked,
+      warnings: likedParsed.warnings,
+    },
   );
 
-  if (items.length === 0) {
+  if (items.length === 0 && liked.length === 0) {
     const failed = db
       .insert(imports)
       .values({
         filename,
         contentHash,
         status: "failed",
-        error: "No saved posts/reels found in JSON.",
+        error: "No saved or liked posts found in JSON.",
       })
       .returning()
       .get();
@@ -481,6 +1129,14 @@ export async function importExportJson(
       // non-fatal
     }
 
+    await emitProgress(options?.onProgress, {
+      phase: "failed",
+      processed: 0,
+      total: 1,
+      message: failed.error ?? "No saved or liked items found",
+      details: { importId: failed.id },
+    });
+
     return {
       importId: failed.id,
       status: "failed",
@@ -490,7 +1146,11 @@ export async function importExportJson(
       itemsAdded: 0,
       itemsUpdated: 0,
       itemsSkipped: 0,
-      message: failed.error ?? "No saved items found",
+      likesFound: 0,
+      likesAdded: 0,
+      likesUpdated: 0,
+      likesSkipped: 0,
+      message: failed.error ?? "No saved or liked items found",
     };
   }
 
@@ -507,71 +1167,16 @@ export async function importExportJson(
     .returning()
     .get();
 
-  try {
-    const result = db.transaction((tx) =>
-      applyParsedItemsWithTx(tx, draft.id, items),
-    );
-
-    persistImportSchemas(draft.id, schemaCatalog);
-
-    db.update(imports)
-      .set({
-        itemsAdded: result.added,
-        itemsUpdated: result.updated,
-        itemsSkipped: result.skipped,
-        status: isDuplicate ? "duplicate" : "completed",
-        notes: serializeImportLog({
-          ...importLog,
-          warnings: [
-            ...importLog.warnings,
-            ...(isDuplicate
-              ? [`Identical file to import #${prior!.id}; metadata refreshed.`]
-              : []),
-          ],
-        }),
-      })
-      .where(eq(imports.id, draft.id))
-      .run();
-
-    const embeddingMessage = await syncEmbeddingsAfterImport(
-      draft.id,
-      result.changedIds,
-    );
-
-    const message = isDuplicate
-      ? `Same file as import #${prior!.id}. Refreshed metadata for ${result.updated} items (${result.skipped} unchanged). ${embeddingMessage}`
-      : `Imported ${result.added} new, updated ${result.updated}, unchanged ${result.skipped}. ${embeddingMessage}`;
-
-    return {
-      importId: draft.id,
-      status: isDuplicate ? "duplicate" : "completed",
-      filename,
-      contentHash,
-      itemsFound: items.length,
-      itemsAdded: result.added,
-      itemsUpdated: result.updated,
-      itemsSkipped: result.skipped,
-      message,
-      log: importLog,
-    };
-  } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Import failed unexpectedly";
-    db.update(imports)
-      .set({ status: "failed", error: message })
-      .where(eq(imports.id, draft.id))
-      .run();
-
-    return {
-      importId: draft.id,
-      status: "failed",
-      filename,
-      contentHash,
-      itemsFound: items.length,
-      itemsAdded: 0,
-      itemsUpdated: 0,
-      itemsSkipped: 0,
-      message,
-    };
-  }
+  return finishSuccessfulImport({
+    draftId: draft.id,
+    filename,
+    contentHash,
+    items,
+    liked,
+    importLog,
+    schemaCatalog,
+    isDuplicate,
+    priorId: prior?.id ?? null,
+    options,
+  });
 }

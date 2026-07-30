@@ -1,0 +1,104 @@
+[
+  {
+    "timestamp": 1700000000,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/reel/LabelFmtReel01/",
+        "href": "https://www.instagram.com/reel/LabelFmtReel01/"
+      },
+      {
+        "label": "Caption",
+        "value": "Sample caption for reel fixture."
+      },
+      {
+        "label": "Title",
+        "value": ""
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "Name",
+                "value": "ai"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Hashtags"
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "URL",
+                "value": ""
+              },
+              {
+                "label": "Name",
+                "value": "Fixture Creator"
+              },
+              {
+                "label": "Username",
+                "value": "fixture.creator"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      },
+      {
+        "dict": [],
+        "title": "Brand partner"
+      }
+    ],
+    "fbid": "1001"
+  },
+  {
+    "timestamp": 1710000000,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/p/LabelFmtPost01/",
+        "href": "https://www.instagram.com/p/LabelFmtPost01/"
+      },
+      {
+        "label": "Caption",
+        "value": "Sample caption for post fixture."
+      },
+      {
+        "label": "Title",
+        "value": ""
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "URL",
+                "value": ""
+              },
+              {
+                "label": "Name",
+                "value": "Other Creator"
+              },
+              {
+                "label": "Username",
+                "value": "other.creator"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      }
+    ],
+    "fbid": "1002"
+  }
+]

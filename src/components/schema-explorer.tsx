@@ -20,6 +20,15 @@ type Props = {
   emptyReason: string | null;
 };
 
+type FileTreeNode =
+  | {
+      kind: "folder";
+      name: string;
+      path: string;
+      children: FileTreeNode[];
+    }
+  | { kind: "file"; file: SchemaFileEntry };
+
 function formatBytes(n: number) {
   if (n < 1024) return `${n} B`;
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
@@ -30,14 +39,68 @@ function typeLabel(type: JsonSchemaNode["type"] | string) {
   return Array.isArray(type) ? type.join(" | ") : String(type);
 }
 
-function folderOf(path: string) {
-  const idx = path.lastIndexOf("/");
-  return idx === -1 ? "" : path.slice(0, idx);
-}
-
 function basename(path: string) {
   const idx = path.lastIndexOf("/");
   return idx === -1 ? path : path.slice(idx + 1);
+}
+
+function buildFileTree(files: SchemaFileEntry[]): FileTreeNode[] {
+  type FolderAcc = {
+    name: string;
+    path: string;
+    folders: Map<string, FolderAcc>;
+    files: SchemaFileEntry[];
+  };
+
+  const root: FolderAcc = {
+    name: "",
+    path: "",
+    folders: new Map(),
+    files: [],
+  };
+
+  for (const file of files) {
+    const parts = file.filePath.split("/").filter(Boolean);
+    if (parts.length === 0) continue;
+    let node = root;
+    for (let i = 0; i < parts.length - 1; i++) {
+      const name = parts[i]!;
+      const folderPath = parts.slice(0, i + 1).join("/");
+      let child = node.folders.get(name);
+      if (!child) {
+        child = {
+          name,
+          path: folderPath,
+          folders: new Map(),
+          files: [],
+        };
+        node.folders.set(name, child);
+      }
+      node = child;
+    }
+    node.files.push(file);
+  }
+
+  function toNodes(acc: FolderAcc): FileTreeNode[] {
+    const folders = [...acc.folders.values()]
+      .sort((a, b) => a.name.localeCompare(b.name))
+      .map(
+        (folder): FileTreeNode => ({
+          kind: "folder",
+          name: folder.name,
+          path: folder.path,
+          children: toNodes(folder),
+        }),
+      );
+    const fileNodes = acc.files
+      .sort((a, b) =>
+        basename(a.filePath).localeCompare(basename(b.filePath)),
+      )
+      .map((file): FileTreeNode => ({ kind: "file", file }));
+    return [...folders, ...fileNodes];
+  }
+
+  return toNodes(root);
 }
 
 function SchemaTreeNode({
@@ -122,6 +185,87 @@ function SchemaTreeNode({
   );
 }
 
+function FileTreeList({
+  nodes,
+  depth,
+  selectedPath,
+  isFolderOpen,
+  onToggleFolder,
+  onSelectFile,
+}: {
+  nodes: FileTreeNode[];
+  depth: number;
+  selectedPath: string | null;
+  isFolderOpen: (path: string, depth: number) => boolean;
+  onToggleFolder: (path: string, depth: number) => void;
+  onSelectFile: (path: string) => void;
+}) {
+  return (
+    <ul>
+      {nodes.map((node) => {
+        if (node.kind === "folder") {
+          const open = isFolderOpen(node.path, depth);
+          return (
+            <li key={`folder:${node.path}`}>
+              <button
+                type="button"
+                onClick={() => onToggleFolder(node.path, depth)}
+                className="flex w-full items-center gap-1.5 px-3 py-1.5 text-left text-[11px] text-[var(--muted)] transition hover:bg-[var(--chip)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)]"
+                style={{ paddingLeft: `${depth * 12 + 12}px` }}
+                aria-expanded={open}
+              >
+                <span className="w-3 shrink-0 font-mono">
+                  {open ? "▾" : "▸"}
+                </span>
+                <span className="min-w-0 break-all font-mono">
+                  {node.name}/
+                </span>
+              </button>
+              {open ? (
+                <FileTreeList
+                  nodes={node.children}
+                  depth={depth + 1}
+                  selectedPath={selectedPath}
+                  isFolderOpen={isFolderOpen}
+                  onToggleFolder={onToggleFolder}
+                  onSelectFile={onSelectFile}
+                />
+              ) : null}
+            </li>
+          );
+        }
+
+        const { file } = node;
+        const active = file.filePath === selectedPath;
+        return (
+          <li key={file.filePath}>
+            <button
+              type="button"
+              onClick={() => onSelectFile(file.filePath)}
+              className={`flex w-full flex-col gap-0.5 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)] ${
+                active
+                  ? "bg-[var(--accent-soft)] text-[var(--ink)]"
+                  : "text-[var(--ink)] hover:bg-[var(--chip)]"
+              }`}
+              style={{ paddingLeft: `${depth * 12 + 12}px`, paddingRight: 12 }}
+            >
+              <span className="break-all font-mono text-[13px]">
+                {basename(file.filePath)}
+              </span>
+              <span className="text-[11px] text-[var(--muted)]">
+                {typeLabel(file.topLevelType)} · {formatBytes(file.byteSize)}
+                {file.imports && file.imports.length > 1
+                  ? ` · ${file.imports.length} imports`
+                  : ""}
+              </span>
+            </button>
+          </li>
+        );
+      })}
+    </ul>
+  );
+}
+
 export function SchemaExplorer({
   initialMode,
   initialImportId,
@@ -139,6 +283,8 @@ export function SchemaExplorer({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
+  /** Explicit expand overrides; absent keys use default (first two levels open). */
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
   async function loadCatalog(next: { mode: "all" | "import"; importId: number | null }) {
     setLoading(true);
@@ -177,18 +323,31 @@ export function SchemaExplorer({
     return files.filter((f) => f.filePath.toLowerCase().includes(q));
   }, [files, filter]);
 
-  const grouped = useMemo(() => {
-    const map = new Map<string, SchemaFileEntry[]>();
-    for (const file of filtered) {
-      const folder = folderOf(file.filePath) || "(root)";
-      const list = map.get(folder) ?? [];
-      list.push(file);
-      map.set(folder, list);
-    }
-    return [...map.entries()].sort(([a], [b]) => a.localeCompare(b));
-  }, [filtered]);
+  const fileTree = useMemo(() => buildFileTree(filtered), [filtered]);
+  const filterActive = filter.trim().length > 0;
+
+  function isFolderOpen(path: string, depth: number) {
+    // Keep filter matches visible without mutating expand state.
+    if (filterActive) return true;
+    if (path in expanded) return expanded[path]!;
+    return depth < 2;
+  }
+
+  function toggleFolder(path: string, depth: number) {
+    setExpanded((prev) => {
+      const currentlyOpen =
+        path in prev ? prev[path]! : depth < 2;
+      return { ...prev, [path]: !currentlyOpen };
+    });
+  }
 
   const selected = files.find((f) => f.filePath === selectedPath) ?? null;
+  const needsReimport =
+    selected != null &&
+    (selected.topLevelType === "unknown" ||
+      selected.truncatedRead ||
+      Boolean(selected.parseError) ||
+      !selected.schema);
 
   return (
     <div className="space-y-4">
@@ -257,44 +416,16 @@ export function SchemaExplorer({
             <div className="sticky top-0 z-10 border-b border-[var(--line)] bg-[var(--surface)] px-3 py-2 text-xs uppercase tracking-[0.16em] text-[var(--muted)]">
               JSON files{loading ? " · loading…" : ` · ${filtered.length}`}
             </div>
-            <ul className="py-1">
-              {grouped.map(([folder, group]) => (
-                <li key={folder} className="mb-1">
-                  <p className="px-3 pb-1 pt-2 font-mono text-[11px] text-[var(--muted)]">
-                    {folder}/
-                  </p>
-                  <ul>
-                    {group.map((file) => {
-                      const active = file.filePath === selectedPath;
-                      return (
-                        <li key={file.filePath}>
-                          <button
-                            type="button"
-                            onClick={() => setSelectedPath(file.filePath)}
-                            className={`flex w-full flex-col gap-0.5 px-3 py-2 text-left text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--accent)] ${
-                              active
-                                ? "bg-[var(--accent-soft)] text-[var(--ink)]"
-                                : "text-[var(--ink)] hover:bg-[var(--chip)]"
-                            }`}
-                          >
-                            <span className="break-all font-mono text-[13px]">
-                              {basename(file.filePath)}
-                            </span>
-                            <span className="text-[11px] text-[var(--muted)]">
-                              {typeLabel(file.topLevelType)} ·{" "}
-                              {formatBytes(file.byteSize)}
-                              {file.imports && file.imports.length > 1
-                                ? ` · ${file.imports.length} imports`
-                                : ""}
-                            </span>
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </li>
-              ))}
-            </ul>
+            <div className="py-1">
+              <FileTreeList
+                nodes={fileTree}
+                depth={0}
+                selectedPath={selectedPath}
+                isFolderOpen={isFolderOpen}
+                onToggleFolder={toggleFolder}
+                onSelectFile={setSelectedPath}
+              />
+            </div>
           </aside>
 
           <section className="max-h-[70vh] overflow-y-auto px-4 py-4 sm:px-5">
@@ -327,6 +458,14 @@ export function SchemaExplorer({
                   {selected.parseError ? (
                     <p className="text-sm text-[var(--warn)]">
                       Parse note: {selected.parseError}
+                    </p>
+                  ) : null}
+                  {needsReimport ? (
+                    <p className="rounded-lg border border-[var(--warn)]/40 bg-[var(--warn)]/10 px-3 py-2 text-sm text-[var(--warn)]">
+                      Incomplete schema (unknown type, truncated sample, or
+                      parse failure). Re-import the zip to refresh with
+                      full-file inference — existing rows are not upgraded
+                      automatically.
                     </p>
                   ) : null}
                 </div>

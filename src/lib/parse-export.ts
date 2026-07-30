@@ -1,5 +1,14 @@
 export type MediaType = "post" | "reel" | "igtv" | "unknown";
 
+/** Liked items may include stories and comments in addition to feed media. */
+export type LikedMediaType =
+  | "post"
+  | "reel"
+  | "igtv"
+  | "story"
+  | "comment"
+  | "unknown";
+
 export type ParsedSavedItem = {
   mediaKey: string;
   href: string;
@@ -10,17 +19,42 @@ export type ParsedSavedItem = {
   collections: string[];
 };
 
+export type LikedSource =
+  | "liked_posts"
+  | "story_likes"
+  | "liked_comments";
+
+export type ParsedLikedItem = {
+  mediaKey: string;
+  href: string;
+  shortcode: string | null;
+  mediaType: LikedMediaType;
+  authorUsername: string | null;
+  likedAt: Date | null;
+  source: LikedSource;
+};
+
 export type ParseResult = {
   items: ParsedSavedItem[];
   savedJsonFiles: string[];
   warnings: string[];
 };
 
+export type LikesParseResult = {
+  items: ParsedLikedItem[];
+  likedJsonFiles: string[];
+  warnings: string[];
+};
+
 const IG_URL_RE =
   /instagram\.com\/(?:p|reel|reels|tv)\/([A-Za-z0-9_-]+)/i;
 
+/** e.g. /stories/username/1234567890/ or /stories/username/ */
+const STORY_URL_RE =
+  /instagram\.com\/stories\/([A-Za-z0-9._]+)(?:\/([0-9]+))?/i;
+
 const GENERIC_LABEL_RE =
-  /^(saved on|added time|saved post|saved|name|time)$/i;
+  /^(saved on|added time|saved post|saved|name|time|liked on|like)$/i;
 
 export function detectMediaType(href: string): MediaType {
   const lower = href.toLowerCase();
@@ -30,14 +64,41 @@ export function detectMediaType(href: string): MediaType {
   return "unknown";
 }
 
+export function detectLikedMediaType(
+  href: string,
+  source: LikedSource,
+): LikedMediaType {
+  if (source === "liked_comments") return "comment";
+  if (source === "story_likes" || /\/stories\//i.test(href)) return "story";
+  return detectMediaType(href);
+}
+
 export function extractShortcode(href: string): string | null {
   const match = href.match(IG_URL_RE);
   return match?.[1] ?? null;
 }
 
+export function extractStoryParts(
+  href: string,
+): { username: string; storyId: string | null } | null {
+  const match = href.match(STORY_URL_RE);
+  if (!match?.[1]) return null;
+  return {
+    username: match[1].toLowerCase(),
+    storyId: match[2] ?? null,
+  };
+}
+
 export function mediaKeyFromHref(href: string): string | null {
   const shortcode = extractShortcode(href);
   if (shortcode) return shortcode.toLowerCase();
+
+  const story = extractStoryParts(href);
+  if (story) {
+    return story.storyId
+      ? `story:${story.username}:${story.storyId}`
+      : `story:${story.username}:${href.trim().toLowerCase().replace(/\/+$/, "")}`;
+  }
 
   try {
     const url = new URL(href);
@@ -278,11 +339,197 @@ function pushItem(
   });
 }
 
+function readLabelValuesList(entry: Record<string, unknown>): unknown[] | null {
+  if (Array.isArray(entry.label_values)) return entry.label_values;
+  if (Array.isArray(entry.labelValues)) return entry.labelValues;
+  return null;
+}
+
+function isLabelValuesEntry(entry: Record<string, unknown>): boolean {
+  return Boolean(readLabelValuesList(entry));
+}
+
+function findLabeledValue(
+  labelValues: unknown[],
+  label: string,
+): Record<string, unknown> | null {
+  const wanted = label.toLowerCase();
+  for (const raw of labelValues) {
+    const lv = asRecord(raw);
+    if (!lv) continue;
+    const name = readString(lv.label);
+    if (name && name.toLowerCase() === wanted) return lv;
+  }
+  return null;
+}
+
+function findTitledDict(
+  labelValues: unknown[],
+  title: string,
+): unknown[] | null {
+  const wanted = title.toLowerCase();
+  for (const raw of labelValues) {
+    const lv = asRecord(raw);
+    if (!lv) continue;
+    const name = readString(lv.title);
+    if (name && name.toLowerCase() === wanted) {
+      return Array.isArray(lv.dict) ? lv.dict : [];
+    }
+  }
+  return null;
+}
+
+function readOwnerUsernameFromLabelValues(
+  labelValues: unknown[],
+): string | null {
+  const ownerPeople = findTitledDict(labelValues, "Owner");
+  if (!ownerPeople) return null;
+
+  for (const personRaw of ownerPeople) {
+    const person = asRecord(personRaw);
+    if (!person) continue;
+    const fields = Array.isArray(person.dict) ? person.dict : [];
+    for (const fieldRaw of fields) {
+      const field = asRecord(fieldRaw);
+      if (!field) continue;
+      const label = readString(field.label);
+      if (!label || !/^username$/i.test(label)) continue;
+      const value = readString(field.value);
+      if (value && looksLikeUsername(value)) {
+        return normalizeUsername(value);
+      }
+    }
+  }
+
+  // Fallback: display Name under Owner when Username is absent
+  for (const personRaw of ownerPeople) {
+    const person = asRecord(personRaw);
+    if (!person) continue;
+    const fields = Array.isArray(person.dict) ? person.dict : [];
+    for (const fieldRaw of fields) {
+      const field = asRecord(fieldRaw);
+      if (!field) continue;
+      const label = readString(field.label);
+      if (!label || !/^name$/i.test(label)) continue;
+      const value = readString(field.value);
+      if (value && looksLikeUsername(value)) {
+        return normalizeUsername(value);
+      }
+    }
+  }
+
+  return null;
+}
+
+function readHrefFromLabelValues(labelValues: unknown[]): string | null {
+  const urlField = findLabeledValue(labelValues, "URL");
+  if (!urlField) return null;
+  return readString(urlField.href) ?? readString(urlField.value);
+}
+
+function parseLabelValuesMediaFields(
+  labelValues: unknown[],
+  items: Map<string, ParsedSavedItem>,
+  opts: {
+    savedAt?: Date | null;
+    collection?: string | null;
+  },
+) {
+  const href = readHrefFromLabelValues(labelValues);
+  const authorUsername = readOwnerUsernameFromLabelValues(labelValues);
+  if (href) {
+    pushItem(items, {
+      href,
+      authorUsername,
+      savedAt: opts.savedAt ?? null,
+      collection: opts.collection ?? null,
+    });
+    return;
+  }
+
+  for (const found of collectHrefs(labelValues)) {
+    pushItem(items, {
+      href: found,
+      authorUsername,
+      savedAt: opts.savedAt ?? null,
+      collection: opts.collection ?? null,
+    });
+  }
+}
+
+function parseLabelValuesEntry(
+  entry: Record<string, unknown>,
+  items: Map<string, ParsedSavedItem>,
+  collection: string | null,
+) {
+  const labelValues = readLabelValuesList(entry);
+  if (!labelValues) return;
+
+  const savedAt =
+    readTimestamp(entry.timestamp) ??
+    readTimestamp(findLabeledValue(labelValues, "Update time")?.timestamp_value);
+
+  const namedCollection =
+    readString(findLabeledValue(labelValues, "Name")?.value) ?? null;
+  const collectionName = collection ?? namedCollection;
+
+  const mediaChildren = findTitledDict(labelValues, "Media");
+  if (mediaChildren && mediaChildren.length > 0) {
+    // Collection document: membership lives under title "Media"
+    for (const childRaw of mediaChildren) {
+      const child = asRecord(childRaw);
+      if (!child) continue;
+      const childFields = Array.isArray(child.dict) ? child.dict : null;
+      if (childFields) {
+        parseLabelValuesMediaFields(childFields, items, {
+          // Prefer per-item timestamps when present; else leave unset so
+          // saved_posts.json can supply the true saved-at.
+          savedAt: null,
+          collection: collectionName,
+        });
+      } else {
+        for (const found of collectHrefs(child)) {
+          pushItem(items, { href: found, collection: collectionName });
+        }
+      }
+    }
+    return;
+  }
+
+  // Saved post/reel document (flat label_values with URL + Owner)
+  parseLabelValuesMediaFields(labelValues, items, {
+    savedAt,
+    collection,
+  });
+}
+
+function parseLabelValuesArray(
+  entries: unknown[],
+  items: Map<string, ParsedSavedItem>,
+  collection: string | null,
+) {
+  for (const raw of entries) {
+    const entry = asRecord(raw);
+    if (!entry || !isLabelValuesEntry(entry)) continue;
+    parseLabelValuesEntry(entry, items, collection);
+  }
+}
+
 function parseSavedMediaArray(
   entries: unknown[],
   items: Map<string, ParsedSavedItem>,
   collection: string | null,
 ) {
+  const looksLikeLabelValues = entries.some((raw) => {
+    const entry = asRecord(raw);
+    return entry ? isLabelValuesEntry(entry) : false;
+  });
+
+  if (looksLikeLabelValues) {
+    parseLabelValuesArray(entries, items, collection);
+    return;
+  }
+
   for (const raw of entries) {
     const entry = asRecord(raw);
     if (!entry) continue;
@@ -522,4 +769,258 @@ export function parseExportJsonFiles(
   });
 
   return { items: parsedItems, savedJsonFiles, warnings };
+}
+
+function likedSourceFromPath(name: string): LikedSource | null {
+  const lower = name.toLowerCase();
+  if (lower.includes("liked_comments") || lower.includes("comment_likes")) {
+    return "liked_comments";
+  }
+  if (lower.includes("story_likes") || lower.includes("stories_likes")) {
+    return "story_likes";
+  }
+  if (
+    lower.includes("liked_posts") ||
+    lower.includes("liked_post") ||
+    lower.includes("likes_media_likes") ||
+    /\/likes\/[^/]+\.json$/.test(lower)
+  ) {
+    return "liked_posts";
+  }
+  return null;
+}
+
+function shouldParseLikedJsonFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  if (!lower.endsWith(".json")) return false;
+  if (lower.includes("__macosx") || lower.split("/").pop()?.startsWith(".")) {
+    return false;
+  }
+  return likedSourceFromPath(name) !== null;
+}
+
+function pushLikedItem(
+  items: Map<string, ParsedLikedItem>,
+  partial: {
+    href: string;
+    authorUsername?: string | null;
+    likedAt?: Date | null;
+    source: LikedSource;
+    mediaKeyOverride?: string | null;
+  },
+) {
+  const baseKey = mediaKeyFromHref(partial.href);
+  if (!baseKey && !partial.mediaKeyOverride) return;
+
+  const mediaType = detectLikedMediaType(partial.href, partial.source);
+  const shortcode = extractShortcode(partial.href);
+  const mediaKey =
+    partial.mediaKeyOverride?.trim().toLowerCase() ||
+    (partial.source === "liked_comments"
+      ? `comment:${baseKey}:${(partial.authorUsername ?? "unknown").toLowerCase()}`
+      : baseKey!);
+
+  const existing = items.get(mediaKey);
+  if (existing) {
+    if (!existing.authorUsername && partial.authorUsername) {
+      existing.authorUsername = partial.authorUsername;
+    }
+    if (
+      partial.likedAt &&
+      (!existing.likedAt || partial.likedAt > existing.likedAt)
+    ) {
+      existing.likedAt = partial.likedAt;
+    }
+    return;
+  }
+
+  items.set(mediaKey, {
+    mediaKey,
+    href: partial.href,
+    shortcode,
+    mediaType,
+    authorUsername: partial.authorUsername ?? null,
+    likedAt: partial.likedAt ?? null,
+    source: partial.source,
+  });
+}
+
+function authorFromStoryHref(href: string): string | null {
+  const story = extractStoryParts(href);
+  return story?.username ?? null;
+}
+
+function parseLikedLabelValuesEntry(
+  entry: Record<string, unknown>,
+  items: Map<string, ParsedLikedItem>,
+  source: LikedSource,
+) {
+  const labelValues = readLabelValuesList(entry);
+  if (!labelValues) return;
+
+  const likedAt =
+    readTimestamp(entry.timestamp) ??
+    readTimestamp(findLabeledValue(labelValues, "Update time")?.timestamp_value) ??
+    readTimestamp(findLabeledValue(labelValues, "Liked on")?.timestamp);
+
+  const href = readHrefFromLabelValues(labelValues);
+  const authorUsername =
+    readOwnerUsernameFromLabelValues(labelValues) ??
+    (href ? authorFromStoryHref(href) : null);
+
+  if (href) {
+    pushLikedItem(items, {
+      href,
+      authorUsername,
+      likedAt,
+      source,
+    });
+    return;
+  }
+
+  for (const found of collectHrefs(labelValues)) {
+    pushLikedItem(items, {
+      href: found,
+      authorUsername:
+        authorUsername ?? authorFromStoryHref(found),
+      likedAt,
+      source,
+    });
+  }
+}
+
+function parseLikedStringListEntry(
+  entry: Record<string, unknown>,
+  items: Map<string, ParsedLikedItem>,
+  source: LikedSource,
+) {
+  const { href, savedAt: likedAt, value } = readStringListData(entry);
+  const authorUsername =
+    readAuthorUsername(entry, value) ??
+    (href ? authorFromStoryHref(href) : null);
+
+  if (href) {
+    pushLikedItem(items, {
+      href,
+      authorUsername,
+      likedAt,
+      source,
+    });
+    return;
+  }
+
+  for (const found of collectHrefs(entry)) {
+    pushLikedItem(items, {
+      href: found,
+      authorUsername:
+        authorUsername ?? authorFromStoryHref(found),
+      likedAt,
+      source,
+    });
+  }
+}
+
+function parseLikedMediaArray(
+  entries: unknown[],
+  items: Map<string, ParsedLikedItem>,
+  source: LikedSource,
+) {
+  const looksLikeLabelValues = entries.some((raw) => {
+    const entry = asRecord(raw);
+    return entry ? isLabelValuesEntry(entry) : false;
+  });
+
+  if (looksLikeLabelValues) {
+    for (const raw of entries) {
+      const entry = asRecord(raw);
+      if (!entry || !isLabelValuesEntry(entry)) continue;
+      parseLikedLabelValuesEntry(entry, items, source);
+    }
+    return;
+  }
+
+  for (const raw of entries) {
+    const entry = asRecord(raw);
+    if (!entry) continue;
+    parseLikedStringListEntry(entry, items, source);
+  }
+}
+
+function parseLikedJsonDocument(
+  json: unknown,
+  items: Map<string, ParsedLikedItem>,
+  source: LikedSource,
+) {
+  if (Array.isArray(json)) {
+    parseLikedMediaArray(json, items, source);
+    return;
+  }
+
+  const root = asRecord(json);
+  if (!root) return;
+
+  const buckets: Array<{ key: string; forcedSource?: LikedSource }> = [
+    { key: "likes_media_likes", forcedSource: "liked_posts" },
+    { key: "likes_comment_likes", forcedSource: "liked_comments" },
+    { key: "story_activities_story_likes", forcedSource: "story_likes" },
+    { key: "liked_posts", forcedSource: "liked_posts" },
+    { key: "liked_comments", forcedSource: "liked_comments" },
+  ];
+
+  let foundBucket = false;
+  for (const bucket of buckets) {
+    const list = root[bucket.key];
+    if (!Array.isArray(list)) continue;
+    foundBucket = true;
+    parseLikedMediaArray(list, items, bucket.forcedSource ?? source);
+  }
+
+  if (!foundBucket) {
+    for (const found of collectHrefs(root)) {
+      pushLikedItem(items, {
+        href: found,
+        authorUsername: authorFromStoryHref(found),
+        source,
+      });
+    }
+  }
+}
+
+/**
+ * Parse Instagram likes export files:
+ * - `your_instagram_activity/likes/liked_posts.json` (posts + reels)
+ * - `your_instagram_activity/likes/liked_comments.json`
+ * - `your_instagram_activity/story_interactions/story_likes.json`
+ *
+ * Dedupes by media key (URL shortcode / story id / comment composite key).
+ */
+export function parseLikedExportJsonFiles(
+  files: Array<{ name: string; content: string }>,
+): LikesParseResult {
+  const items = new Map<string, ParsedLikedItem>();
+  const likedJsonFiles: string[] = [];
+  const warnings: string[] = [];
+
+  for (const file of files) {
+    if (!shouldParseLikedJsonFile(file.name)) continue;
+    const source = likedSourceFromPath(file.name);
+    if (!source) continue;
+
+    likedJsonFiles.push(file.name);
+
+    try {
+      const json = JSON.parse(file.content) as unknown;
+      parseLikedJsonDocument(json, items, source);
+    } catch {
+      warnings.push(`Skipped malformed likes JSON: ${file.name}`);
+    }
+  }
+
+  const parsedItems = [...items.values()].sort((a, b) => {
+    const at = a.likedAt?.getTime() ?? 0;
+    const bt = b.likedAt?.getTime() ?? 0;
+    return bt - at;
+  });
+
+  return { items: parsedItems, likedJsonFiles, warnings };
 }

@@ -5,6 +5,11 @@ import {
   type EmbeddingProvider,
 } from "./embeddings";
 import {
+  formatJobTarget,
+  libraryLabel,
+  type SearchLibrary,
+} from "./library";
+import {
   embeddingProfilesMatch,
   getIndexedEmbeddingProfile,
   getIndexedEmbeddingProfileMeta,
@@ -33,6 +38,10 @@ export type IndexHealth =
   | "unavailable";
 
 export type ProviderIndexStatus = {
+  library: SearchLibrary;
+  libraryLabel: string;
+  /** Job target for reindex API (`local` or `likes-local`, etc.). */
+  target: string;
   provider: EmbeddingProvider;
   /** Explicit Settings enable flag (independent of credentials). */
   enabled: boolean;
@@ -51,10 +60,25 @@ export type ProviderIndexStatus = {
   tableDimensions: number | null;
 };
 
-export type SearchIndexStatus = {
+export type LibraryIndexStatus = {
+  library: SearchLibrary;
+  libraryLabel: string;
   totalItems: number;
   ftsCount: number;
   providers: ProviderIndexStatus[];
+};
+
+export type SearchIndexStatus = {
+  /** @deprecated Prefer `libraries.saves` — kept for older clients. */
+  totalItems: number;
+  /** @deprecated Prefer `libraries.saves` — kept for older clients. */
+  ftsCount: number;
+  /** @deprecated Prefer `libraries.saves.providers` — kept for older clients. */
+  providers: ProviderIndexStatus[];
+  libraries: {
+    saves: LibraryIndexStatus;
+    likes: LibraryIndexStatus;
+  };
   /** Active running job, or latest finished when idle. */
   job: EmbeddingJobRecord | null;
   /** Jobs waiting to run (FIFO by id). */
@@ -76,10 +100,10 @@ function providerHint(
   health: IndexHealth,
 ): string | null {
   if (!enabled && hasCredentials) {
-    return "Credentials saved — enable in Settings to use this index";
+    return "Credentials saved — enable for this library in Settings to use this index";
   }
   if (!enabled) {
-    return "Enable in Settings then Reindex";
+    return "Enable for this library in Settings then Reindex";
   }
   if (!hasCredentials) {
     return `Add ${provider === "openai" ? "OpenAI" : "Voyage"} API key in Settings`;
@@ -98,27 +122,28 @@ function providerHint(
 }
 
 export function getProviderIndexStatus(
+  library: SearchLibrary,
   provider: EmbeddingProvider,
   totalItems?: number,
 ): ProviderIndexStatus {
   const sqlite = getSqlite();
+  const table = library === "saves" ? "saved_items" : "liked_items";
   const total =
     totalItems ??
     (
-      sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
+      sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
         c: number;
       }
     ).c;
 
-  const enabled = isProviderEnabled(provider);
+  const enabled = isProviderEnabled(provider, library);
   const hasCredentials = providerHasCredentials(provider);
-  const configured = isProviderConfigured(provider);
+  const configured = isProviderConfigured(provider, library);
   const index = provider as VectorIndexName;
-  const tableDimensions = vectorTableDimensions(index, sqlite);
-  // Report stored coverage even when disabled so the UI can show leftover indexes.
-  const embeddedCount = vecCount(index, sqlite);
-  const meta = getIndexedEmbeddingProfileMeta(index, sqlite);
-  const storedProfile = getIndexedEmbeddingProfile(index, sqlite);
+  const tableDimensions = vectorTableDimensions(library, index, sqlite);
+  const embeddedCount = vecCount(library, index, sqlite);
+  const meta = getIndexedEmbeddingProfileMeta(library, index, sqlite);
+  const storedProfile = getIndexedEmbeddingProfile(library, index, sqlite);
   const expected = hasCredentials
     ? embeddingConfigForProvider(provider).profile
     : null;
@@ -143,6 +168,9 @@ export function getProviderIndexStatus(
   }
 
   return {
+    library,
+    libraryLabel: libraryLabel(library),
+    target: formatJobTarget(library, provider),
     provider,
     enabled,
     hasCredentials,
@@ -164,17 +192,17 @@ export function getProviderIndexStatus(
   };
 }
 
-export function getSearchIndexStatus(): SearchIndexStatus {
-  ensureJobRunner();
-
+function getLibraryIndexStatus(library: SearchLibrary): LibraryIndexStatus {
   const sqlite = getSqlite();
+  const itemsTable = library === "saves" ? "saved_items" : "liked_items";
+  const ftsTable = library === "saves" ? "saved_items_fts" : "liked_items_fts";
   const totalItems = (
-    sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
+    sqlite.prepare(`SELECT count(*) AS c FROM ${itemsTable}`).get() as {
       c: number;
     }
   ).c;
   const ftsCount = (
-    sqlite.prepare(`SELECT count(*) AS c FROM saved_items_fts`).get() as {
+    sqlite.prepare(`SELECT count(*) AS c FROM ${ftsTable}`).get() as {
       c: number;
     }
   ).c;
@@ -187,11 +215,27 @@ export function getSearchIndexStatus(): SearchIndexStatus {
   ];
 
   return {
+    library,
+    libraryLabel: libraryLabel(library),
     totalItems,
     ftsCount,
     providers: providers.map((provider) =>
-      getProviderIndexStatus(provider, totalItems),
+      getProviderIndexStatus(library, provider, totalItems),
     ),
+  };
+}
+
+export function getSearchIndexStatus(): SearchIndexStatus {
+  ensureJobRunner();
+
+  const saves = getLibraryIndexStatus("saves");
+  const likes = getLibraryIndexStatus("likes");
+
+  return {
+    totalItems: saves.totalItems,
+    ftsCount: saves.ftsCount,
+    providers: saves.providers,
+    libraries: { saves, likes },
     job: getDisplayEmbeddingJob(),
     pendingJobs: getPendingEmbeddingJobs(),
     recentJobs: getRecentEmbeddingJobs(8),

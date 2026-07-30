@@ -84,6 +84,48 @@ export const itemCollections = sqliteTable(
   ],
 );
 
+/** Liked posts/reels/stories/comments — separate from saved_items. */
+export const likedItems = sqliteTable(
+  "liked_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    mediaKey: text("media_key").notNull(),
+    href: text("href").notNull(),
+    shortcode: text("shortcode"),
+    mediaType: text("media_type", {
+      enum: ["post", "reel", "igtv", "story", "comment", "unknown"],
+    })
+      .notNull()
+      .default("unknown"),
+    authorUsername: text("author_username"),
+    likedAt: integer("liked_at", { mode: "timestamp" }),
+    source: text("source", {
+      enum: ["liked_posts", "story_likes", "liked_comments"],
+    })
+      .notNull()
+      .default("liked_posts"),
+    firstSeenImportId: integer("first_seen_import_id")
+      .notNull()
+      .references(() => imports.id),
+    lastSeenImportId: integer("last_seen_import_id")
+      .notNull()
+      .references(() => imports.id),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(sql`(unixepoch())`),
+  },
+  (table) => [
+    uniqueIndex("liked_items_media_key_uidx").on(table.mediaKey),
+    index("liked_items_author_idx").on(table.authorUsername),
+    index("liked_items_type_idx").on(table.mediaType),
+    index("liked_items_liked_at_idx").on(table.likedAt),
+    index("liked_items_source_idx").on(table.source),
+  ],
+);
+
 export const importSchemas = sqliteTable(
   "import_schemas",
   {
@@ -114,6 +156,7 @@ export const importSchemas = sqliteTable(
 
 export const importsRelations = relations(imports, ({ many }) => ({
   items: many(savedItems),
+  likedItems: many(likedItems),
   schemas: many(importSchemas),
 }));
 
@@ -138,6 +181,19 @@ export const savedItemsRelations = relations(savedItems, ({ one, many }) => ({
   collections: many(itemCollections),
 }));
 
+export const likedItemsRelations = relations(likedItems, ({ one }) => ({
+  firstSeenImport: one(imports, {
+    fields: [likedItems.firstSeenImportId],
+    references: [imports.id],
+    relationName: "likedFirstSeen",
+  }),
+  lastSeenImport: one(imports, {
+    fields: [likedItems.lastSeenImportId],
+    references: [imports.id],
+    relationName: "likedLastSeen",
+  }),
+}));
+
 export const itemCollectionsRelations = relations(
   itemCollections,
   ({ one }) => ({
@@ -150,5 +206,6 @@ export const itemCollectionsRelations = relations(
 
 export type Import = typeof imports.$inferSelect;
 export type SavedItem = typeof savedItems.$inferSelect;
+export type LikedItem = typeof likedItems.$inferSelect;
 export type ItemCollection = typeof itemCollections.$inferSelect;
 export type ImportSchema = typeof importSchemas.$inferSelect;

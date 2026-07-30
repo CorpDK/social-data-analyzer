@@ -4,14 +4,15 @@ import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState, useTransition } from "react";
 
-type SaveRow = {
+type LikeRow = {
   id: number;
   href: string;
   shortcode: string | null;
   mediaType: string;
   authorUsername: string | null;
-  savedAt: string | null;
-  collections: string[];
+  likedAt: string | null;
+  source: string;
+  alsoSaved?: boolean;
 };
 
 type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
@@ -23,8 +24,8 @@ type ProviderInfo = {
   default: EmbeddingProvider;
 };
 
-type SavesResponse = {
-  items: SaveRow[];
+type LikesResponse = {
+  items: LikeRow[];
   total: number;
   page: number;
   pageSize: number;
@@ -44,10 +45,9 @@ type SavesResponse = {
 
 type FilterOptions = {
   authors: string[];
-  collections: string[];
 };
 
-const PROVIDER_STORAGE_KEY = "instagram-saves-search-provider";
+const PROVIDER_STORAGE_KEY = "instagram-likes-search-provider";
 
 const PROVIDER_LABELS: Record<EmbeddingProvider, string> = {
   local: "Local (basic)",
@@ -96,24 +96,20 @@ function resolveProvider(
   return providers?.default ?? "local";
 }
 
-export function SavesBrowser() {
+export function LikesBrowser() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
 
-  const [data, setData] = useState<SavesResponse | null>(null);
+  const [data, setData] = useState<LikesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<ProviderInfo | null>(null);
-  const [filters, setFilters] = useState<FilterOptions>({
-    authors: [],
-    collections: [],
-  });
+  const [filters, setFilters] = useState<FilterOptions>({ authors: [] });
   const [error, setError] = useState<string | null>(null);
 
   const q = searchParams.get("q") ?? "";
   const type = searchParams.get("type") ?? "all";
   const author = searchParams.get("author") ?? "";
-  const collection = searchParams.get("collection") ?? "";
   const page = Number(searchParams.get("page") ?? "1");
   const providerParam = searchParams.get("provider");
   const searchKey = searchParams.toString();
@@ -138,7 +134,7 @@ export function SavesBrowser() {
       const nextKey = next.toString();
       if (nextKey === searchParams.toString()) return;
       startTransition(() => {
-        router.push(nextKey ? `/saves?${nextKey}` : "/saves");
+        router.push(nextKey ? `/likes?${nextKey}` : "/likes");
       });
     },
     [router, searchParams, providers],
@@ -149,12 +145,12 @@ export function SavesBrowser() {
 
     async function loadProviders() {
       try {
-        const res = await fetch("/api/search/providers?library=saves");
+        const res = await fetch("/api/search/providers?library=likes");
         if (!res.ok) return;
         const json = (await res.json()) as ProviderInfo;
         if (!cancelled) setProviders(json);
       } catch {
-        // Provider metadata is optional for rendering.
+        // optional
       }
     }
 
@@ -169,14 +165,12 @@ export function SavesBrowser() {
 
     async function loadFilters() {
       try {
-        const res = await fetch("/api/imports");
+        const res = await fetch("/api/likes?filters=1");
         if (!res.ok) return;
-        const json = (await res.json()) as { filters?: FilterOptions };
-        if (!cancelled) {
-          setFilters(json.filters ?? { authors: [], collections: [] });
-        }
+        const json = (await res.json()) as FilterOptions;
+        if (!cancelled) setFilters(json);
       } catch {
-        // Filter options are optional for rendering.
+        // optional
       }
     }
 
@@ -186,11 +180,6 @@ export function SavesBrowser() {
     };
   }, []);
 
-  // Canonicalize provider in the URL once providers are known.
-  // Omit `provider` when it equals the server default. Only navigate when
-  // the serialized query string would actually change — otherwise a default
-  // of "ollama" (or any non-"local") with no URL param loops forever via
-  // router.replace → new searchParams → effect → replace.
   useEffect(() => {
     if (!providers) return;
 
@@ -207,7 +196,7 @@ export function SavesBrowser() {
 
     window.localStorage.setItem(PROVIDER_STORAGE_KEY, desired);
     startTransition(() => {
-      router.replace(nextKey ? `/saves?${nextKey}` : "/saves");
+      router.replace(nextKey ? `/likes?${nextKey}` : "/likes");
     });
   }, [providers, providerParam, router, searchKey]);
 
@@ -222,36 +211,27 @@ export function SavesBrowser() {
         if (q) params.set("q", q);
         if (type) params.set("type", type);
         if (author) params.set("author", author);
-        if (collection) params.set("collection", collection);
         if (activeProvider) params.set("provider", activeProvider);
         params.set("page", String(page || 1));
         params.set("pageSize", "25");
 
-        const savesRes = await fetch(`/api/saves?${params.toString()}`, {
+        const res = await fetch(`/api/likes?${params.toString()}`, {
           signal: controller.signal,
         });
-
-        if (!savesRes.ok) throw new Error("Failed to load saves");
-        const savesJson = (await savesRes.json()) as SavesResponse;
-
-        if (!controller.signal.aborted) {
-          setData(savesJson);
-        }
+        if (!res.ok) throw new Error("Failed to load likes");
+        const json = (await res.json()) as LikesResponse;
+        if (!controller.signal.aborted) setData(json);
       } catch (err) {
         if (controller.signal.aborted) return;
         setError(err instanceof Error ? err.message : "Failed to load");
       } finally {
-        if (!controller.signal.aborted) {
-          setLoading(false);
-        }
+        if (!controller.signal.aborted) setLoading(false);
       }
     }
 
     void load();
-    return () => {
-      controller.abort();
-    };
-  }, [q, type, author, collection, page, activeProvider]);
+    return () => controller.abort();
+  }, [q, type, author, page, activeProvider]);
 
   const providerOptions = providers?.available ?? ["local"];
   const showProviderControl = providerOptions.length > 1;
@@ -264,16 +244,17 @@ export function SavesBrowser() {
           Browse
         </p>
         <h1 className="font-[family-name:var(--font-fraunces)] text-4xl tracking-tight">
-          Saved media
+          Liked media
         </h1>
         <p className="text-[var(--muted)]">
           Keyword (FTS5) and semantic (sqlite-vec) search over creators,
-          shortcodes, and collections.
+          shortcodes, and like sources. The Saved column marks media also in
+          your saves library.
         </p>
       </section>
 
       <form
-        className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4 sm:grid-cols-2 lg:grid-cols-4"
+        className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4 sm:grid-cols-2 lg:grid-cols-3"
         onSubmit={(event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
@@ -281,7 +262,6 @@ export function SavesBrowser() {
             q: String(form.get("q") || "") || null,
             type: String(form.get("type") || "all"),
             author: String(form.get("author") || "") || null,
-            collection: String(form.get("collection") || "") || null,
           });
         }}
       >
@@ -290,7 +270,7 @@ export function SavesBrowser() {
           <input
             name="q"
             defaultValue={q}
-            placeholder="creator, collection, shortcode…"
+            placeholder="creator, shortcode…"
             className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-2 outline-none ring-[var(--accent)] focus:ring-2"
           />
         </label>
@@ -304,6 +284,8 @@ export function SavesBrowser() {
             <option value="all">All</option>
             <option value="post">Posts</option>
             <option value="reel">Reels</option>
+            <option value="story">Stories</option>
+            <option value="comment">Comments</option>
             <option value="igtv">IGTV</option>
             <option value="unknown">Unknown</option>
           </select>
@@ -323,22 +305,7 @@ export function SavesBrowser() {
             ))}
           </select>
         </label>
-        <label className="block text-sm">
-          <span className="mb-1 block text-[var(--muted)]">Collection</span>
-          <select
-            name="collection"
-            defaultValue={collection}
-            className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-2 outline-none ring-[var(--accent)] focus:ring-2"
-          >
-            <option value="">All collections</option>
-            {filters.collections.map((name) => (
-              <option key={name} value={name}>
-                {name}
-              </option>
-            ))}
-          </select>
-        </label>
-        <div className="sm:col-span-2 lg:col-span-4">
+        <div className="sm:col-span-2 lg:col-span-3">
           <button
             type="submit"
             className="rounded-full bg-[var(--ink)] px-4 py-2 text-sm text-[var(--surface)]"
@@ -355,7 +322,7 @@ export function SavesBrowser() {
               Semantic search provider
             </p>
             <p className="text-xs text-[var(--muted)]">
-              Keyword search stays on FTS5. Only the vector path changes.
+              Keyword search stays on FTS5. Only the likes vector path changes.
             </p>
           </div>
           <div
@@ -406,16 +373,14 @@ export function SavesBrowser() {
             q.trim() !== ""
               ? ` · ${data.searchMode} search`
               : ""}
-            {data?.searchProvider && q.trim() !== ""
-              ? ` · ${PROVIDER_LABELS[data.searchProvider]}`
+            {data?.searchProvider &&
+            data.searchMode &&
+            !["none", "like", "fts"].includes(data.searchMode)
+              ? ` · ${data.searchProvider}`
               : ""}
+            {data?.providerFallback ? " · local fallback" : ""}
             {data && isRefreshing ? " · updating" : ""}
           </span>
-          {data?.providerFallback && data.providerFallbackReason ? (
-            <span className="text-xs text-[var(--danger)]">
-              {data.providerFallbackReason}
-            </span>
-          ) : null}
           {data && data.totalPages > 1 ? (
             <span>
               Page {data.page} / {data.totalPages}
@@ -423,18 +388,25 @@ export function SavesBrowser() {
           ) : null}
         </div>
 
+        {data?.providerFallbackReason ? (
+          <p className="border-b border-[var(--line)] px-4 py-2 text-xs text-[var(--muted)]">
+            {data.providerFallbackReason}
+          </p>
+        ) : null}
+
         <div
           className={`overflow-x-auto transition-opacity ${
             data && isRefreshing ? "opacity-60" : "opacity-100"
           }`}
         >
-          <table className="w-full min-w-[720px] text-left text-sm">
+          <table className="w-full min-w-[800px] text-left text-sm">
             <thead className="text-xs uppercase tracking-[0.12em] text-[var(--muted)]">
               <tr>
                 <th className="px-4 py-3 font-medium">Creator</th>
                 <th className="px-4 py-3 font-medium">Type</th>
+                <th className="px-4 py-3 font-medium">Liked</th>
+                <th className="px-4 py-3 font-medium">Source</th>
                 <th className="px-4 py-3 font-medium">Saved</th>
-                <th className="px-4 py-3 font-medium">Collections</th>
                 <th className="px-4 py-3 font-medium">Link</th>
               </tr>
             </thead>
@@ -444,7 +416,7 @@ export function SavesBrowser() {
                   <td className="px-4 py-3 font-medium">
                     {item.authorUsername ? (
                       <Link
-                        href={`/saves?author=${encodeURIComponent(item.authorUsername)}`}
+                        href={`/likes?author=${encodeURIComponent(item.authorUsername)}`}
                         className="hover:text-[var(--accent)]"
                       >
                         @{item.authorUsername}
@@ -457,24 +429,26 @@ export function SavesBrowser() {
                     {item.mediaType}
                   </td>
                   <td className="px-4 py-3 text-[var(--muted)]">
-                    {formatDate(item.savedAt)}
+                    {formatDate(item.likedAt)}
+                  </td>
+                  <td className="px-4 py-3 text-[var(--muted)]">
+                    {item.source.replace(/_/g, " ")}
                   </td>
                   <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1">
-                      {item.collections.length === 0 ? (
-                        <span className="text-[var(--muted)]">—</span>
-                      ) : (
-                        item.collections.map((name) => (
-                          <Link
-                            key={name}
-                            href={`/saves?collection=${encodeURIComponent(name)}`}
-                            className="rounded-full bg-[var(--chip)] px-2 py-0.5 text-xs hover:bg-[var(--accent-soft)]"
-                          >
-                            {name}
-                          </Link>
-                        ))
-                      )}
-                    </div>
+                    {item.alsoSaved ? (
+                      <Link
+                        href={
+                          item.shortcode
+                            ? `/saves?q=${encodeURIComponent(item.shortcode)}`
+                            : `/saves?q=${encodeURIComponent(item.href)}`
+                        }
+                        className="inline-flex rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--accent)] hover:underline"
+                      >
+                        Saved
+                      </Link>
+                    ) : (
+                      <span className="text-[var(--muted)]">—</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <a
@@ -491,10 +465,11 @@ export function SavesBrowser() {
               {data && data.items.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={5}
+                    colSpan={6}
                     className="px-4 py-10 text-center text-[var(--muted)]"
                   >
-                    No saves match these filters.
+                    No likes match these filters. Re-import an export that
+                    includes likes activity.
                   </td>
                 </tr>
               ) : null}

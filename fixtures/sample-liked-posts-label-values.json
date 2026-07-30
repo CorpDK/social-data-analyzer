@@ -1,0 +1,66 @@
+[
+  {
+    "timestamp": 1700000100,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/reel/LikedFmtReel01/",
+        "href": "https://www.instagram.com/reel/LikedFmtReel01/"
+      },
+      {
+        "label": "Caption",
+        "value": "Liked reel fixture."
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "URL",
+                "value": ""
+              },
+              {
+                "label": "Name",
+                "value": "Liked Creator"
+              },
+              {
+                "label": "Username",
+                "value": "liked.creator"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      }
+    ],
+    "fbid": "2001"
+  },
+  {
+    "timestamp": 1710000100,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/p/LikedFmtPost01/",
+        "href": "https://www.instagram.com/p/LikedFmtPost01/"
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "Username",
+                "value": "other.liked"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      }
+    ],
+    "fbid": "2002"
+  }
+]

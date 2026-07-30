@@ -25,8 +25,9 @@ export default function ImportPage() {
         </h1>
         <p className="max-w-2xl text-[var(--muted)]">
           Request a fresh Instagram data download whenever you want an update.
-          Upload it here — new saves are added, existing ones are matched by
-          shortcode, and identical files are ignored.
+          Upload it here — import runs as a background job (safe to refresh),
+          new saves are added, existing ones are matched by shortcode, and
+          identical files refresh metadata.
         </p>
       </section>
 
@@ -50,7 +51,10 @@ export default function ImportPage() {
         </ol>
       </section>
 
-      <section className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5">
+      <section
+        id="import-history"
+        className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5"
+      >
         <h2 className="font-[family-name:var(--font-fraunces)] text-xl">
           Import history
         </h2>
@@ -71,7 +75,7 @@ export default function ImportPage() {
                   <th className="pb-2 font-medium">Added</th>
                   <th className="pb-2 font-medium">Updated</th>
                   <th className="pb-2 font-medium">Skipped</th>
-                  <th className="pb-2 font-medium">Log</th>
+                  <th className="pb-2 font-medium" />
                 </tr>
               </thead>
               <tbody>
@@ -89,11 +93,6 @@ export default function ImportPage() {
                       {row.error ? (
                         <span className="mt-1 block text-xs text-[var(--danger)]">
                           {row.error}
-                        </span>
-                      ) : null}
-                      {row.notes ? (
-                        <span className="mt-1 block text-xs text-[var(--muted)]">
-                          {row.notes}
                         </span>
                       ) : null}
                     </td>

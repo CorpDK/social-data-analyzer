@@ -1,0 +1,40 @@
+[
+  {
+    "timestamp": 1720000100,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/stories/story.author/1234567890123456789/",
+        "href": "https://www.instagram.com/stories/story.author/1234567890123456789/"
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "Username",
+                "value": "story.author"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      }
+    ],
+    "fbid": "3001"
+  },
+  {
+    "timestamp": 1730000100,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/stories/another.user/9876543210987654321/",
+        "href": "https://www.instagram.com/stories/another.user/9876543210987654321/"
+      }
+    ],
+    "fbid": "3002"
+  }
+]

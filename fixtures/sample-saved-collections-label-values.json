@@ -1,0 +1,102 @@
+[
+  {
+    "timestamp": 1720000000,
+    "media": [],
+    "label_values": [
+      {
+        "label": "Name",
+        "value": "Recipes"
+      },
+      {
+        "label": "Type",
+        "value": "Default"
+      },
+      {
+        "label": "Privacy",
+        "value": "Private"
+      },
+      {
+        "label": "Update time",
+        "timestamp_value": 1720001000
+      },
+      {
+        "title": "Media",
+        "dict": [
+          {
+            "title": "",
+            "dict": [
+              {
+                "label": "URL",
+                "value": "https://www.instagram.com/reel/LabelFmtReel01/",
+                "href": "https://www.instagram.com/reel/LabelFmtReel01/"
+              },
+              {
+                "label": "Caption",
+                "value": "In recipes collection."
+              },
+              {
+                "label": "Title",
+                "value": ""
+              },
+              {
+                "dict": [
+                  {
+                    "dict": [
+                      {
+                        "label": "URL",
+                        "value": ""
+                      },
+                      {
+                        "label": "Name",
+                        "value": "Fixture Creator"
+                      },
+                      {
+                        "label": "Username",
+                        "value": "fixture.creator"
+                      }
+                    ],
+                    "title": ""
+                  }
+                ],
+                "title": "Owner"
+              }
+            ]
+          },
+          {
+            "title": "",
+            "dict": [
+              {
+                "label": "URL",
+                "value": "https://www.instagram.com/p/LabelFmtCollOnly/",
+                "href": "https://www.instagram.com/p/LabelFmtCollOnly/"
+              },
+              {
+                "label": "Caption",
+                "value": "Only in collection."
+              },
+              {
+                "dict": [
+                  {
+                    "dict": [
+                      {
+                        "label": "Username",
+                        "value": "coll.only.user"
+                      },
+                      {
+                        "label": "Name",
+                        "value": "Coll Only"
+                      }
+                    ],
+                    "title": ""
+                  }
+                ],
+                "title": "Owner"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "fbid": "2001"
+  }
+]

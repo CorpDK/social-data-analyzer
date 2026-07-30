@@ -1,4 +1,5 @@
 import { getSqlite, recreateEmptySearchIndexes } from "../db";
+import { clearImportSpool } from "../import/spool";
 import { RESET_LIBRARY_CONFIRMATION_PHRASE } from "./reset-phrase";
 
 export { RESET_LIBRARY_CONFIRMATION_PHRASE };
@@ -9,9 +10,11 @@ export type ResetLibraryResult = {
   wiped: {
     imports: number;
     savedItems: number;
+    likedItems: number;
     itemCollections: number;
     embeddingProfiles: number;
     embeddingJobs: number;
+    importJobs: number;
   };
   kept: string[];
 };
@@ -50,24 +53,33 @@ export function resetLibrary(confirmation: string): ResetLibraryResult {
   const before = {
     imports: countRows("imports"),
     savedItems: countRows("saved_items"),
+    likedItems: tableExists("liked_items") ? countRows("liked_items") : 0,
     itemCollections: countRows("item_collections"),
     embeddingProfiles: tableExists("embedding_index_profiles")
       ? countRows("embedding_index_profiles")
       : 0,
     embeddingJobs: countRows("embedding_jobs"),
+    importJobs: tableExists("import_jobs") ? countRows("import_jobs") : 0,
   };
 
   const wipeContent = sqlite.transaction(() => {
-    // Children first — FK from import_schemas/item_collections → saved_items → imports.
-    if (tableExists("import_schemas")) {
-      sqlite.exec(`DELETE FROM import_schemas`);
+    // Children first — FK from import_schemas/item_collections/liked_items → imports.
+    // Clear import_jobs before imports (FK import_id → imports.id).
+    if (tableExists("import_jobs")) {
+      sqlite.exec(`DELETE FROM import_jobs`);
     }
-    sqlite.exec(`DELETE FROM item_collections`);
+    if (tableExists("import_schemas")) {
+      sqlite.exec(`DELETE from import_schemas`);
+    }
+    sqlite.exec(`DELETE from item_collections`);
     sqlite.exec(`DELETE FROM saved_items`);
+    if (tableExists("liked_items")) {
+      sqlite.exec(`DELETE FROM liked_items`);
+    }
     sqlite.exec(`DELETE FROM imports`);
 
     if (tableExists("embedding_index_profiles")) {
-      sqlite.exec(`DELETE FROM embedding_index_profiles`);
+      sqlite.exec(`DELETE from embedding_index_profiles`);
     }
 
     sqlite.exec(`DELETE FROM embedding_jobs`);
@@ -78,8 +90,10 @@ export function resetLibrary(confirmation: string): ResetLibraryResult {
         WHERE name IN (
           'imports',
           'saved_items',
+          'liked_items',
           'item_collections',
           'embedding_jobs',
+          'import_jobs',
           'import_schemas'
         )
       `);
@@ -87,6 +101,7 @@ export function resetLibrary(confirmation: string): ResetLibraryResult {
   });
 
   wipeContent();
+  clearImportSpool();
 
   // Virtual tables (FTS5 / vec0) are recreated outside the content transaction.
   recreateEmptySearchIndexes(sqlite);

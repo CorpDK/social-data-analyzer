@@ -1,0 +1,650 @@
+import { randomBytes } from "node:crypto";
+import fs from "node:fs";
+import { getSqlite } from "../db";
+import {
+  ImportCancelledError,
+  importExportArchive,
+  importExportJson,
+  type ImportProgress,
+  type ImportProgressDetails,
+  type ImportProgressPhase,
+  type ImportResult,
+} from "../import-export";
+import {
+  IMPORT_MAX_FILE_BYTES,
+  importFileTooLargeMessage,
+} from "../import-limits";
+import {
+  deleteSpoolFile,
+  readSpoolFile,
+  spoolUploadedFile,
+} from "./spool";
+
+export type ImportJobState =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "cancelled";
+
+export type ImportJobKind = "zip" | "json";
+
+export type ImportJobRecord = {
+  id: number;
+  filename: string;
+  contentHash: string | null;
+  spoolPath: string;
+  kind: ImportJobKind;
+  state: ImportJobState;
+  phase: ImportProgressPhase | "queued";
+  processed: number;
+  total: number;
+  percent: number;
+  message: string | null;
+  error: string | null;
+  details: ImportProgressDetails | null;
+  result: ImportResult | null;
+  importId: number | null;
+  cancelRequested: boolean;
+  startedAt: number;
+  finishedAt: number | null;
+  updatedAt: number;
+};
+
+type JobRunnerState = {
+  activeJobId: number | null;
+  cancelFlags: Map<number, boolean>;
+};
+
+const globalForImportJobs = globalThis as unknown as {
+  importJobRunner?: JobRunnerState;
+};
+
+function runner(): JobRunnerState {
+  if (!globalForImportJobs.importJobRunner) {
+    globalForImportJobs.importJobRunner = {
+      activeJobId: null,
+      cancelFlags: new Map(),
+    };
+  }
+  return globalForImportJobs.importJobRunner;
+}
+
+function parseDetails(raw: string | null): ImportProgressDetails | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ImportProgressDetails;
+  } catch {
+    return null;
+  }
+}
+
+function parseResult(raw: string | null): ImportResult | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as ImportResult;
+  } catch {
+    return null;
+  }
+}
+
+function mapJobRow(row: {
+  id: number;
+  filename: string;
+  content_hash: string | null;
+  spool_path: string;
+  kind: string;
+  state: string;
+  phase: string;
+  processed: number;
+  total: number;
+  message: string | null;
+  error: string | null;
+  details: string | null;
+  result: string | null;
+  import_id: number | null;
+  cancel_requested: number;
+  started_at: number;
+  finished_at: number | null;
+  updated_at: number;
+}): ImportJobRecord {
+  const total = row.total;
+  const processed = row.processed;
+  const percent =
+    total <= 0
+      ? row.state === "completed"
+        ? 100
+        : 0
+      : Math.min(100, Math.round((processed / total) * 1000) / 10);
+
+  return {
+    id: row.id,
+    filename: row.filename,
+    contentHash: row.content_hash,
+    spoolPath: row.spool_path,
+    kind: row.kind === "json" ? "json" : "zip",
+    state: row.state as ImportJobState,
+    phase: row.phase as ImportJobRecord["phase"],
+    processed,
+    total,
+    percent,
+    message: row.message,
+    error: row.error,
+    details: parseDetails(row.details),
+    result: parseResult(row.result),
+    importId: row.import_id,
+    cancelRequested: Boolean(row.cancel_requested),
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+  };
+}
+
+const JOB_SELECT = `SELECT id, filename, content_hash, spool_path, kind, state, phase,
+              processed, total, message, error, details, result, import_id,
+              cancel_requested, started_at, finished_at, updated_at
+       FROM import_jobs`;
+
+/** Mark orphaned running rows: re-queue if spool exists, else fail. */
+function reclaimOrphanedJobs() {
+  const state = runner();
+  if (state.activeJobId !== null) return;
+
+  const sqlite = getSqlite();
+  const orphaned = sqlite
+    .prepare(`SELECT id, spool_path FROM import_jobs WHERE state = 'running'`)
+    .all() as Array<{ id: number; spool_path: string }>;
+
+  for (const row of orphaned) {
+    const spoolExists =
+      typeof row.spool_path === "string" &&
+      row.spool_path.length > 0 &&
+      fs.existsSync(row.spool_path);
+
+    if (spoolExists) {
+      sqlite
+        .prepare(
+          `UPDATE import_jobs
+           SET state = 'pending',
+               phase = 'queued',
+               cancel_requested = 0,
+               message = 'Re-queued after server restart',
+               error = NULL,
+               finished_at = NULL,
+               updated_at = unixepoch()
+           WHERE id = ?`,
+        )
+        .run(row.id);
+    } else {
+      sqlite
+        .prepare(
+          `UPDATE import_jobs
+           SET state = 'failed',
+               error = 'Interrupted by server restart (upload spool missing)',
+               message = 'Job interrupted by server restart',
+               finished_at = unixepoch(),
+               updated_at = unixepoch()
+           WHERE id = ?`,
+        )
+        .run(row.id);
+    }
+  }
+}
+
+export function getImportJob(id: number): ImportJobRecord | null {
+  const row = getSqlite()
+    .prepare(`${JOB_SELECT} WHERE id = ?`)
+    .get(id) as Parameters<typeof mapJobRow>[0] | undefined;
+  return row ? mapJobRow(row) : null;
+}
+
+export function getActiveImportJob(): ImportJobRecord | null {
+  const row = getSqlite()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE state = 'running'
+       ORDER BY id ASC
+       LIMIT 1`,
+    )
+    .get() as Parameters<typeof mapJobRow>[0] | undefined;
+  return row ? mapJobRow(row) : null;
+}
+
+export function getPendingImportJobs(): ImportJobRecord[] {
+  const rows = getSqlite()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE state = 'pending'
+       ORDER BY id ASC`,
+    )
+    .all() as Parameters<typeof mapJobRow>[0][];
+  return rows.map(mapJobRow);
+}
+
+export function getLatestFinishedImportJob(): ImportJobRecord | null {
+  const row = getSqlite()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE state IN ('completed', 'failed', 'cancelled')
+       ORDER BY id DESC
+       LIMIT 1`,
+    )
+    .get() as Parameters<typeof mapJobRow>[0] | undefined;
+  return row ? mapJobRow(row) : null;
+}
+
+/** Active running job for the progress panel (pending listed separately). */
+export function getDisplayImportJob(): ImportJobRecord | null {
+  return getActiveImportJob();
+}
+
+export function getRecentImportJobs(limit = 8): ImportJobRecord[] {
+  const rows = getSqlite()
+    .prepare(
+      `${JOB_SELECT}
+       WHERE state IN ('completed', 'failed', 'cancelled')
+       ORDER BY id DESC
+       LIMIT ?`,
+    )
+    .all(limit) as Parameters<typeof mapJobRow>[0][];
+  return rows.map(mapJobRow);
+}
+
+function updateJob(
+  id: number,
+  patch: {
+    state?: ImportJobState;
+    phase?: ImportJobRecord["phase"];
+    processed?: number;
+    total?: number;
+    message?: string | null;
+    error?: string | null;
+    details?: ImportProgressDetails | null;
+    result?: ImportResult | null;
+    importId?: number | null;
+    contentHash?: string | null;
+    finished?: boolean;
+  },
+) {
+  const sets: string[] = ["updated_at = unixepoch()"];
+  const values: unknown[] = [];
+
+  if (patch.state !== undefined) {
+    sets.push("state = ?");
+    values.push(patch.state);
+  }
+  if (patch.phase !== undefined) {
+    sets.push("phase = ?");
+    values.push(patch.phase);
+  }
+  if (patch.processed !== undefined) {
+    sets.push("processed = ?");
+    values.push(patch.processed);
+  }
+  if (patch.total !== undefined) {
+    sets.push("total = ?");
+    values.push(patch.total);
+  }
+  if (patch.message !== undefined) {
+    sets.push("message = ?");
+    values.push(patch.message);
+  }
+  if (patch.error !== undefined) {
+    sets.push("error = ?");
+    values.push(patch.error);
+  }
+  if (patch.details !== undefined) {
+    sets.push("details = ?");
+    values.push(patch.details ? JSON.stringify(patch.details) : null);
+  }
+  if (patch.result !== undefined) {
+    sets.push("result = ?");
+    values.push(patch.result ? JSON.stringify(patch.result) : null);
+  }
+  if (patch.importId !== undefined) {
+    sets.push("import_id = ?");
+    values.push(patch.importId);
+  }
+  if (patch.contentHash !== undefined) {
+    sets.push("content_hash = ?");
+    values.push(patch.contentHash);
+  }
+  if (patch.finished) {
+    sets.push("finished_at = unixepoch()");
+  }
+
+  values.push(id);
+  getSqlite()
+    .prepare(`UPDATE import_jobs SET ${sets.join(", ")} WHERE id = ?`)
+    .run(...values);
+}
+
+async function applyProgress(jobId: number, progress: ImportProgress) {
+  updateJob(jobId, {
+    phase: progress.phase,
+    processed: progress.processed,
+    total: progress.total,
+    message: progress.message ?? null,
+    details: progress.details ?? null,
+    importId: progress.details?.importId ?? undefined,
+  });
+}
+
+function shouldCancel(jobId: number): boolean {
+  const state = runner();
+  if (state.cancelFlags.get(jobId)) return true;
+  const row = getSqlite()
+    .prepare(`SELECT cancel_requested AS c FROM import_jobs WHERE id = ?`)
+    .get(jobId) as { c: number } | undefined;
+  return Boolean(row?.c);
+}
+
+async function executeJob(jobId: number) {
+  const state = runner();
+  const job = getImportJob(jobId);
+  if (!job) {
+    state.cancelFlags.delete(jobId);
+    if (state.activeJobId === jobId) state.activeJobId = null;
+    pumpQueue();
+    return;
+  }
+
+  try {
+    if (!fs.existsSync(job.spoolPath)) {
+      throw new Error("Upload spool file is missing; re-upload the export.");
+    }
+
+    updateJob(jobId, {
+      phase: "received",
+      message: `Reading ${job.filename}…`,
+    });
+
+    const buffer = readSpoolFile(job.spoolPath);
+    if (buffer.byteLength === 0) {
+      throw new Error("File is empty.");
+    }
+    if (buffer.byteLength > IMPORT_MAX_FILE_BYTES) {
+      throw new Error(importFileTooLargeMessage());
+    }
+
+    const onProgress = (progress: ImportProgress) =>
+      applyProgress(jobId, progress);
+    const cancel = () => shouldCancel(jobId);
+
+    const result =
+      job.kind === "json"
+        ? await importExportJson(buffer.toString("utf8"), job.filename, {
+            onProgress,
+            shouldCancel: cancel,
+            contentHash: job.contentHash ?? undefined,
+          })
+        : await importExportArchive(buffer, job.filename, {
+            onProgress,
+            shouldCancel: cancel,
+            contentHash: job.contentHash ?? undefined,
+          });
+
+    if (shouldCancel(jobId)) {
+      updateJob(jobId, {
+        state: "cancelled",
+        phase: "failed",
+        message: "Import cancelled",
+        error: null,
+        result,
+        importId: result.importId,
+        finished: true,
+      });
+    } else if (result.status === "failed") {
+      updateJob(jobId, {
+        state: "failed",
+        phase: "failed",
+        message: result.message,
+        error: result.message,
+        result,
+        importId: result.importId,
+        finished: true,
+      });
+    } else {
+      updateJob(jobId, {
+        state: "completed",
+        phase: "completed",
+        processed: result.itemsFound + result.likesFound,
+        total: Math.max(1, result.itemsFound + result.likesFound),
+        message: result.message,
+        error: null,
+        result,
+        importId: result.importId,
+        details: {
+          importId: result.importId,
+          itemsParsed: result.itemsFound,
+          likesParsed: result.likesFound,
+          itemsAdded: result.itemsAdded,
+          itemsUpdated: result.itemsUpdated,
+          itemsSkipped: result.itemsSkipped,
+          likesAdded: result.likesAdded,
+          likesUpdated: result.likesUpdated,
+          likesSkipped: result.likesSkipped,
+        },
+        finished: true,
+      });
+    }
+  } catch (error) {
+    if (error instanceof ImportCancelledError || shouldCancel(jobId)) {
+      updateJob(jobId, {
+        state: "cancelled",
+        phase: "failed",
+        message: "Import cancelled",
+        error: null,
+        finished: true,
+      });
+    } else {
+      updateJob(jobId, {
+        state: "failed",
+        phase: "failed",
+        message: "Import failed",
+        error: error instanceof Error ? error.message : "unknown error",
+        finished: true,
+      });
+    }
+  } finally {
+    const finished = getImportJob(jobId);
+    if (
+      finished &&
+      (finished.state === "completed" ||
+        finished.state === "failed" ||
+        finished.state === "cancelled")
+    ) {
+      deleteSpoolFile(finished.spoolPath);
+    }
+
+    state.cancelFlags.delete(jobId);
+    if (state.activeJobId === jobId) state.activeJobId = null;
+    pumpQueue();
+  }
+}
+
+function pumpQueue() {
+  const state = runner();
+  if (state.activeJobId !== null) return;
+
+  const dbActive = getActiveImportJob();
+  if (dbActive) {
+    reclaimOrphanedJobs();
+  }
+
+  const next = getPendingImportJobs()[0];
+  if (!next) return;
+
+  updateJob(next.id, {
+    state: "running",
+    phase: "queued",
+    message: `Starting import of ${next.filename}`,
+  });
+
+  state.activeJobId = next.id;
+  state.cancelFlags.set(next.id, false);
+  void executeJob(next.id);
+}
+
+/**
+ * Reclaim orphaned running rows and resume the pending queue after restart/HMR.
+ * Safe to call from status polls.
+ */
+export function ensureImportJobRunner() {
+  const state = runner();
+  if (state.activeJobId !== null) return;
+  reclaimOrphanedJobs();
+  pumpQueue();
+}
+
+export type StartImportResult =
+  | { ok: true; job: ImportJobRecord }
+  | { ok: false; error: string; status: number };
+
+export async function startImportJob(file: File): Promise<StartImportResult> {
+  ensureImportJobRunner();
+
+  const filename = file.name || "export.zip";
+  const lower = filename.toLowerCase();
+
+  let kind: ImportJobKind;
+  if (lower.endsWith(".zip")) kind = "zip";
+  else if (lower.endsWith(".json")) kind = "json";
+  else {
+    return {
+      ok: false,
+      error: "Only .zip and .json exports are supported.",
+      status: 400,
+    };
+  }
+
+  if (typeof file.size === "number" && file.size > IMPORT_MAX_FILE_BYTES) {
+    return { ok: false, error: importFileTooLargeMessage(), status: 400 };
+  }
+
+  const token = `${Date.now()}-${randomBytes(6).toString("hex")}`;
+
+  let spool;
+  try {
+    spool = await spoolUploadedFile(file, token);
+  } catch (error) {
+    return {
+      ok: false,
+      error: error instanceof Error ? error.message : "Failed to store upload",
+      status: 400,
+    };
+  }
+
+  const sqlite = getSqlite();
+  let jobId: number;
+  try {
+    const info = sqlite
+      .prepare(
+        `INSERT INTO import_jobs(
+          filename, content_hash, spool_path, kind, state, phase,
+          processed, total, message
+        ) VALUES (?, ?, ?, ?, 'pending', 'queued', 0, 0, ?)`,
+      )
+      .run(
+        filename,
+        spool.contentHash,
+        spool.spoolPath,
+        kind,
+        `Queued import of ${filename}`,
+      );
+    jobId = Number(info.lastInsertRowid);
+  } catch (error) {
+    deleteSpoolFile(spool.spoolPath);
+    return {
+      ok: false,
+      error:
+        error instanceof Error ? error.message : "Failed to create import job",
+      status: 500,
+    };
+  }
+
+  pumpQueue();
+  const job = getImportJob(jobId);
+  if (!job) {
+    return { ok: false, error: "Failed to create import job", status: 500 };
+  }
+  return { ok: true, job };
+}
+
+export type CancelImportResult =
+  | { ok: true; job: ImportJobRecord }
+  | { ok: false; error: string; status: number; job?: ImportJobRecord };
+
+/**
+ * Cooperative cancel for a running job (or the active one). Pending jobs can
+ * be cancelled by deleting them from the queue before they start.
+ */
+export function cancelImportJob(jobId?: number): CancelImportResult {
+  ensureImportJobRunner();
+
+  const target = jobId ? getImportJob(jobId) : getActiveImportJob();
+  if (!target) {
+    return { ok: false, error: "No import job to cancel", status: 404 };
+  }
+
+  if (target.state === "pending") {
+    getSqlite()
+      .prepare(
+        `UPDATE import_jobs
+         SET state = 'cancelled',
+             phase = 'failed',
+             message = 'Import cancelled before start',
+             finished_at = unixepoch(),
+             updated_at = unixepoch()
+         WHERE id = ?`,
+      )
+      .run(target.id);
+    deleteSpoolFile(target.spoolPath);
+    const job = getImportJob(target.id);
+    if (!job) return { ok: false, error: "Job disappeared", status: 500 };
+    pumpQueue();
+    return { ok: true, job };
+  }
+
+  if (target.state !== "running") {
+    return {
+      ok: false,
+      error: "Import job is not running or pending",
+      status: 404,
+      job: target,
+    };
+  }
+
+  getSqlite()
+    .prepare(
+      `UPDATE import_jobs
+       SET cancel_requested = 1,
+           message = 'Cancel requested…',
+           updated_at = unixepoch()
+       WHERE id = ?`,
+    )
+    .run(target.id);
+
+  runner().cancelFlags.set(target.id, true);
+
+  const job = getImportJob(target.id);
+  if (!job) return { ok: false, error: "Job disappeared", status: 500 };
+  return { ok: true, job };
+}
+
+/** Test helper: wait until the import queue is idle. */
+export async function waitForIdleImportJob(
+  timeoutMs = 60_000,
+): Promise<ImportJobRecord | null> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    ensureImportJobRunner();
+    const active = getActiveImportJob();
+    const pending = getPendingImportJobs();
+    if (!active && pending.length === 0) {
+      return getLatestFinishedImportJob();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error("Timed out waiting for import job queue to finish");
+}

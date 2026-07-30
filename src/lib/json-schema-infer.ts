@@ -3,10 +3,21 @@
  * Stores types/keys/nesting only — never large payloads or PII-heavy content.
  */
 
-export const SCHEMA_MAX_DEPTH = 7;
-export const SCHEMA_SAMPLE_BYTES = 512 * 1024;
-export const SCHEMA_ARRAY_SAMPLE = 40;
+/** Pathological-depth guard only (JSON cannot cycle). Practical nesting is uncapped. */
+export const SCHEMA_SAFETY_MAX_DEPTH = 256;
+/** @deprecated Prefer full-file reads; kept as Infinity so callers never truncate. */
+export const SCHEMA_SAMPLE_BYTES = Number.POSITIVE_INFINITY;
+/**
+ * Max array elements to sample when inferring element schema.
+ * Strategy: first ~7, last ~7, and ~6 random from the middle (≤20 total).
+ * If length ≤ 20, use every element.
+ */
+export const SCHEMA_ARRAY_SAMPLE = 20;
 export const SCHEMA_STRING_SAMPLE_MAX = 48;
+
+const ARRAY_SAMPLE_FIRST = 7;
+const ARRAY_SAMPLE_LAST = 7;
+const ARRAY_SAMPLE_RANDOM = 6;
 
 export type JsonPrimitiveType =
   | "string"
@@ -30,7 +41,7 @@ export type JsonSchemaNode = {
   sample?: string | number | boolean | null;
   /** Present when merging schemas where a key is missing in some samples */
   optional?: boolean;
-  /** Depth was capped */
+  /** Safety depth ceiling hit (pathological nesting only) */
   truncated?: boolean;
 };
 
@@ -93,6 +104,45 @@ function truncateSample(value: unknown): string | number | boolean | null | unde
   return undefined;
 }
 
+/**
+ * Pick up to SCHEMA_ARRAY_SAMPLE indices: first 7, last 7, and up to 6 random
+ * from the middle. Length ≤ 20 → every index. Exported for tests.
+ */
+export function sampleArrayIndices(
+  length: number,
+  random: () => number = Math.random,
+): number[] {
+  if (length <= 0) return [];
+  if (length <= SCHEMA_ARRAY_SAMPLE) {
+    return Array.from({ length }, (_, i) => i);
+  }
+
+  const indices = new Set<number>();
+  for (let i = 0; i < ARRAY_SAMPLE_FIRST; i++) indices.add(i);
+  for (let i = 0; i < ARRAY_SAMPLE_LAST; i++) indices.add(length - 1 - i);
+
+  const midStart = ARRAY_SAMPLE_FIRST;
+  const midEnd = length - ARRAY_SAMPLE_LAST;
+  const mid: number[] = [];
+  for (let i = midStart; i < midEnd; i++) {
+    if (!indices.has(i)) mid.push(i);
+  }
+
+  let remaining = ARRAY_SAMPLE_RANDOM;
+  while (remaining > 0 && mid.length > 0) {
+    const pick = Math.floor(random() * mid.length);
+    indices.add(mid[pick]!);
+    mid.splice(pick, 1);
+    remaining -= 1;
+  }
+
+  return [...indices].sort((a, b) => a - b);
+}
+
+function sampleArrayElements<T>(arr: T[]): T[] {
+  return sampleArrayIndices(arr.length).map((i) => arr[i]!);
+}
+
 export function inferSchemaFromValue(
   value: unknown,
   depth = 0,
@@ -107,14 +157,16 @@ export function inferSchemaFromValue(
     return sample === undefined ? { type: t } : { type: t, sample };
   }
 
-  if (depth >= SCHEMA_MAX_DEPTH) {
+  // JSON values cannot cycle; this ceiling only avoids stack overflow on
+  // pathological nesting. Normal Instagram export shapes are far shallower.
+  if (depth >= SCHEMA_SAFETY_MAX_DEPTH) {
     return { type: t, truncated: true };
   }
 
   if (t === "array") {
     const arr = value as unknown[];
-    const sampleLen = Math.min(arr.length, SCHEMA_ARRAY_SAMPLE);
-    const samples = arr.slice(0, sampleLen);
+    // Sample ≤20 elements from first / last / random middle; merge their schemas.
+    const samples = sampleArrayElements(arr);
     let items: JsonSchemaNode | undefined;
     const elementTypes = new Set<JsonPrimitiveType>();
 
@@ -131,7 +183,7 @@ export function inferSchemaFromValue(
       arrayLength: {
         min: arr.length,
         max: arr.length,
-        sample: sampleLen,
+        sample: samples.length,
       },
       homogeneous: elementTypes.size <= 1,
     };
@@ -224,7 +276,7 @@ export function mergeSchemaNodes(
 
 /**
  * Best-effort parse of a possibly truncated UTF-8 JSON prefix.
- * Closes open strings/brackets so giant export files can still yield structure.
+ * Kept for repair/tests; import path now reads full file contents.
  */
 export function parseJsonPrefix(text: string, wasTruncated: boolean): unknown {
   try {
@@ -339,7 +391,10 @@ export function inferFileSchema(
     options?.truncatedRead ?? contentBytes < size;
 
   try {
-    const value = parseJsonPrefix(content, wasTruncated);
+    // Full-file parse (local app; tens of MB is acceptable). Schema only is stored.
+    const value = wasTruncated
+      ? parseJsonPrefix(content, true)
+      : JSON.parse(content);
     const top = primitiveTypeOf(value);
     return {
       filePath,
@@ -361,16 +416,12 @@ export function inferFileSchema(
   }
 }
 
+/** Full content — no byte truncation. Large files are parsed entirely on import. */
 export function sampleContentForSchema(content: string): {
   sample: string;
   truncated: boolean;
 } {
-  if (Buffer.byteLength(content, "utf8") <= SCHEMA_SAMPLE_BYTES) {
-    return { sample: content, truncated: false };
-  }
-  // Slice by UTF-16 code units near the byte budget (good enough for structure).
-  const sample = content.slice(0, SCHEMA_SAMPLE_BYTES);
-  return { sample, truncated: true };
+  return { sample: content, truncated: false };
 }
 
 export function catalogSchemasFromFiles(
@@ -378,10 +429,9 @@ export function catalogSchemasFromFiles(
 ): FileSchemaCatalogEntry[] {
   return files.map((file) => {
     const size = file.byteSize ?? Buffer.byteLength(file.content, "utf8");
-    const { sample, truncated } = sampleContentForSchema(file.content);
-    return inferFileSchema(file.name, sample, {
+    return inferFileSchema(file.name, file.content, {
       byteSize: size,
-      truncatedRead: truncated || size > Buffer.byteLength(sample, "utf8"),
+      truncatedRead: false,
     });
   });
 }

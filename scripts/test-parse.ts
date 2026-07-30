@@ -107,6 +107,226 @@ async function main() {
     throw new Error("Flat collections format should parse author, date, and tag");
   }
 
+  // 2025/2026 Instagram export shape: top-level array of
+  // { timestamp, media, label_values, fbid } with Owner.Username nested.
+  const labelValuesParsed = parseExportJsonFiles([
+    {
+      name: "your_instagram_activity/saved/saved_posts.json",
+      content: fs.readFileSync(
+        path.join(fixtures, "sample-saved-posts-label-values.json"),
+        "utf8",
+      ),
+    },
+    {
+      name: "your_instagram_activity/saved/saved_collections.json",
+      content: fs.readFileSync(
+        path.join(fixtures, "sample-saved-collections-label-values.json"),
+        "utf8",
+      ),
+    },
+  ]);
+  const labelReel = labelValuesParsed.items.find(
+    (item) => item.mediaKey === "labelfmtreel01",
+  );
+  const labelPost = labelValuesParsed.items.find(
+    (item) => item.mediaKey === "labelfmtpost01",
+  );
+  const labelCollOnly = labelValuesParsed.items.find(
+    (item) => item.mediaKey === "labelfmtcollonly",
+  );
+  if (
+    !labelReel?.authorUsername ||
+    labelReel.authorUsername !== "fixture.creator" ||
+    !labelReel.savedAt ||
+    !labelReel.collections.includes("Recipes")
+  ) {
+    throw new Error(
+      "label_values posts should parse Owner.Username, timestamp, and collection Media membership",
+    );
+  }
+  if (!labelPost?.authorUsername || labelPost.authorUsername !== "other.creator") {
+    throw new Error("label_values post author should come from Owner.Username");
+  }
+  if (
+    !labelCollOnly?.authorUsername ||
+    labelCollOnly.authorUsername !== "coll.only.user" ||
+    !labelCollOnly.collections.includes("Recipes")
+  ) {
+    throw new Error("label_values collection-only media should parse author + tag");
+  }
+  const labelAuthors = labelValuesParsed.items.filter((i) => i.authorUsername).length;
+  const labelWithDates = labelValuesParsed.items.filter((i) => i.savedAt).length;
+  if (labelAuthors < 3 || labelWithDates < 2) {
+    throw new Error(
+      `label_values parse expected authors>=3 dates>=2, got authors=${labelAuthors} dates=${labelWithDates}`,
+    );
+  }
+
+  const { parseLikedExportJsonFiles } = await import("../src/lib/parse-export");
+  const likedParsed = parseLikedExportJsonFiles([
+    {
+      name: "your_instagram_activity/likes/liked_posts.json",
+      content: fs.readFileSync(
+        path.join(fixtures, "sample-liked-posts-label-values.json"),
+        "utf8",
+      ),
+    },
+    {
+      name: "your_instagram_activity/story_interactions/story_likes.json",
+      content: fs.readFileSync(
+        path.join(fixtures, "sample-story-likes-label-values.json"),
+        "utf8",
+      ),
+    },
+    {
+      name: "your_instagram_activity/likes/liked_comments.json",
+      content: fs.readFileSync(
+        path.join(fixtures, "sample-liked-comments.json"),
+        "utf8",
+      ),
+    },
+  ]);
+  const likedReel = likedParsed.items.find(
+    (item) => item.mediaKey === "likedfmtreel01",
+  );
+  const likedStory = likedParsed.items.find((item) =>
+    item.mediaKey.startsWith("story:story.author:"),
+  );
+  const likedComment = likedParsed.items.find((item) =>
+    item.mediaKey.startsWith("comment:"),
+  );
+  if (
+    !likedReel?.authorUsername ||
+    likedReel.authorUsername !== "liked.creator" ||
+    likedReel.mediaType !== "reel" ||
+    !likedReel.likedAt
+  ) {
+    throw new Error("liked_posts label_values should parse reel + Owner.Username");
+  }
+  if (
+    !likedStory ||
+    likedStory.mediaType !== "story" ||
+    likedStory.authorUsername !== "story.author"
+  ) {
+    throw new Error("story_likes should detect story type and author from URL/Owner");
+  }
+  if (
+    !likedComment ||
+    likedComment.mediaType !== "comment" ||
+    likedComment.authorUsername !== "comment.author"
+  ) {
+    throw new Error("liked_comments should parse comment likes with author title");
+  }
+  if (likedParsed.items.length < 4) {
+    throw new Error(
+      `Expected at least 4 liked items from fixtures, got ${likedParsed.items.length}`,
+    );
+  }
+
+  const likesImport = await importExportJson(
+    fs.readFileSync(
+      path.join(fixtures, "sample-liked-posts-label-values.json"),
+      "utf8",
+    ),
+    "your_instagram_activity/likes/liked_posts.json",
+  );
+  if (
+    likesImport.status !== "completed" ||
+    (likesImport.likesAdded ?? 0) < 2 ||
+    likesImport.itemsAdded !== 0
+  ) {
+    throw new Error(
+      `Likes-only JSON import should add likes without saves: ${JSON.stringify(likesImport)}`,
+    );
+  }
+  if (
+    !likesImport.log ||
+    likesImport.log.likesParsed < 2 ||
+    likesImport.log.likesAuthorsFound < 1 ||
+    likesImport.log.likesAdded < 2 ||
+    (likesImport.log.authorsFound ?? 0) !== 0
+  ) {
+    throw new Error(
+      `Likes import log should report likes metrics separately from saves authors (got ${JSON.stringify(likesImport.log)})`,
+    );
+  }
+  {
+    const { parseImportLog, resolveAuthorMetrics } = await import(
+      "../src/lib/import-log"
+    );
+    const legacy = parseImportLog(
+      JSON.stringify({
+        filesScanned: 3,
+        jsonFilesParsed: 5,
+        savedJsonFiles: ["saved_posts.json"],
+        likedJsonFiles: ["liked_posts.json"],
+        itemsParsed: 10,
+        likesParsed: 100,
+        typeCounts: { post: 10, reel: 0, igtv: 0, unknown: 0 },
+        likeTypeCounts: {
+          post: 100,
+          reel: 0,
+          igtv: 0,
+          story: 0,
+          comment: 0,
+          unknown: 0,
+        },
+        collectionsFound: [],
+        authorsFound: 110,
+        itemsWithSavedAt: 10,
+        likesWithLikedAt: 100,
+        warnings: ["Likes: 100 added, 0 updated, 0 unchanged."],
+      }),
+    );
+    if (!legacy || legacy.likesAdded !== 100 || legacy.likesSkipped !== 0) {
+      throw new Error(
+        `parseImportLog should recover likes write metrics from legacy warnings (got ${JSON.stringify(legacy)})`,
+      );
+    }
+    const authors = resolveAuthorMetrics(legacy);
+    if (authors.savesWithAuthor !== 10 || authors.likesWithAuthor !== 100) {
+      throw new Error(
+        `resolveAuthorMetrics should split legacy authorsFound (got ${JSON.stringify(authors)})`,
+      );
+    }
+  }
+  const likesDup = await importExportJson(
+    fs.readFileSync(
+      path.join(fixtures, "sample-liked-posts-label-values.json"),
+      "utf8",
+    ),
+    "your_instagram_activity/likes/liked_posts.json",
+  );
+  if (
+    likesDup.status !== "duplicate" ||
+    !likesDup.log ||
+    likesDup.log.likesSkipped < 2 ||
+    likesDup.likesSkipped < 2
+  ) {
+    throw new Error(
+      `Duplicate likes import should persist likesSkipped in log/result (got ${JSON.stringify(likesDup)})`,
+    );
+  }
+  const { listLikes, getStats } = await import("../src/lib/queries");
+  const likesList = await listLikes({ pageSize: 50 });
+  if (likesList.total < 2) {
+    throw new Error("listLikes should return imported liked posts");
+  }
+  if (typeof likesList.items[0]?.alsoSaved !== "boolean") {
+    throw new Error("listLikes should include alsoSaved on each row");
+  }
+  const likesSearch = await listLikes({ q: "liked.creator", pageSize: 10 });
+  if (likesSearch.total < 1) {
+    throw new Error("Likes FTS/LIKE search should find liked.creator");
+  }
+  const statsWithLikes = getStats();
+  if (
+    !Array.isArray(statsWithLikes.topLikedAuthors) ||
+    statsWithLikes.topLikedAuthors.length < 1
+  ) {
+    throw new Error("Overview stats should include topLikedAuthors after likes import");
+  }
+
   const first = await importExportJson(
     files[0].content,
     "sample-saved-posts.json",
@@ -143,6 +363,8 @@ async function main() {
     catalogSchemasFromFiles,
     inferSchemaFromValue,
     parseJsonPrefix,
+    sampleArrayIndices,
+    SCHEMA_ARRAY_SAMPLE,
   } = await import("../src/lib/json-schema-infer");
   const { getSchemasForImport, getAggregatedSchemas } = await import(
     "../src/lib/schema-catalog"
@@ -153,6 +375,9 @@ async function main() {
   ]);
   if (inferred.length !== 1 || inferred[0]?.topLevelType !== "object") {
     throw new Error("Schema inference should see object top-level for saved posts");
+  }
+  if (inferred[0]?.truncatedRead) {
+    throw new Error("Full-file schema inference should not mark truncatedRead");
   }
   const mediaKey = inferred[0]?.schema?.keys?.saved_saved_media;
   if (!mediaKey || mediaKey.type !== "array" || !mediaKey.items) {
@@ -169,6 +394,52 @@ async function main() {
   const deep = inferSchemaFromValue({ a: { b: { c: [1, 2, 3] } } });
   if (deep.keys?.a?.keys?.b?.keys?.c?.type !== "array") {
     throw new Error("Nested schema inference should reach array under a.b.c");
+  }
+  // Nesting past the old depth-7 cap must still walk keys/types.
+  let nested: unknown = { leaf: true };
+  for (let i = 0; i < 12; i++) nested = { child: nested };
+  const deepWalk = inferSchemaFromValue(nested);
+  let cursor = deepWalk;
+  for (let i = 0; i < 12; i++) {
+    if (cursor.keys?.child?.type !== "object") {
+      throw new Error(`Deep nest walk should continue past level ${i}`);
+    }
+    cursor = cursor.keys.child;
+  }
+  if (cursor.keys?.leaf?.type !== "boolean") {
+    throw new Error("Deep nest walk should reach boolean leaf at depth 12+");
+  }
+
+  const shortIdx = sampleArrayIndices(15);
+  if (shortIdx.length !== 15 || shortIdx[0] !== 0 || shortIdx[14] !== 14) {
+    throw new Error("Array sampling should use all elements when length ≤ 20");
+  }
+  let randCalls = 0;
+  const longIdx = sampleArrayIndices(100, () => {
+    randCalls += 1;
+    return 0.5;
+  });
+  if (longIdx.length !== SCHEMA_ARRAY_SAMPLE) {
+    throw new Error(
+      `Array sampling should return ${SCHEMA_ARRAY_SAMPLE} indices, got ${longIdx.length}`,
+    );
+  }
+  for (let i = 0; i < 7; i++) {
+    if (!longIdx.includes(i) || !longIdx.includes(99 - i)) {
+      throw new Error("Array sampling must include first 7 and last 7 indices");
+    }
+  }
+  if (randCalls < 1) {
+    throw new Error("Array sampling should draw random middle indices");
+  }
+  const sampled = inferSchemaFromValue(
+    Array.from({ length: 50 }, (_, i) => ({ [`k${i}`]: i })),
+  );
+  if (sampled.arrayLength?.sample !== SCHEMA_ARRAY_SAMPLE) {
+    throw new Error("Inferred array schema should report sample count ≤ 20");
+  }
+  if (!sampled.items?.keys?.k0 || !sampled.items.keys.k49) {
+    throw new Error("Array element merge should include first and last sample keys");
   }
 
   if (!first.importId) {
@@ -240,11 +511,15 @@ async function main() {
     !settingsAfterKeys.openai.configured ||
     settingsAfterKeys.openai.source !== "keyring" ||
     !settingsAfterKeys.voyage.configured ||
-    settingsAfterKeys.openai.enabled ||
-    settingsAfterKeys.voyage.enabled ||
-    settingsAfterKeys.ollama.enabled ||
+    settingsAfterKeys.openai.enabled.saves ||
+    settingsAfterKeys.openai.enabled.likes ||
+    settingsAfterKeys.voyage.enabled.saves ||
+    settingsAfterKeys.voyage.enabled.likes ||
+    settingsAfterKeys.ollama.enabled.saves ||
+    settingsAfterKeys.ollama.enabled.likes ||
     settingsAfterKeys.ollama.available ||
-    !settingsAfterKeys.local.enabled ||
+    !settingsAfterKeys.local.enabled.saves ||
+    !settingsAfterKeys.local.enabled.likes ||
     settingsAfterKeys.ollama.model !== "qwen3-embedding:0.6b" ||
     settingsAfterKeys.openai.model !== "text-embedding-3-small" ||
     settingsAfterKeys.voyage.model !== "voyage-4-lite" ||
@@ -252,7 +527,7 @@ async function main() {
     settingsAfterKeys.timeoutMs !== 10000
   ) {
     throw new Error(
-      "Settings should persist keys without enabling indexes; local defaults on",
+      "Settings should persist keys without enabling indexes; local defaults on for both libraries",
     );
   }
   if (JSON.stringify(settingsAfterKeys).includes("test-key")) {
@@ -280,14 +555,36 @@ async function main() {
 
   const settingsAfter = getSettingsKeysStatus();
   if (
-    !settingsAfter.openai.enabled ||
-    !settingsAfter.voyage.enabled ||
-    !settingsAfter.ollama.enabled ||
+    !settingsAfter.openai.enabled.saves ||
+    !settingsAfter.openai.enabled.likes ||
+    !settingsAfter.voyage.enabled.saves ||
+    !settingsAfter.voyage.enabled.likes ||
+    !settingsAfter.ollama.enabled.saves ||
+    !settingsAfter.ollama.enabled.likes ||
     !settingsAfter.ollama.available ||
-    !settingsAfter.local.enabled
+    !settingsAfter.local.enabled.saves ||
+    !settingsAfter.local.enabled.likes
   ) {
-    throw new Error("Explicit enable flags should turn indexes on");
+    throw new Error("Explicit enable flags should turn indexes on for both libraries");
   }
+
+  // Independent library enables: OpenAI Saves-only should not appear on Likes.
+  updateSettingsKeys({
+    openaiEnabled: { saves: true, likes: false },
+  });
+  const {
+    getProviderAvailability: getAvailabilityForLibrary,
+  } = await import("../src/lib/search/providers");
+  const savesOpenai = getAvailabilityForLibrary("saves");
+  const likesOpenai = getAvailabilityForLibrary("likes");
+  if (!savesOpenai.configured.openai || likesOpenai.configured.openai) {
+    throw new Error(
+      "OpenAI enabled for Saves only must configure Saves and leave Likes unavailable",
+    );
+  }
+  updateSettingsKeys({
+    openaiEnabled: { saves: true, likes: true },
+  });
 
   // Models come from Settings (sqlite), not env.
   delete process.env.EMBEDDING_MODEL;
@@ -514,6 +811,13 @@ async function main() {
   if (statusBefore.providers.length !== 4) {
     throw new Error("Status should include all four embedding providers");
   }
+  if (
+    !statusBefore.libraries?.saves ||
+    !statusBefore.libraries?.likes ||
+    statusBefore.libraries.likes.providers.length !== 4
+  ) {
+    throw new Error("Status should include dual Saves/Likes library sections");
+  }
   if (!Array.isArray(statusBefore.pendingJobs) || !Array.isArray(statusBefore.recentJobs)) {
     throw new Error("Status should include pendingJobs and recentJobs arrays");
   }
@@ -537,6 +841,26 @@ async function main() {
   ) {
     throw new Error(
       "Disabled OpenAI with saved credentials should report credentials + unavailable",
+    );
+  }
+  // Disabling Saves OpenAI must not flip Likes when set independently.
+  updateSettingsKeys({
+    openaiEnabled: { saves: false, likes: true },
+  });
+  const likesOnlyOpenAi = getSearchIndexStatus().libraries.likes.providers.find(
+    (p) => p.provider === "openai",
+  );
+  const savesOnlyOpenAi = getSearchIndexStatus().libraries.saves.providers.find(
+    (p) => p.provider === "openai",
+  );
+  if (
+    !likesOnlyOpenAi?.enabled ||
+    !likesOnlyOpenAi.configured ||
+    savesOnlyOpenAi?.enabled ||
+    savesOnlyOpenAi?.configured
+  ) {
+    throw new Error(
+      "Per-library OpenAI enable should differ between Saves and Likes status rows",
     );
   }
   updateSettingsKeys({ openaiEnabled: true });
@@ -589,18 +913,21 @@ async function main() {
     throw new Error("OpenAI reindex via job should restore full coverage");
   }
 
-  // all-configured expands to one job per enabled provider.
+  // all-configured expands to one job per enabled provider × library (saves + likes).
   const allJobs = startReindexJob("all-configured");
   if (!allJobs.ok) {
     throw new Error(`Failed to start all-configured reindex: ${allJobs.error}`);
   }
-  if (allJobs.jobs.length < 2) {
+  if (allJobs.jobs.length < 4) {
     throw new Error(
-      `all-configured should enqueue multiple provider jobs (got ${allJobs.jobs.length})`,
+      `all-configured should enqueue saves+likes provider jobs (got ${allJobs.jobs.length})`,
     );
   }
   if (allJobs.jobs.some((job) => job.target === "all-configured")) {
     throw new Error("Expanded jobs must use concrete provider targets");
+  }
+  if (!allJobs.jobs.some((job) => job.target.startsWith("likes-"))) {
+    throw new Error("all-configured should include likes-* job targets");
   }
   const activeAfterAll = getActiveEmbeddingJob();
   if (!activeAfterAll || activeAfterAll.state !== "running") {
@@ -691,6 +1018,58 @@ async function main() {
       "Duplicate re-import should backfill missing author/savedAt metadata",
     );
   }
+  if (!backfillAgain.importId) {
+    throw new Error("Duplicate backfill import should return importId");
+  }
+  const backfillSchemas = getSchemasForImport(backfillAgain.importId);
+  if (backfillSchemas.length < 1) {
+    throw new Error("Duplicate re-import must still capture import_schemas");
+  }
+
+  const labelBackfill = fs.readFileSync(
+    path.join(fixtures, "sample-saved-posts-label-values.json"),
+    "utf8",
+  );
+  const labelFirst = await importExportJson(
+    labelBackfill,
+    "label-values-saved.json",
+  );
+  if (labelFirst.status !== "completed" || labelFirst.itemsAdded < 2) {
+    throw new Error("label_values fixture should import items");
+  }
+  if (
+    !labelFirst.log ||
+    labelFirst.log.authorsFound < 2 ||
+    labelFirst.log.itemsWithSavedAt < 2
+  ) {
+    throw new Error(
+      `label_values import log should report authors/dates (got ${JSON.stringify(labelFirst.log)})`,
+    );
+  }
+  sqlite
+    .prepare(
+      "UPDATE saved_items SET author_username = NULL, saved_at = NULL WHERE media_key IN (?, ?)",
+    )
+    .run("labelfmtreel01", "labelfmtpost01");
+  const labelAgain = await importExportJson(
+    labelBackfill,
+    "label-values-saved.json",
+  );
+  if (labelAgain.status !== "duplicate" || labelAgain.itemsUpdated < 2) {
+    throw new Error(
+      `label_values duplicate re-import should backfill metadata (updated=${labelAgain.itemsUpdated})`,
+    );
+  }
+  const restoredAuthors = (
+    sqlite
+      .prepare(
+        "SELECT count(*) AS count FROM saved_items WHERE media_key IN (?, ?) AND author_username IS NOT NULL AND saved_at IS NOT NULL",
+      )
+      .get("labelfmtreel01", "labelfmtpost01") as { count: number }
+  ).count;
+  if (restoredAuthors !== 2) {
+    throw new Error("label_values re-import should restore author_username and saved_at");
+  }
 
   let rejectedBadPhrase = false;
   try {
@@ -707,37 +1086,49 @@ async function main() {
   if (!reset.ok || reset.wiped.savedItems < 1 || reset.wiped.imports < 1) {
     throw new Error("resetLibrary should wipe existing content rows");
   }
+  if (typeof reset.wiped.likedItems !== "number") {
+    throw new Error("resetLibrary should report likedItems wipe count");
+  }
 
   const afterReset = sqlite
     .prepare(
       `SELECT
         (SELECT count(*) FROM saved_items) AS items,
+        (SELECT count(*) FROM liked_items) AS likes,
         (SELECT count(*) FROM imports) AS imports,
         (SELECT count(*) FROM item_collections) AS collections,
         (SELECT count(*) FROM import_schemas) AS schemas,
         (SELECT count(*) FROM saved_items_fts) AS fts,
+        (SELECT count(*) FROM liked_items_fts) AS likesFts,
         (SELECT count(*) FROM saved_items_vec_local) AS localVec,
+        (SELECT count(*) FROM liked_items_vec_local) AS likesLocalVec,
         (SELECT count(*) FROM embedding_index_profiles) AS profiles,
         (SELECT count(*) FROM app_settings) AS settings`,
     )
     .get() as {
     items: number;
+    likes: number;
     imports: number;
     collections: number;
     schemas: number;
     fts: number;
+    likesFts: number;
     localVec: number;
+    likesLocalVec: number;
     profiles: number;
     settings: number;
   };
 
   if (
     afterReset.items !== 0 ||
+    afterReset.likes !== 0 ||
     afterReset.imports !== 0 ||
     afterReset.collections !== 0 ||
     afterReset.schemas !== 0 ||
     afterReset.fts !== 0 ||
+    afterReset.likesFts !== 0 ||
     afterReset.localVec !== 0 ||
+    afterReset.likesLocalVec !== 0 ||
     afterReset.profiles !== 0
   ) {
     throw new Error("resetLibrary must empty content and search indexes");

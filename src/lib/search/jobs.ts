@@ -1,8 +1,13 @@
 import { getSqlite } from "../db";
 import {
-  isEmbeddingProvider,
   type EmbeddingProvider,
 } from "./embeddings";
+import {
+  formatJobTarget,
+  parseLibraryJobTarget,
+  SEARCH_LIBRARIES,
+  type SearchLibrary,
+} from "./library";
 import {
   RebuildCancelledError,
   rebuildConfiguredIndexes,
@@ -11,8 +16,13 @@ import {
 } from "./sync";
 import { configuredProviders, isProviderConfigured } from "./providers";
 
-/** API accept target; persisted jobs use a concrete provider (never all-configured). */
-export type EmbeddingJobTarget = EmbeddingProvider | "all-configured";
+/**
+ * API accept target. Persisted jobs use a concrete target:
+ * - Saves: `local` | `ollama` | `openai` | `voyage`
+ * - Likes: `likes-local` | `likes-ollama` | `likes-openai` | `likes-voyage`
+ * Never stores `all-configured`.
+ */
+export type EmbeddingJobTarget = string;
 
 export type EmbeddingJobState =
   | "pending"
@@ -108,7 +118,7 @@ function mapJobRow(row: {
 
   return {
     id: row.id,
-    target: row.target as EmbeddingJobTarget,
+    target: row.target,
     state: row.state as EmbeddingJobState,
     phase: row.phase as EmbeddingJobPhase,
     processed,
@@ -132,10 +142,10 @@ export function parseReindexTarget(
   value: unknown,
 ): EmbeddingJobTarget | null {
   if (typeof value !== "string") return null;
-  const trimmed = value.trim().toLowerCase();
-  if (trimmed === "all-configured") return "all-configured";
-  if (isEmbeddingProvider(trimmed)) return trimmed;
-  return null;
+  const parsed = parseLibraryJobTarget(value);
+  if (!parsed) return null;
+  if (parsed.kind === "all-configured") return "all-configured";
+  return formatJobTarget(parsed.library, parsed.provider);
 }
 
 export function getEmbeddingJob(id: number): EmbeddingJobRecord | null {
@@ -230,8 +240,8 @@ export function getDisplayEmbeddingJob(): EmbeddingJobRecord | null {
   return getActiveEmbeddingJob() ?? getLatestFinishedEmbeddingJob();
 }
 
-function getOpenJobForProvider(
-  provider: EmbeddingProvider,
+function getOpenJobForTarget(
+  target: EmbeddingJobTarget,
 ): EmbeddingJobRecord | null {
   const row = getSqlite()
     .prepare(
@@ -241,7 +251,7 @@ function getOpenJobForProvider(
        ORDER BY id ASC
        LIMIT 1`,
     )
-    .get(provider) as Parameters<typeof mapJobRow>[0] | undefined;
+    .get(target) as Parameters<typeof mapJobRow>[0] | undefined;
   return row ? mapJobRow(row) : null;
 }
 
@@ -322,13 +332,18 @@ function shouldCancel(jobId: number): boolean {
   return Boolean(row?.c);
 }
 
-function insertPendingJob(target: EmbeddingProvider): EmbeddingJobRecord {
+function insertPendingJob(
+  library: SearchLibrary,
+  provider: EmbeddingProvider,
+): EmbeddingJobRecord {
   const sqlite = getSqlite();
+  const table = library === "saves" ? "saved_items" : "liked_items";
   const totalItems = (
-    sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
+    sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
       c: number;
     }
   ).c;
+  const target = formatJobTarget(library, provider);
 
   const info = sqlite
     .prepare(
@@ -350,8 +365,10 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
       applyProgress(jobId, progress);
     const cancel = () => shouldCancel(jobId);
 
+    const parsed = parseLibraryJobTarget(target);
+
     // Legacy rows may still use all-configured; new code never creates them.
-    if (target === "all-configured") {
+    if (!parsed || parsed.kind === "all-configured") {
       const result = await rebuildConfiguredIndexes({
         onProgress,
         shouldCancel: cancel,
@@ -362,20 +379,24 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
         processed: result.items,
         total: result.items,
         currentProvider: null,
-        message: `Rebuilt ${result.providers.join(", ")} (${result.items} items)`,
+        message: `Rebuilt ${result.providers.join(", ")} for saves + likes (${result.items} items)`,
         finished: true,
       });
     } else {
-      const result = await rebuildProviderIndex(target, {
-        onProgress,
-        shouldCancel: cancel,
-      });
+      const result = await rebuildProviderIndex(
+        parsed.library,
+        parsed.provider,
+        {
+          onProgress,
+          shouldCancel: cancel,
+        },
+      );
       updateJob(jobId, {
         state: "completed",
         phase: "done",
         processed: result.items,
         total: result.items,
-        currentProvider: target,
+        currentProvider: parsed.provider,
         message: `Rebuilt ${target} (${result.items} items)`,
         finished: true,
       });
@@ -455,8 +476,14 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
   ensureJobRunner();
 
   if (target === "all-configured") {
-    const providers = configuredProviders();
-    if (providers.length === 0) {
+    const pairs: Array<{ library: SearchLibrary; provider: EmbeddingProvider }> =
+      [];
+    for (const library of SEARCH_LIBRARIES) {
+      for (const provider of configuredProviders(library)) {
+        pairs.push({ library, provider });
+      }
+    }
+    if (pairs.length === 0) {
       return {
         ok: false,
         error: "No providers are enabled (and credentialed where required)",
@@ -467,20 +494,21 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
     const enqueued: EmbeddingJobRecord[] = [];
     const alreadyOpen: EmbeddingJobRecord[] = [];
 
-    for (const provider of providers) {
-      const open = getOpenJobForProvider(provider);
+    for (const { library, provider } of pairs) {
+      const concrete = formatJobTarget(library, provider);
+      const open = getOpenJobForTarget(concrete);
       if (open) {
         alreadyOpen.push(open);
         continue;
       }
-      enqueued.push(insertPendingJob(provider));
+      enqueued.push(insertPendingJob(library, provider));
     }
 
     if (enqueued.length === 0) {
       return {
         ok: false,
         error:
-          "All configured providers already have a pending or running reindex job",
+          "All configured providers already have a pending or running reindex job for saves and likes",
         status: 409,
         job: getActiveEmbeddingJob() ?? alreadyOpen[0],
         jobs: alreadyOpen,
@@ -503,29 +531,40 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
     };
   }
 
-  if (!isProviderConfigured(target)) {
+  const parsed = parseLibraryJobTarget(target);
+  if (!parsed || parsed.kind !== "provider") {
     return {
       ok: false,
-      error: `${target} is not enabled — turn it on in Settings (and add credentials if needed)`,
+      error:
+        "provider must be one of: local, ollama, openai, voyage, likes-local, likes-ollama, likes-openai, likes-voyage, all-configured",
       status: 400,
     };
   }
 
-  const open = getOpenJobForProvider(target);
+  if (!isProviderConfigured(parsed.provider, parsed.library)) {
+    return {
+      ok: false,
+      error: `${parsed.provider} is not enabled for ${parsed.library} — turn it on in Settings (and add credentials if needed)`,
+      status: 400,
+    };
+  }
+
+  const concrete = formatJobTarget(parsed.library, parsed.provider);
+  const open = getOpenJobForTarget(concrete);
   if (open) {
     return {
       ok: false,
       error:
         open.state === "running"
-          ? `A reindex job for ${target} is already running.`
-          : `A reindex job for ${target} is already queued.`,
+          ? `A reindex job for ${concrete} is already running.`
+          : `A reindex job for ${concrete} is already queued.`,
       status: 409,
       job: open,
       jobs: [open],
     };
   }
 
-  const created = insertPendingJob(target);
+  const created = insertPendingJob(parsed.library, parsed.provider);
   pumpQueue();
   const job = getEmbeddingJob(created.id) ?? created;
   return { ok: true, job, jobs: [job] };

@@ -3,9 +3,11 @@ import {
   getOllamaSettings,
   getOpenAiSettings,
   getPreferredEmbeddingProvider,
+  getProviderLibraryEnables,
   getVoyageSettings,
-  isLocalEnabled,
   setAppSetting,
+  setProviderLibraryEnabled,
+  type LibraryEnables,
   type PreferredProvider,
 } from "./app-settings";
 import {
@@ -64,21 +66,21 @@ export type SettingsKeysResponse = {
   keyring: KeyringStatus;
   preferredProvider: PreferredProvider | null;
   timeoutMs: number;
-  local: { enabled: boolean };
+  local: { enabled: LibraryEnables };
   openai: ProviderSecretStatus & {
-    enabled: boolean;
+    enabled: LibraryEnables;
     baseUrl: string;
     model: string;
   };
   voyage: ProviderSecretStatus & {
-    enabled: boolean;
+    enabled: LibraryEnables;
     model: string;
   };
   ollama: ProviderSecretStatus & {
-    enabled: boolean;
+    enabled: LibraryEnables;
     baseUrl: string;
     model: string;
-    /** Usable for search/reindex when enabled (API key optional). */
+    /** Usable for search/reindex when enabled for either library (API key optional). */
     available: boolean;
   };
 };
@@ -88,12 +90,13 @@ export function getSettingsKeysStatus(): SettingsKeysResponse {
   const openai = getOpenAiSettings();
   const voyage = getVoyageSettings();
   const ollamaSecret = getSecretStatus("ollama");
+  const localEnabled = getProviderLibraryEnables("local");
   return {
     keyring: getKeyringStatus(),
     preferredProvider: getPreferredEmbeddingProvider(),
     timeoutMs: getEmbeddingTimeoutMs(),
     local: {
-      enabled: isLocalEnabled(),
+      enabled: localEnabled,
     },
     openai: {
       ...getSecretStatus("openai"),
@@ -112,10 +115,17 @@ export function getSettingsKeysStatus(): SettingsKeysResponse {
       enabled: ollama.enabled,
       baseUrl: ollama.baseUrl,
       model: ollama.model,
-      available: ollama.enabled,
+      available: ollama.enabled.saves || ollama.enabled.likes,
     },
   };
 }
+
+/** Boolean enables both libraries; object sets only provided libraries. */
+export type LibraryEnableUpdate =
+  | boolean
+  | Partial<LibraryEnables>
+  | null
+  | undefined;
 
 export type UpdateSettingsKeysInput = {
   openaiApiKey?: string | null;
@@ -123,10 +133,10 @@ export type UpdateSettingsKeysInput = {
   ollamaApiKey?: string | null;
   ollamaBaseUrl?: string | null;
   ollamaModel?: string | null;
-  localEnabled?: boolean | null;
-  ollamaEnabled?: boolean | null;
-  openaiEnabled?: boolean | null;
-  voyageEnabled?: boolean | null;
+  localEnabled?: LibraryEnableUpdate;
+  ollamaEnabled?: LibraryEnableUpdate;
+  openaiEnabled?: LibraryEnableUpdate;
+  voyageEnabled?: LibraryEnableUpdate;
   openaiBaseUrl?: string | null;
   openaiModel?: string | null;
   voyageModel?: string | null;
@@ -143,12 +153,22 @@ function applySecretUpdate(account: KeyringAccount, value: string | null | undef
   setKeyringSecret(account, value);
 }
 
-function applyEnabledUpdate(
-  key: "local_enabled" | "ollama_enabled" | "openai_enabled" | "voyage_enabled",
-  value: boolean | null | undefined,
+function applyLibraryEnabledUpdate(
+  provider: PreferredProvider,
+  value: LibraryEnableUpdate,
 ) {
   if (value === undefined || value === null) return;
-  setAppSetting(key, value ? "1" : "0");
+  if (typeof value === "boolean") {
+    setProviderLibraryEnabled(provider, "saves", value);
+    setProviderLibraryEnabled(provider, "likes", value);
+    return;
+  }
+  if (typeof value.saves === "boolean") {
+    setProviderLibraryEnabled(provider, "saves", value.saves);
+  }
+  if (typeof value.likes === "boolean") {
+    setProviderLibraryEnabled(provider, "likes", value.likes);
+  }
 }
 
 const PROVIDERS = new Set<PreferredProvider>([
@@ -187,10 +207,10 @@ export function updateSettingsKeys(input: UpdateSettingsKeysInput): SettingsKeys
     );
   }
 
-  applyEnabledUpdate("local_enabled", input.localEnabled);
-  applyEnabledUpdate("ollama_enabled", input.ollamaEnabled);
-  applyEnabledUpdate("openai_enabled", input.openaiEnabled);
-  applyEnabledUpdate("voyage_enabled", input.voyageEnabled);
+  applyLibraryEnabledUpdate("local", input.localEnabled);
+  applyLibraryEnabledUpdate("ollama", input.ollamaEnabled);
+  applyLibraryEnabledUpdate("openai", input.openaiEnabled);
+  applyLibraryEnabledUpdate("voyage", input.voyageEnabled);
 
   if (input.openaiBaseUrl !== undefined) {
     setAppSetting("openai_base_url", input.openaiBaseUrl?.trim() || null);

@@ -38,8 +38,11 @@ export async function GET() {
  * Returns immediately with the job record(s); poll GET / status for progress.
  *
  * `provider: "all-configured"` expands to one job per enabled+usable provider
- * (queued behind any currently running job; skips providers that already have
- * a pending/running job).
+ * for both saves and likes (queued behind any currently running job; skips
+ * targets that already have a pending/running job).
+ *
+ * Concrete targets: `local` / `openai` / … (saves) or `likes-local` /
+ * `likes-openai` / … (likes).
  */
 export async function POST(request: Request) {
   try {
@@ -60,7 +63,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error:
-            "provider must be one of: local, ollama, openai, voyage, all-configured",
+            "provider must be one of: local, ollama, openai, voyage, likes-local, likes-ollama, likes-openai, likes-voyage, all-configured",
         },
         { status: 400 },
       );

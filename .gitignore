@@ -45,3 +45,5 @@ next-env.d.ts
 /data/*.db
 /data/*.db-*
 /data/uploads/
+/data/imports/
+/data/spool/

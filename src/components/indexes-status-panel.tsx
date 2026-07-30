@@ -5,8 +5,12 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
 type IndexHealth = "ready" | "partial" | "stale" | "empty" | "unavailable";
+type SearchLibrary = "saves" | "likes";
 
 type ProviderIndexStatus = {
+  library: SearchLibrary;
+  libraryLabel: string;
+  target: string;
   provider: EmbeddingProvider;
   enabled: boolean;
   hasCredentials: boolean;
@@ -33,6 +37,14 @@ type ProviderIndexStatus = {
   tableDimensions: number | null;
 };
 
+type LibraryIndexStatus = {
+  library: SearchLibrary;
+  libraryLabel: string;
+  totalItems: number;
+  ftsCount: number;
+  providers: ProviderIndexStatus[];
+};
+
 type EmbeddingJob = {
   id: number;
   target: string;
@@ -54,6 +66,10 @@ type StatusPayload = {
   totalItems: number;
   ftsCount: number;
   providers: ProviderIndexStatus[];
+  libraries?: {
+    saves: LibraryIndexStatus;
+    likes: LibraryIndexStatus;
+  };
   job: EmbeddingJob | null;
   pendingJobs: EmbeddingJob[];
   recentJobs?: EmbeddingJob[];
@@ -351,9 +367,10 @@ export function IndexesStatusPanel() {
               Reindex progress
             </h2>
             <p className="mt-0.5 text-xs text-[var(--muted)]">
-              One job runs at a time; others queue per provider. Cancel stops
-              only the active job — queued jobs keep their place. Cancel is
-              cooperative between items.
+              One job runs at a time; others queue per library+provider. Cancel
+              stops only the active job — queued jobs keep their place. Cancel
+              is cooperative between items. Reindex all configured rebuilds
+              both Saves and Likes indexes.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">
@@ -472,171 +489,199 @@ export function IndexesStatusPanel() {
         ) : null}
       </section>
 
-      <div className="flex flex-wrap gap-3 text-xs text-[var(--muted)]">
-        <span>
-          Saved items:{" "}
-          <span className="font-medium text-[var(--ink)]">
-            {data?.totalItems ?? "—"}
-          </span>
-        </span>
-        <span>
-          FTS rows:{" "}
-          <span className="font-medium text-[var(--ink)]">
-            {data?.ftsCount ?? "—"}
-          </span>
-        </span>
-      </div>
-
-      <div className="space-y-2">
-        {(data?.providers ?? []).map((provider) => {
-          const label = PROVIDER_LABELS[provider.provider];
-          const providerBusy = openTargets.has(provider.provider);
-          const canReindex =
-            provider.configured && !providerBusy && pending === null;
-          const model =
-            provider.stored?.model ?? provider.expected?.model ?? "—";
-          const dimensions =
-            provider.stored?.dimensions ??
-            provider.tableDimensions ??
-            provider.expected?.dimensions ??
-            "—";
-          const endpoint =
-            provider.stored?.endpoint ??
-            provider.expected?.endpoint ??
-            (provider.provider === "local" ? "(local hasher)" : "—");
-          return (
-            <section
-              key={provider.provider}
-              // Shared column template across every provider row so Coverage /
-              // Model / Dimensions / Endpoint / Last updated stay aligned.
-              // The <dl> uses `md:contents` so its children join this grid on desktop.
-              className="grid min-w-0 gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2.5 md:grid-cols-[minmax(132px,1.15fr)_minmax(112px,0.9fr)_minmax(88px,1fr)_minmax(64px,0.45fr)_minmax(88px,0.9fr)_minmax(96px,0.85fr)_auto] md:items-center md:gap-x-3 md:gap-y-0 lg:gap-x-4"
-              aria-labelledby={`provider-${provider.provider}`}
-            >
-              <div className="min-w-0 self-center">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h3
-                    id={`provider-${provider.provider}`}
-                    className="font-[family-name:var(--font-fraunces)] text-base leading-tight"
-                  >
-                    {label}
-                  </h3>
-                  <span
-                    className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wide ${healthStyles(provider.health)}`}
-                  >
-                    {provider.health}
+      <div className="space-y-6">
+        {(
+          [
+            data?.libraries?.saves ?? {
+              library: "saves" as const,
+              libraryLabel: "Saves",
+              totalItems: data?.totalItems ?? 0,
+              ftsCount: data?.ftsCount ?? 0,
+              providers: data?.providers ?? [],
+            },
+            data?.libraries?.likes ?? {
+              library: "likes" as const,
+              libraryLabel: "Likes",
+              totalItems: 0,
+              ftsCount: 0,
+              providers: [],
+            },
+          ] as LibraryIndexStatus[]
+        ).map((library) => (
+          <section key={library.library} className="space-y-2">
+            <div className="flex flex-wrap items-baseline justify-between gap-2">
+              <h2 className="font-[family-name:var(--font-fraunces)] text-lg">
+                {library.libraryLabel} indexes
+              </h2>
+              <div className="flex flex-wrap gap-3 text-xs text-[var(--muted)]">
+                <span>
+                  Items:{" "}
+                  <span className="font-medium text-[var(--ink)]">
+                    {library.totalItems}
                   </span>
-                </div>
-                <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
-                  {providerAvailabilityLabel(provider)}
-                  {provider.indexPresent ? " · Index present" : " · No vectors yet"}
-                  {providerBusy
-                    ? activeJob?.target === provider.provider
-                      ? " · Reindexing"
-                      : " · Queued"
-                    : ""}
-                </p>
-                {provider.hint ? (
-                  <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
-                    {provider.hint}
-                  </p>
-                ) : null}
-              </div>
-
-              <div className="min-w-0 self-center">
-                <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-[var(--muted)]">
-                  <span>
-                    Coverage{" "}
-                    <span className="font-medium text-[var(--ink)]">
-                      {provider.embeddedCount}/{provider.totalItems}
-                    </span>
+                </span>
+                <span>
+                  FTS rows:{" "}
+                  <span className="font-medium text-[var(--ink)]">
+                    {library.ftsCount}
                   </span>
-                  <span>{provider.coveragePercent}%</span>
-                </div>
-                <div
-                  className="h-1.5 overflow-hidden rounded-full bg-[var(--chip)]"
-                  role="progressbar"
-                  aria-label={`${label} index coverage`}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-valuenow={provider.coveragePercent}
-                >
-                  <div
-                    className={`h-full rounded-full transition-[width] duration-300 ${
-                      provider.health === "ready"
-                        ? "bg-[var(--accent)]"
-                        : provider.health === "stale" ||
-                            provider.health === "partial"
-                          ? "bg-[var(--warn)]"
-                          : "bg-[var(--line)]"
-                    }`}
-                    style={{
-                      width: `${Math.min(100, provider.coveragePercent)}%`,
-                    }}
-                  />
-                </div>
+                </span>
               </div>
+            </div>
 
-              <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] sm:grid-cols-4 md:contents">
-                <div className="min-w-0 self-center">
-                  <dt className="text-[var(--muted)]">Model</dt>
-                  <dd
-                    className="truncate font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]"
-                    title={model}
+            <div className="space-y-2">
+              {library.providers.map((provider) => {
+                const label = PROVIDER_LABELS[provider.provider];
+                const target = provider.target ?? provider.provider;
+                const providerBusy = openTargets.has(target);
+                const canReindex =
+                  provider.configured && !providerBusy && pending === null;
+                const model =
+                  provider.stored?.model ?? provider.expected?.model ?? "—";
+                const dimensions =
+                  provider.stored?.dimensions ??
+                  provider.tableDimensions ??
+                  provider.expected?.dimensions ??
+                  "—";
+                const endpoint =
+                  provider.stored?.endpoint ??
+                  provider.expected?.endpoint ??
+                  (provider.provider === "local" ? "(local hasher)" : "—");
+                return (
+                  <section
+                    key={target}
+                    className="grid min-w-0 gap-2.5 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3 py-2.5 md:grid-cols-[minmax(132px,1.15fr)_minmax(112px,0.9fr)_minmax(88px,1fr)_minmax(64px,0.45fr)_minmax(88px,0.9fr)_minmax(96px,0.85fr)_auto] md:items-center md:gap-x-3 md:gap-y-0 lg:gap-x-4"
+                    aria-labelledby={`provider-${target}`}
                   >
-                    {model}
-                  </dd>
-                </div>
-                <div className="min-w-0 self-center">
-                  <dt className="text-[var(--muted)]">Dimensions</dt>
-                  <dd className="font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]">
-                    {dimensions}
-                  </dd>
-                </div>
-                <div className="min-w-0 self-center">
-                  <dt className="text-[var(--muted)]">Endpoint</dt>
-                  <dd
-                    className="truncate font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]"
-                    title={endpoint}
-                  >
-                    {endpoint}
-                  </dd>
-                </div>
-                <div className="min-w-0 self-center">
-                  <dt className="text-[var(--muted)]">Last updated</dt>
-                  <dd className="truncate text-xs leading-snug text-[var(--ink)]">
-                    {formatUpdatedAt(provider.stored?.updatedAt ?? null)}
-                  </dd>
-                </div>
-              </dl>
+                    <div className="min-w-0 self-center">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3
+                          id={`provider-${target}`}
+                          className="font-[family-name:var(--font-fraunces)] text-base leading-tight"
+                        >
+                          {label}
+                        </h3>
+                        <span
+                          className={`shrink-0 rounded-full px-2 py-0.5 text-[9px] font-medium uppercase tracking-wide ${healthStyles(provider.health)}`}
+                        >
+                          {provider.health}
+                        </span>
+                      </div>
+                      <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
+                        {providerAvailabilityLabel(provider)}
+                        {provider.indexPresent
+                          ? " · Index present"
+                          : " · No vectors yet"}
+                        {providerBusy
+                          ? activeJob?.target === target
+                            ? " · Reindexing"
+                            : " · Queued"
+                          : ""}
+                      </p>
+                      {provider.hint ? (
+                        <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
+                          {provider.hint}
+                        </p>
+                      ) : null}
+                    </div>
 
-              <div className="flex items-center justify-start self-center md:justify-end md:min-w-20">
-                {provider.configured ? (
-                  <button
-                    type="button"
-                    className={primaryButton}
-                    disabled={!canReindex}
-                    onClick={() => void startReindex(provider.provider)}
-                  >
-                    {pending === provider.provider
-                      ? "Starting…"
-                      : providerBusy
-                        ? activeJob?.target === provider.provider
-                          ? "Running…"
-                          : "Queued"
-                        : provider.health === "ready"
-                          ? "Rebuild"
-                          : "Reindex"}
-                  </button>
-                ) : (
-                  <Link className={secondaryButton} href="/settings">
-                    Enable
-                  </Link>
-                )}
-              </div>
-            </section>
-          );
-        })}
+                    <div className="min-w-0 self-center">
+                      <div className="mb-1 flex items-center justify-between gap-2 text-[11px] text-[var(--muted)]">
+                        <span>
+                          Coverage{" "}
+                          <span className="font-medium text-[var(--ink)]">
+                            {provider.embeddedCount}/{provider.totalItems}
+                          </span>
+                        </span>
+                        <span>{provider.coveragePercent}%</span>
+                      </div>
+                      <div
+                        className="h-1.5 overflow-hidden rounded-full bg-[var(--chip)]"
+                        role="progressbar"
+                        aria-label={`${library.libraryLabel} ${label} index coverage`}
+                        aria-valuemin={0}
+                        aria-valuemax={100}
+                        aria-valuenow={provider.coveragePercent}
+                      >
+                        <div
+                          className={`h-full rounded-full transition-[width] duration-300 ${
+                            provider.health === "ready"
+                              ? "bg-[var(--accent)]"
+                              : provider.health === "stale" ||
+                                  provider.health === "partial"
+                                ? "bg-[var(--warn)]"
+                                : "bg-[var(--line)]"
+                          }`}
+                          style={{
+                            width: `${Math.min(100, provider.coveragePercent)}%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    <dl className="grid min-w-0 grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] sm:grid-cols-4 md:contents">
+                      <div className="min-w-0 self-center">
+                        <dt className="text-[var(--muted)]">Model</dt>
+                        <dd
+                          className="truncate font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]"
+                          title={model}
+                        >
+                          {model}
+                        </dd>
+                      </div>
+                      <div className="min-w-0 self-center">
+                        <dt className="text-[var(--muted)]">Dimensions</dt>
+                        <dd className="font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]">
+                          {dimensions}
+                        </dd>
+                      </div>
+                      <div className="min-w-0 self-center">
+                        <dt className="text-[var(--muted)]">Endpoint</dt>
+                        <dd
+                          className="truncate font-[family-name:var(--font-ibm)] text-xs leading-snug text-[var(--ink)]"
+                          title={endpoint}
+                        >
+                          {endpoint}
+                        </dd>
+                      </div>
+                      <div className="min-w-0 self-center">
+                        <dt className="text-[var(--muted)]">Last updated</dt>
+                        <dd className="truncate text-xs leading-snug text-[var(--ink)]">
+                          {formatUpdatedAt(provider.stored?.updatedAt ?? null)}
+                        </dd>
+                      </div>
+                    </dl>
+
+                    <div className="flex items-center justify-start self-center md:justify-end md:min-w-20">
+                      {provider.configured ? (
+                        <button
+                          type="button"
+                          className={primaryButton}
+                          disabled={!canReindex}
+                          onClick={() => void startReindex(target)}
+                        >
+                          {pending === target
+                            ? "Starting…"
+                            : providerBusy
+                              ? activeJob?.target === target
+                                ? "Running…"
+                                : "Queued"
+                              : provider.health === "ready"
+                                ? "Rebuild"
+                                : "Reindex"}
+                        </button>
+                      ) : (
+                        <Link className={secondaryButton} href="/settings">
+                          Enable
+                        </Link>
+                      )}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+          </section>
+        ))}
       </div>
     </div>
   );

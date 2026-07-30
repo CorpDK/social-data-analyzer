@@ -38,14 +38,21 @@ export function OverviewDashboard() {
           >
             Browse saves
           </Link>
+          <Link
+            href="/likes"
+            className="rounded-full border border-[var(--line)] bg-[var(--surface)] px-5 py-2.5 text-sm font-medium text-[var(--ink)] hover:border-[var(--accent)]"
+          >
+            Browse likes
+          </Link>
         </div>
       </section>
 
-      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         {[
           { label: "Saved items", value: stats.totalItems },
-          { label: "Posts", value: stats.posts },
-          { label: "Reels", value: stats.reels },
+          { label: "Liked items", value: stats.totalLikes },
+          { label: "Posts saved", value: stats.posts },
+          { label: "Reels saved", value: stats.reels },
           { label: "Imports", value: stats.importCount },
         ].map((card) => (
           <div
@@ -65,7 +72,7 @@ export function OverviewDashboard() {
       <section className="grid gap-6 lg:grid-cols-2">
         <div className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5">
           <h2 className="font-[family-name:var(--font-fraunces)] text-xl">
-            Top creators
+            Top creators (saves)
           </h2>
           {stats.topAuthors.length === 0 ? (
             <p className="mt-4 text-sm text-[var(--muted)]">
@@ -95,6 +102,38 @@ export function OverviewDashboard() {
 
         <div className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5">
           <h2 className="font-[family-name:var(--font-fraunces)] text-xl">
+            Top creators (likes)
+          </h2>
+          {stats.topLikedAuthors.length === 0 ? (
+            <p className="mt-4 text-sm text-[var(--muted)]">
+              No liked creators yet. Import an export that includes likes.
+            </p>
+          ) : (
+            <ul className="mt-4 space-y-2">
+              {stats.topLikedAuthors.map((author) => (
+                <li
+                  key={author.authorUsername}
+                  className="flex items-center justify-between gap-3 border-b border-[var(--line)]/70 py-2 last:border-0"
+                >
+                  <Link
+                    href={`/likes?author=${encodeURIComponent(author.authorUsername)}`}
+                    className="font-medium hover:text-[var(--accent)]"
+                  >
+                    @{author.authorUsername}
+                  </Link>
+                  <span className="font-[family-name:var(--font-ibm)] text-xs text-[var(--muted)]">
+                    {author.total}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+
+      <section className="grid gap-6 lg:grid-cols-2">
+        <div className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5 lg:col-span-2">
+          <h2 className="font-[family-name:var(--font-fraunces)] text-xl">
             Collections
           </h2>
           {stats.collections.length === 0 ? (
@@ -102,7 +141,7 @@ export function OverviewDashboard() {
               Named collections appear when present in the export.
             </p>
           ) : (
-            <ul className="mt-4 space-y-2">
+            <ul className="mt-4 grid gap-2 sm:grid-cols-2">
               {stats.collections.map((collection) => (
                 <li
                   key={collection.collectionName}

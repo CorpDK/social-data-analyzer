@@ -3,6 +3,13 @@ import { getSqlite } from "../db";
 
 export type PreferredProvider = "local" | "ollama" | "openai" | "voyage";
 
+export type SearchLibrarySetting = "saves" | "likes";
+
+export type LibraryEnables = {
+  saves: boolean;
+  likes: boolean;
+};
+
 export type AppSettingKey =
   | "local_enabled"
   | "ollama_base_url"
@@ -10,6 +17,14 @@ export type AppSettingKey =
   | "ollama_enabled"
   | "openai_enabled"
   | "voyage_enabled"
+  | "saves_local_enabled"
+  | "likes_local_enabled"
+  | "saves_ollama_enabled"
+  | "likes_ollama_enabled"
+  | "saves_openai_enabled"
+  | "likes_openai_enabled"
+  | "saves_voyage_enabled"
+  | "likes_voyage_enabled"
   | "embedding_provider"
   | "openai_base_url"
   | "openai_embedding_model"
@@ -29,6 +44,35 @@ const PROVIDER_VALUES = new Set<PreferredProvider>([
   "openai",
   "voyage",
 ]);
+
+const LEGACY_ENABLED_KEYS: Record<PreferredProvider, AppSettingKey> = {
+  local: "local_enabled",
+  ollama: "ollama_enabled",
+  openai: "openai_enabled",
+  voyage: "voyage_enabled",
+};
+
+const LIBRARY_ENABLED_KEYS: Record<
+  PreferredProvider,
+  Record<SearchLibrarySetting, AppSettingKey>
+> = {
+  local: {
+    saves: "saves_local_enabled",
+    likes: "likes_local_enabled",
+  },
+  ollama: {
+    saves: "saves_ollama_enabled",
+    likes: "likes_ollama_enabled",
+  },
+  openai: {
+    saves: "saves_openai_enabled",
+    likes: "likes_openai_enabled",
+  },
+  voyage: {
+    saves: "saves_voyage_enabled",
+    likes: "likes_voyage_enabled",
+  },
+};
 
 export function ensureAppSettingsTable(
   sqlite: Database.Database = getSqlite(),
@@ -95,9 +139,11 @@ function parseProvider(raw: string | null | undefined): PreferredProvider | null
 
 /**
  * Explicit enable flags in app_settings. Credentials alone never enable an index.
- * Defaults: local on; openai / voyage / ollama off.
+ * Per-library keys: `saves_openai_enabled`, `likes_openai_enabled`, …
+ * Legacy shared keys (`openai_enabled`, …): if set, apply to both libraries.
+ * Defaults: local on for both; openai / voyage / ollama off for both.
  * Env `*_ENABLED=1|0` (and legacy `EMBEDDING_OLLAMA`) are CI-only fallbacks when
- * the sqlite key is unset.
+ * sqlite keys are unset.
  */
 function parseEnabledFlag(
   sqliteValue: string | null,
@@ -114,46 +160,163 @@ function parseEnabledFlag(
   return defaultEnabled;
 }
 
-export function isLocalEnabled(sqlite: Database.Database = getSqlite()): boolean {
-  return parseEnabledFlag(
-    getAppSetting("local_enabled", sqlite),
-    [process.env.LOCAL_ENABLED],
-    true,
-  );
+function defaultEnabledForProvider(provider: PreferredProvider): boolean {
+  return provider === "local";
 }
 
-export function isOpenAiEnabled(sqlite: Database.Database = getSqlite()): boolean {
-  return parseEnabledFlag(
-    getAppSetting("openai_enabled", sqlite),
-    [process.env.OPENAI_ENABLED],
-    false,
-  );
-}
-
-export function isVoyageEnabled(sqlite: Database.Database = getSqlite()): boolean {
-  return parseEnabledFlag(
-    getAppSetting("voyage_enabled", sqlite),
-    [process.env.VOYAGE_ENABLED],
-    false,
-  );
-}
-
-export function isOllamaEnabled(sqlite: Database.Database = getSqlite()): boolean {
-  return parseEnabledFlag(
-    getAppSetting("ollama_enabled", sqlite),
-    [process.env.OLLAMA_ENABLED, process.env.EMBEDDING_OLLAMA],
-    false,
-  );
+function envCandidatesForProvider(
+  provider: PreferredProvider,
+  library: SearchLibrarySetting,
+): Array<string | null | undefined> {
+  const libraryPrefix = library.toUpperCase();
+  if (provider === "local") {
+    return [
+      process.env[`${libraryPrefix}_LOCAL_ENABLED`],
+      process.env.LOCAL_ENABLED,
+    ];
+  }
+  if (provider === "ollama") {
+    return [
+      process.env[`${libraryPrefix}_OLLAMA_ENABLED`],
+      process.env.OLLAMA_ENABLED,
+      process.env.EMBEDDING_OLLAMA,
+    ];
+  }
+  if (provider === "openai") {
+    return [
+      process.env[`${libraryPrefix}_OPENAI_ENABLED`],
+      process.env.OPENAI_ENABLED,
+    ];
+  }
+  return [
+    process.env[`${libraryPrefix}_VOYAGE_ENABLED`],
+    process.env.VOYAGE_ENABLED,
+  ];
 }
 
 export function isProviderIndexEnabled(
   provider: PreferredProvider,
+  library: SearchLibrarySetting,
   sqlite: Database.Database = getSqlite(),
 ): boolean {
-  if (provider === "local") return isLocalEnabled(sqlite);
-  if (provider === "ollama") return isOllamaEnabled(sqlite);
-  if (provider === "openai") return isOpenAiEnabled(sqlite);
-  return isVoyageEnabled(sqlite);
+  const libraryKey = LIBRARY_ENABLED_KEYS[provider][library];
+  const libraryValue = getAppSetting(libraryKey, sqlite);
+  if (libraryValue === "1" || libraryValue === "0") {
+    return libraryValue === "1";
+  }
+
+  const legacyKey = LEGACY_ENABLED_KEYS[provider];
+  const legacyValue = getAppSetting(legacyKey, sqlite);
+  if (legacyValue === "1" || legacyValue === "0") {
+    // Old shared flag on → both libraries; absent → defaults below.
+    return legacyValue === "1";
+  }
+
+  return parseEnabledFlag(
+    null,
+    envCandidatesForProvider(provider, library),
+    defaultEnabledForProvider(provider),
+  );
+}
+
+/** True when enabled for the given library, or either library if omitted. */
+export function isLocalEnabled(
+  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  maybeSqlite?: Database.Database,
+): boolean {
+  if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    return isProviderIndexEnabled("local", libraryOrSqlite, maybeSqlite);
+  }
+  const sqlite = libraryOrSqlite ?? getSqlite();
+  return (
+    isProviderIndexEnabled("local", "saves", sqlite) ||
+    isProviderIndexEnabled("local", "likes", sqlite)
+  );
+}
+
+export function isOpenAiEnabled(
+  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  maybeSqlite?: Database.Database,
+): boolean {
+  if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    return isProviderIndexEnabled("openai", libraryOrSqlite, maybeSqlite);
+  }
+  const sqlite = libraryOrSqlite ?? getSqlite();
+  return (
+    isProviderIndexEnabled("openai", "saves", sqlite) ||
+    isProviderIndexEnabled("openai", "likes", sqlite)
+  );
+}
+
+export function isVoyageEnabled(
+  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  maybeSqlite?: Database.Database,
+): boolean {
+  if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    return isProviderIndexEnabled("voyage", libraryOrSqlite, maybeSqlite);
+  }
+  const sqlite = libraryOrSqlite ?? getSqlite();
+  return (
+    isProviderIndexEnabled("voyage", "saves", sqlite) ||
+    isProviderIndexEnabled("voyage", "likes", sqlite)
+  );
+}
+
+export function isOllamaEnabled(
+  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  maybeSqlite?: Database.Database,
+): boolean {
+  if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    return isProviderIndexEnabled("ollama", libraryOrSqlite, maybeSqlite);
+  }
+  const sqlite = libraryOrSqlite ?? getSqlite();
+  return (
+    isProviderIndexEnabled("ollama", "saves", sqlite) ||
+    isProviderIndexEnabled("ollama", "likes", sqlite)
+  );
+}
+
+export function getProviderLibraryEnables(
+  provider: PreferredProvider,
+  sqlite: Database.Database = getSqlite(),
+): LibraryEnables {
+  return {
+    saves: isProviderIndexEnabled(provider, "saves", sqlite),
+    likes: isProviderIndexEnabled(provider, "likes", sqlite),
+  };
+}
+
+export function setProviderLibraryEnabled(
+  provider: PreferredProvider,
+  library: SearchLibrarySetting,
+  enabled: boolean,
+  sqlite: Database.Database = getSqlite(),
+) {
+  const otherLibrary: SearchLibrarySetting =
+    library === "saves" ? "likes" : "saves";
+  const otherKey = LIBRARY_ENABLED_KEYS[provider][otherLibrary];
+  const otherValue = getAppSetting(otherKey, sqlite);
+  if (otherValue !== "1" && otherValue !== "0") {
+    // Persist the other library from legacy/default before dropping the shared key.
+    const legacyValue = getAppSetting(LEGACY_ENABLED_KEYS[provider], sqlite);
+    if (legacyValue === "1" || legacyValue === "0") {
+      setAppSetting(otherKey, legacyValue, sqlite);
+    } else {
+      setAppSetting(
+        otherKey,
+        defaultEnabledForProvider(provider) ? "1" : "0",
+        sqlite,
+      );
+    }
+  }
+
+  setAppSetting(
+    LIBRARY_ENABLED_KEYS[provider][library],
+    enabled ? "1" : "0",
+    sqlite,
+  );
+  // Drop legacy shared key once per-library keys exist so reads stay consistent.
+  setAppSetting(LEGACY_ENABLED_KEYS[provider], null, sqlite);
 }
 
 export function getOllamaSettings(sqlite: Database.Database = getSqlite()) {
@@ -167,14 +330,14 @@ export function getOllamaSettings(sqlite: Database.Database = getSqlite()) {
       getAppSetting("ollama_embedding_model", sqlite),
       process.env.OLLAMA_EMBEDDING_MODEL,
     ) || DEFAULT_OLLAMA_MODEL;
-  const enabled = isOllamaEnabled(sqlite);
+  const enabled = getProviderLibraryEnables("ollama", sqlite);
 
   return {
     baseUrl,
     model,
     enabled,
-    /** True when the index is explicitly enabled (credentials/URL alone do not count). */
-    configured: enabled,
+    /** True when the index is explicitly enabled for either library. */
+    configured: enabled.saves || enabled.likes,
   };
 }
 
@@ -190,7 +353,7 @@ export function getOpenAiSettings(sqlite: Database.Database = getSqlite()) {
         getAppSetting("openai_embedding_model", sqlite),
         process.env.EMBEDDING_MODEL,
       ) || DEFAULT_OPENAI_MODEL,
-    enabled: isOpenAiEnabled(sqlite),
+    enabled: getProviderLibraryEnables("openai", sqlite),
   };
 }
 
@@ -201,7 +364,7 @@ export function getVoyageSettings(sqlite: Database.Database = getSqlite()) {
         getAppSetting("voyage_model", sqlite),
         process.env.VOYAGE_MODEL,
       ) || DEFAULT_VOYAGE_MODEL,
-    enabled: isVoyageEnabled(sqlite),
+    enabled: getProviderLibraryEnables("voyage", sqlite),
   };
 }
 
@@ -234,9 +397,9 @@ export function getEmbeddingTimeoutMs(
 export type RuntimeAppSettings = {
   preferredProvider: PreferredProvider | null;
   timeoutMs: number;
-  local: { enabled: boolean };
-  openai: { baseUrl: string; model: string; enabled: boolean };
-  voyage: { model: string; enabled: boolean };
+  local: { enabled: LibraryEnables };
+  openai: { baseUrl: string; model: string; enabled: LibraryEnables };
+  voyage: { model: string; enabled: LibraryEnables };
   ollama: ReturnType<typeof getOllamaSettings>;
 };
 
@@ -247,7 +410,7 @@ export function getRuntimeAppSettings(
   return {
     preferredProvider: getPreferredEmbeddingProvider(sqlite),
     timeoutMs: getEmbeddingTimeoutMs(sqlite),
-    local: { enabled: isLocalEnabled(sqlite) },
+    local: { enabled: getProviderLibraryEnables("local", sqlite) },
     openai: getOpenAiSettings(sqlite),
     voyage: getVoyageSettings(sqlite),
     ollama: getOllamaSettings(sqlite),

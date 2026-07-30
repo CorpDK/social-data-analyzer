@@ -22,8 +22,9 @@ export default function IndexesPage() {
           </Link>
         </div>
         <p className="max-w-3xl text-sm text-[var(--muted)]">
-          Coverage and health for every embedding provider. After enabling a
-          provider in Settings, run Reindex here to build its vector table.
+          Coverage and health for Saves and Likes embedding indexes. After
+          enabling a provider in Settings, run Reindex here to build its vector
+          table. Reindex all configured rebuilds both libraries.
         </p>
       </section>
 

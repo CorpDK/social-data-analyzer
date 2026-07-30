@@ -9,6 +9,7 @@ type SecretStatus = {
 
 type PreferredProvider = "local" | "ollama" | "openai" | "voyage";
 type SecretField = "openaiApiKey" | "voyageApiKey" | "ollamaApiKey";
+type LibraryEnables = { saves: boolean; likes: boolean };
 
 type SettingsPayload = {
   keyring: {
@@ -18,11 +19,11 @@ type SettingsPayload = {
   };
   preferredProvider: PreferredProvider | null;
   timeoutMs: number;
-  local: { enabled: boolean };
-  openai: SecretStatus & { enabled: boolean; baseUrl: string; model: string };
-  voyage: SecretStatus & { enabled: boolean; model: string };
+  local: { enabled: LibraryEnables };
+  openai: SecretStatus & { enabled: LibraryEnables; baseUrl: string; model: string };
+  voyage: SecretStatus & { enabled: LibraryEnables; model: string };
   ollama: SecretStatus & {
-    enabled: boolean;
+    enabled: LibraryEnables;
     baseUrl: string;
     model: string;
     available: boolean;
@@ -53,10 +54,22 @@ export function SettingsForm() {
   const [openaiModel, setOpenaiModel] = useState("text-embedding-3-small");
   const [voyageModel, setVoyageModel] = useState("voyage-4-lite");
   const [ollamaModel, setOllamaModel] = useState("qwen3-embedding:0.6b");
-  const [localEnabled, setLocalEnabled] = useState(true);
-  const [openaiEnabled, setOpenaiEnabled] = useState(false);
-  const [voyageEnabled, setVoyageEnabled] = useState(false);
-  const [ollamaEnabled, setOllamaEnabled] = useState(false);
+  const [localEnabled, setLocalEnabled] = useState<LibraryEnables>({
+    saves: true,
+    likes: true,
+  });
+  const [openaiEnabled, setOpenaiEnabled] = useState<LibraryEnables>({
+    saves: false,
+    likes: false,
+  });
+  const [voyageEnabled, setVoyageEnabled] = useState<LibraryEnables>({
+    saves: false,
+    likes: false,
+  });
+  const [ollamaEnabled, setOllamaEnabled] = useState<LibraryEnables>({
+    saves: false,
+    likes: false,
+  });
 
   const applyPayload = useCallback((json: SettingsPayload) => {
     setData(json);
@@ -107,7 +120,9 @@ export function SettingsForm() {
     };
   }, [applyPayload]);
 
-  async function update(body: Record<string, string | number | boolean>) {
+  async function update(
+    body: Record<string, string | number | boolean | LibraryEnables>,
+  ) {
     const response = await fetch("/api/settings/keys", {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -210,36 +225,45 @@ export function SettingsForm() {
     },
   ];
 
-  const indexToggles = [
+  const indexRows = [
     {
-      id: "localEnabled",
-      label: "Enable Local (basic) index",
+      id: "local",
+      label: "Local (basic)",
       hint: "Offline feature-hash vectors. FTS keyword search always stays on.",
-      checked: localEnabled,
-      setChecked: setLocalEnabled,
+      enabled: localEnabled,
+      setEnabled: setLocalEnabled,
     },
     {
-      id: "openaiEnabled",
-      label: "Enable OpenAI index",
+      id: "openai",
+      label: "OpenAI",
       hint: "Requires an OpenAI API key. Saving a key does not turn this on.",
-      checked: openaiEnabled,
-      setChecked: setOpenaiEnabled,
+      enabled: openaiEnabled,
+      setEnabled: setOpenaiEnabled,
     },
     {
-      id: "voyageEnabled",
-      label: "Enable Voyage index",
+      id: "voyage",
+      label: "Voyage",
       hint: "Requires a Voyage API key. Saving a key does not turn this on.",
-      checked: voyageEnabled,
-      setChecked: setVoyageEnabled,
+      enabled: voyageEnabled,
+      setEnabled: setVoyageEnabled,
     },
     {
-      id: "ollamaEnabled",
-      label: "Enable Ollama index",
+      id: "ollama",
+      label: "Ollama",
       hint: "Requires a running Ollama with the selected model pulled.",
-      checked: ollamaEnabled,
-      setChecked: setOllamaEnabled,
+      enabled: ollamaEnabled,
+      setEnabled: setOllamaEnabled,
     },
   ];
+
+  function setLibraryEnable(
+    setEnabled: (next: LibraryEnables) => void,
+    current: LibraryEnables,
+    library: keyof LibraryEnables,
+    checked: boolean,
+  ) {
+    setEnabled({ ...current, [library]: checked });
+  }
 
   return (
     <form onSubmit={saveSettings} className="space-y-4">
@@ -302,28 +326,69 @@ export function SettingsForm() {
               Indexes
             </h2>
             <p className="mt-0.5 text-xs text-[var(--muted)]">
-              Explicitly enable each index. API keys and URLs alone do not activate search or reindex.
+              Enable each provider for Saves, Likes, or both. API keys and URLs alone do not activate search or reindex.
             </p>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2">
-            {indexToggles.map((toggle) => (
-              <label
-                key={toggle.id}
-                className="flex cursor-pointer items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--bg)]/45 px-3 py-2.5 text-sm"
-              >
-                <span>
-                  <span className="block font-medium">{toggle.label}</span>
-                  <span className="block text-xs text-[var(--muted)]">{toggle.hint}</span>
-                </span>
-                <input
-                  type="checkbox"
-                  name={toggle.id}
-                  checked={toggle.checked}
-                  onChange={(event) => toggle.setChecked(event.target.checked)}
-                  className="size-4 shrink-0 accent-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
-                />
-              </label>
-            ))}
+          <div className="overflow-x-auto rounded-xl border border-[var(--line)] bg-[var(--bg)]/45">
+            <table className="w-full min-w-[22rem] border-collapse text-sm">
+              <thead>
+                <tr className="border-b border-[var(--line)] text-left text-xs text-[var(--muted)]">
+                  <th scope="col" className="px-3 py-2 font-medium">
+                    Provider
+                  </th>
+                  <th scope="col" className="w-20 px-3 py-2 text-center font-medium">
+                    Saves
+                  </th>
+                  <th scope="col" className="w-20 px-3 py-2 text-center font-medium">
+                    Likes
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {indexRows.map((row) => (
+                  <tr key={row.id} className="border-b border-[var(--line)]/70 last:border-b-0">
+                    <th scope="row" className="px-3 py-2.5 text-left font-normal">
+                      <span className="block font-medium">{row.label}</span>
+                      <span className="block text-xs text-[var(--muted)]">{row.hint}</span>
+                    </th>
+                    <td className="px-3 py-2.5 text-center">
+                      <input
+                        type="checkbox"
+                        name={`${row.id}EnabledSaves`}
+                        aria-label={`Enable ${row.label} for Saves`}
+                        checked={row.enabled.saves}
+                        onChange={(event) =>
+                          setLibraryEnable(
+                            row.setEnabled,
+                            row.enabled,
+                            "saves",
+                            event.target.checked,
+                          )
+                        }
+                        className="size-4 accent-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                      />
+                    </td>
+                    <td className="px-3 py-2.5 text-center">
+                      <input
+                        type="checkbox"
+                        name={`${row.id}EnabledLikes`}
+                        aria-label={`Enable ${row.label} for Likes`}
+                        checked={row.enabled.likes}
+                        onChange={(event) =>
+                          setLibraryEnable(
+                            row.setEnabled,
+                            row.enabled,
+                            "likes",
+                            event.target.checked,
+                          )
+                        }
+                        className="size-4 accent-[var(--accent)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--accent)]"
+                      />
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         </section>
 

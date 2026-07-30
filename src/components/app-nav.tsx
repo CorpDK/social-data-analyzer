@@ -7,6 +7,7 @@ import { ThemeSwitcher } from "@/components/theme-switcher";
 const links = [
   { href: "/", label: "Overview" },
   { href: "/saves", label: "Saves" },
+  { href: "/likes", label: "Likes" },
   { href: "/indexes", label: "Indexes" },
   { href: "/schemas", label: "Schemas" },
   { href: "/import", label: "Import" },

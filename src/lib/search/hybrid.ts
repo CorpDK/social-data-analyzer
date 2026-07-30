@@ -10,8 +10,10 @@ import {
 import { resolveSearchProvider } from "./providers";
 import {
   vectorIndexMatchesConfig,
+  type SearchLibrary,
   type VectorIndexName,
 } from "./sync";
+import { vectorTableName } from "./library";
 
 export type SearchMode =
   | "hybrid"
@@ -30,7 +32,7 @@ export type RankedHit = {
 const RRF_K = 60;
 
 function ftsToken(raw: string): string | null {
-  const cleaned = raw.replace(/["]/g, "").trim();
+  const cleaned = raw.replace(/["']/g, "").trim();
   if (!cleaned) return null;
   return `"${cleaned}"*`;
 }
@@ -79,17 +81,19 @@ function rrfMerge(
 }
 
 export function searchFts(
+  library: SearchLibrary,
   query: string,
   limit = 200,
 ): Array<{ id: number; rank: number }> {
   const match = buildFtsQuery(query);
   if (!match) return [];
+  const table = library === "saves" ? "saved_items_fts" : "liked_items_fts";
   try {
     return getSqlite()
       .prepare(
         `SELECT rowid AS id, rank
-         FROM saved_items_fts
-         WHERE saved_items_fts MATCH ?
+         FROM ${table}
+         WHERE ${table} MATCH ?
          ORDER BY rank
          LIMIT ?`,
       )
@@ -105,17 +109,18 @@ type VecSearchResult = {
 };
 
 async function searchVectorIndex(
+  library: SearchLibrary,
   index: VectorIndexName,
   config: EmbeddingConfig,
   query: string,
   limit: number,
 ): Promise<VecSearchResult> {
   const sqlite = getSqlite();
-  if (!vectorIndexMatchesConfig(index, config, sqlite)) {
+  if (!vectorIndexMatchesConfig(library, index, config, sqlite)) {
     return { hits: [], status: "unavailable" };
   }
 
-  const table = vectorTable(index);
+  const table = vectorTableName(library, index);
   const fetchK = Math.min(Math.max(limit * 2, 32), 500);
   try {
     const embedding = await embedText(query, config, "query");
@@ -146,10 +151,6 @@ async function searchVectorIndex(
   }
 }
 
-function vectorTable(index: VectorIndexName): string {
-  return `saved_items_vec_${index}`;
-}
-
 export type HybridSearchResult = {
   hits: RankedHit[];
   mode: SearchMode;
@@ -158,19 +159,21 @@ export type HybridSearchResult = {
   providerFallbackReason?: string;
 };
 
-export async function hybridSearchIds(
+async function hybridSearchIdsForLibrary(
+  library: SearchLibrary,
   query: string,
   limit = 200,
   requestedProvider?: EmbeddingProvider | null,
 ): Promise<HybridSearchResult> {
-  const resolved = resolveSearchProvider(requestedProvider ?? null);
-  const ftsHits = searchFts(query, limit);
+  const resolved = resolveSearchProvider(requestedProvider ?? null, library);
+  const ftsHits = searchFts(library, query, limit);
   let vecResult: VecSearchResult;
   let usedFallback = false;
   let activeProvider = resolved.provider;
 
   if (resolved.provider === "local") {
     vecResult = await searchVectorIndex(
+      library,
       "local",
       localEmbeddingConfig(),
       query,
@@ -179,6 +182,7 @@ export async function hybridSearchIds(
   } else {
     const remoteConfig = embeddingConfigForProvider(resolved.provider);
     vecResult = await searchVectorIndex(
+      library,
       resolved.provider,
       remoteConfig,
       query,
@@ -188,6 +192,7 @@ export async function hybridSearchIds(
       usedFallback = true;
       activeProvider = "local";
       vecResult = await searchVectorIndex(
+        library,
         "local",
         localEmbeddingConfig(),
         query,
@@ -240,4 +245,20 @@ export async function hybridSearchIds(
     provider: activeProvider,
     providerFallback: false,
   };
+}
+
+export async function hybridSearchIds(
+  query: string,
+  limit = 200,
+  requestedProvider?: EmbeddingProvider | null,
+): Promise<HybridSearchResult> {
+  return hybridSearchIdsForLibrary("saves", query, limit, requestedProvider);
+}
+
+export async function hybridSearchLikedIds(
+  query: string,
+  limit = 200,
+  requestedProvider?: EmbeddingProvider | null,
+): Promise<HybridSearchResult> {
+  return hybridSearchIdsForLibrary("likes", query, limit, requestedProvider);
 }

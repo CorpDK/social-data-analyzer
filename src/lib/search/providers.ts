@@ -11,8 +11,10 @@ import {
   getPreferredEmbeddingProvider,
   isProviderIndexEnabled,
 } from "../settings/app-settings";
+import type { SearchLibrary } from "./library";
 
 export type ProviderAvailability = {
+  library: SearchLibrary;
   available: EmbeddingProvider[];
   configured: Record<EmbeddingProvider, boolean>;
   enabled: Record<EmbeddingProvider, boolean>;
@@ -26,60 +28,74 @@ export function providerHasCredentials(provider: EmbeddingProvider): boolean {
   return Boolean(getVoyageApiKey());
 }
 
-export function isProviderEnabled(provider: EmbeddingProvider): boolean {
-  return isProviderIndexEnabled(provider);
+export function isProviderEnabled(
+  provider: EmbeddingProvider,
+  library: SearchLibrary,
+): boolean {
+  return isProviderIndexEnabled(provider, library);
 }
 
 /**
  * Usable for search / reindex / import embedding:
- * explicit enable + credentials when required.
+ * explicit enable for that library + credentials when required.
  * Storing an API key alone never makes a provider configured.
  */
-export function isProviderConfigured(provider: EmbeddingProvider): boolean {
-  return isProviderEnabled(provider) && providerHasCredentials(provider);
+export function isProviderConfigured(
+  provider: EmbeddingProvider,
+  library: SearchLibrary,
+): boolean {
+  return isProviderEnabled(provider, library) && providerHasCredentials(provider);
 }
 
-/** Enabled + credentialed neural providers (excludes local). */
-export function configuredRemoteProviders(): EmbeddingProvider[] {
+/** Enabled + credentialed neural providers for a library (excludes local). */
+export function configuredRemoteProviders(
+  library: SearchLibrary,
+): EmbeddingProvider[] {
   const providers: EmbeddingProvider[] = [];
-  if (isProviderConfigured("ollama")) providers.push("ollama");
-  if (isProviderConfigured("openai")) providers.push("openai");
-  if (isProviderConfigured("voyage")) providers.push("voyage");
+  if (isProviderConfigured("ollama", library)) providers.push("ollama");
+  if (isProviderConfigured("openai", library)) providers.push("openai");
+  if (isProviderConfigured("voyage", library)) providers.push("voyage");
   return providers;
 }
 
-/** All enabled + credentialed providers, local first when enabled. */
-export function configuredProviders(): EmbeddingProvider[] {
+/** All enabled + credentialed providers for a library, local first when enabled. */
+export function configuredProviders(
+  library: SearchLibrary,
+): EmbeddingProvider[] {
   const providers: EmbeddingProvider[] = [];
-  if (isProviderConfigured("local")) providers.push("local");
-  providers.push(...configuredRemoteProviders());
+  if (isProviderConfigured("local", library)) providers.push("local");
+  providers.push(...configuredRemoteProviders(library));
   return providers;
 }
 
-export function defaultSearchProvider(): EmbeddingProvider {
+export function defaultSearchProvider(
+  library: SearchLibrary,
+): EmbeddingProvider {
   const preferred = getPreferredEmbeddingProvider();
-  if (preferred && isProviderConfigured(preferred)) return preferred;
-  if (isProviderConfigured("openai")) return "openai";
-  if (isProviderConfigured("voyage")) return "voyage";
-  if (isProviderConfigured("ollama")) return "ollama";
-  if (isProviderConfigured("local")) return "local";
+  if (preferred && isProviderConfigured(preferred, library)) return preferred;
+  if (isProviderConfigured("openai", library)) return "openai";
+  if (isProviderConfigured("voyage", library)) return "voyage";
+  if (isProviderConfigured("ollama", library)) return "ollama";
+  if (isProviderConfigured("local", library)) return "local";
   // Hard fallback for hybrid/vec code paths when every index is disabled.
   return "local";
 }
 
-export function getProviderAvailability(): ProviderAvailability {
+export function getProviderAvailability(
+  library: SearchLibrary = "saves",
+): ProviderAvailability {
   const enabled = {
-    local: isProviderEnabled("local"),
-    ollama: isProviderEnabled("ollama"),
-    openai: isProviderEnabled("openai"),
-    voyage: isProviderEnabled("voyage"),
+    local: isProviderEnabled("local", library),
+    ollama: isProviderEnabled("ollama", library),
+    openai: isProviderEnabled("openai", library),
+    voyage: isProviderEnabled("voyage", library),
   } satisfies Record<EmbeddingProvider, boolean>;
 
   const configured = {
-    local: isProviderConfigured("local"),
-    ollama: isProviderConfigured("ollama"),
-    openai: isProviderConfigured("openai"),
-    voyage: isProviderConfigured("voyage"),
+    local: isProviderConfigured("local", library),
+    ollama: isProviderConfigured("ollama", library),
+    openai: isProviderConfigured("openai", library),
+    voyage: isProviderConfigured("voyage", library),
   } satisfies Record<EmbeddingProvider, boolean>;
 
   const available: EmbeddingProvider[] = [];
@@ -89,10 +105,11 @@ export function getProviderAvailability(): ProviderAvailability {
   if (configured.voyage) available.push("voyage");
 
   return {
+    library,
     available,
     configured,
     enabled,
-    default: defaultSearchProvider(),
+    default: defaultSearchProvider(library),
   };
 }
 
@@ -113,8 +130,9 @@ export function parseProviderParam(
 
 export function resolveSearchProvider(
   requested: EmbeddingProvider | null | undefined,
+  library: SearchLibrary,
 ): ResolvedSearchProvider {
-  const availability = getProviderAvailability();
+  const availability = getProviderAvailability(library);
   const fallbackDefault = availability.default;
 
   if (!requested) {
@@ -128,12 +146,12 @@ export function resolveSearchProvider(
   if (!availability.available.includes(requested)) {
     const fallback =
       availability.available[0] ??
-      (isProviderConfigured("local") ? "local" : fallbackDefault);
+      (isProviderConfigured("local", library) ? "local" : fallbackDefault);
     return {
       requested,
       provider: fallback,
       fallback: true,
-      reason: `${requested} is not enabled; using ${fallback} semantic search.`,
+      reason: `${requested} is not enabled for ${library}; using ${fallback} semantic search.`,
     };
   }
 
