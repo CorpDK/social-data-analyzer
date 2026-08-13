@@ -15,6 +15,7 @@ import {
   type RebuildProgress,
 } from "./sync";
 import { configuredProviders, isProviderConfigured } from "./providers";
+import { SEARCH_STATUS_CHANNEL, publishJobEvent } from "../sse";
 
 /**
  * API accept target. Persisted jobs use a concrete target:
@@ -79,7 +80,7 @@ function runner(): JobRunnerState {
 function reclaimOrphanedJobs() {
   const state = runner();
   if (state.activeJobId !== null) return;
-  getSqlite()
+  const result = getSqlite()
     .prepare(
       `UPDATE embedding_jobs
        SET state = 'failed',
@@ -90,6 +91,9 @@ function reclaimOrphanedJobs() {
        WHERE state = 'running'`,
     )
     .run();
+  if (result.changes > 0) {
+    publishJobEvent(SEARCH_STATUS_CHANNEL, true);
+  }
 }
 
 function mapJobRow(row: {
@@ -307,6 +311,11 @@ function updateJob(
   getSqlite()
     .prepare(`UPDATE embedding_jobs SET ${sets.join(", ")} WHERE id = ?`)
     .run(...values);
+
+  const immediate = Boolean(
+    patch.state !== undefined || patch.finished === true,
+  );
+  publishJobEvent(SEARCH_STATUS_CHANNEL, immediate);
 }
 
 function progressToPhase(phase: RebuildProgress["phase"]): EmbeddingJobPhase {
@@ -355,6 +364,7 @@ function insertPendingJob(
 
   const job = getEmbeddingJob(Number(info.lastInsertRowid));
   if (!job) throw new Error("Failed to create embedding job");
+  publishJobEvent(SEARCH_STATUS_CHANNEL, true);
   return job;
 }
 
@@ -602,6 +612,7 @@ export function cancelReindexJob(jobId?: number): CancelReindexResult {
     .run(active.id);
 
   runner().cancelFlags.set(active.id, true);
+  publishJobEvent(SEARCH_STATUS_CHANNEL, true);
 
   const job = getEmbeddingJob(active.id);
   if (!job) {

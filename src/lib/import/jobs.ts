@@ -19,6 +19,7 @@ import {
   readSpoolFile,
   spoolUploadedFile,
 } from "./spool";
+import { IMPORT_JOBS_CHANNEL, publishJobEvent } from "../sse";
 
 export type ImportJobState =
   | "pending"
@@ -155,6 +156,8 @@ function reclaimOrphanedJobs() {
     .prepare(`SELECT id, spool_path FROM import_jobs WHERE state = 'running'`)
     .all() as Array<{ id: number; spool_path: string }>;
 
+  if (orphaned.length === 0) return;
+
   for (const row of orphaned) {
     const spoolExists =
       typeof row.spool_path === "string" &&
@@ -189,6 +192,7 @@ function reclaimOrphanedJobs() {
         .run(row.id);
     }
   }
+  publishJobEvent(IMPORT_JOBS_CHANNEL, true);
 }
 
 export function getImportJob(id: number): ImportJobRecord | null {
@@ -248,6 +252,28 @@ export function getRecentImportJobs(limit = 8): ImportJobRecord[] {
     )
     .all(limit) as Parameters<typeof mapJobRow>[0][];
   return rows.map(mapJobRow);
+}
+
+export type ImportJobsStatus = {
+  job: ImportJobRecord | null;
+  pendingJobs: ImportJobRecord[];
+  recentJobs: ImportJobRecord[];
+  cancelSupported: true;
+};
+
+/** Snapshot for GET /api/import/jobs and the SSE stream. */
+export function getImportJobsStatus(): ImportJobsStatus {
+  ensureImportJobRunner();
+  return {
+    job: getActiveImportJob(),
+    pendingJobs: getPendingImportJobs(),
+    recentJobs: getRecentImportJobs(5),
+    cancelSupported: true,
+  };
+}
+
+export function isImportQueueIdle(status: ImportJobsStatus): boolean {
+  return status.job == null && status.pendingJobs.length === 0;
 }
 
 function updateJob(
@@ -317,6 +343,11 @@ function updateJob(
   getSqlite()
     .prepare(`UPDATE import_jobs SET ${sets.join(", ")} WHERE id = ?`)
     .run(...values);
+
+  const immediate = Boolean(
+    patch.state !== undefined || patch.finished === true,
+  );
+  publishJobEvent(IMPORT_JOBS_CHANNEL, immediate);
 }
 
 async function applyProgress(jobId: number, progress: ImportProgress) {
@@ -563,6 +594,7 @@ export async function startImportJob(file: File): Promise<StartImportResult> {
     };
   }
 
+  publishJobEvent(IMPORT_JOBS_CHANNEL, true);
   pumpQueue();
   const job = getImportJob(jobId);
   if (!job) {
@@ -600,6 +632,7 @@ export function cancelImportJob(jobId?: number): CancelImportResult {
       )
       .run(target.id);
     deleteSpoolFile(target.spoolPath);
+    publishJobEvent(IMPORT_JOBS_CHANNEL, true);
     const job = getImportJob(target.id);
     if (!job) return { ok: false, error: "Job disappeared", status: 500 };
     pumpQueue();
@@ -626,6 +659,7 @@ export function cancelImportJob(jobId?: number): CancelImportResult {
     .run(target.id);
 
   runner().cancelFlags.set(target.id, true);
+  publishJobEvent(IMPORT_JOBS_CHANNEL, true);
 
   const job = getImportJob(target.id);
   if (!job) return { ok: false, error: "Job disappeared", status: 500 };

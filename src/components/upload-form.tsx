@@ -7,6 +7,7 @@ import {
   IMPORT_MAX_FILE_LABEL,
   importFileTooLargeMessage,
 } from "@/lib/import-limits";
+import { useJobSse } from "@/lib/use-job-sse";
 
 type ImportJobState =
   | "pending"
@@ -194,6 +195,13 @@ function DetailCounts({ details }: { details: ImportJobDetails | null }) {
   );
 }
 
+function applyJobsPayload(payload: JobsPayload): JobsPayload {
+  return {
+    ...payload,
+    pendingJobs: Array.isArray(payload.pendingJobs) ? payload.pendingJobs : [],
+  };
+}
+
 export function UploadForm() {
   const router = useRouter();
   const [file, setFile] = useState<File | null>(null);
@@ -201,43 +209,46 @@ export function UploadForm() {
   const [actionPending, setActionPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<JobsPayload | null>(null);
-  const [pollingStopped, setPollingStopped] = useState(false);
+  const [streamPaused, setStreamPaused] = useState(false);
   const consecutiveLoadFailures = useRef(0);
   const prevQueueBusy = useRef(false);
 
-  const load = useCallback(async (manual = false) => {
-    if (manual) {
-      consecutiveLoadFailures.current = 0;
-      setPollingStopped(false);
-    }
-    try {
-      const response = await fetch("/api/import/jobs");
-      const payload = await readJsonResponse(
-        response,
-        "Failed to load import status",
-      );
-      if (!isJobsPayload(payload)) {
-        throw new Error("The server returned an invalid import status");
-      }
-      consecutiveLoadFailures.current = 0;
-      setPollingStopped(false);
-      setData({
-        ...payload,
-        pendingJobs: Array.isArray(payload.pendingJobs)
-          ? payload.pendingJobs
-          : [],
-      });
-      setError(null);
-    } catch (loadError) {
-      consecutiveLoadFailures.current += 1;
-      if (consecutiveLoadFailures.current >= 3) setPollingStopped(true);
-      setError(
-        loadError instanceof Error
-          ? loadError.message
-          : "Failed to load import status",
-      );
-    }
+  const applySnapshot = useCallback((payload: unknown) => {
+    if (!isJobsPayload(payload)) return false;
+    consecutiveLoadFailures.current = 0;
+    setStreamPaused(false);
+    setData(applyJobsPayload(payload));
+    setError(null);
+    return true;
   }, []);
+
+  const load = useCallback(
+    async (manual = false) => {
+      if (manual) {
+        consecutiveLoadFailures.current = 0;
+        setStreamPaused(false);
+      }
+      try {
+        const response = await fetch("/api/import/jobs");
+        const payload = await readJsonResponse(
+          response,
+          "Failed to load import status",
+        );
+        if (!applySnapshot(payload)) {
+          throw new Error("The server returned an invalid import status");
+        }
+      } catch (loadError) {
+        consecutiveLoadFailures.current += 1;
+        if (consecutiveLoadFailures.current >= 3) setStreamPaused(true);
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Failed to load import status",
+        );
+      }
+    },
+    [applySnapshot],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
@@ -248,13 +259,27 @@ export function UploadForm() {
   const pendingJobs = data?.pendingJobs ?? [];
   const queueBusy = Boolean(activeJob) || pendingJobs.length > 0;
 
-  useEffect(() => {
-    if (!queueBusy || pollingStopped) return;
-    const timer = window.setInterval(() => {
-      void load();
-    }, 1250);
-    return () => window.clearInterval(timer);
-  }, [queueBusy, load, pollingStopped]);
+  useJobSse({
+    url: "/api/import/jobs/stream",
+    enabled: queueBusy && !streamPaused,
+    onSnapshot: (payload) => {
+      if (!applySnapshot(payload)) {
+        setError("The server returned an invalid import status");
+      }
+    },
+    onIdle: (payload) => {
+      if (payload) applySnapshot(payload);
+      if (prevQueueBusy.current) {
+        router.refresh();
+      }
+      prevQueueBusy.current = false;
+    },
+    onStreamError: (message) => {
+      consecutiveLoadFailures.current += 1;
+      if (consecutiveLoadFailures.current >= 3) setStreamPaused(true);
+      setError(message);
+    },
+  });
 
   useEffect(() => {
     if (prevQueueBusy.current && !queueBusy) {
@@ -394,8 +419,8 @@ export function UploadForm() {
             role="alert"
           >
             {error}
-            {pollingStopped ? " Automatic polling paused." : ""}
-            {pollingStopped ? (
+            {streamPaused ? " Live updates paused." : ""}
+            {streamPaused ? (
               <button
                 type="button"
                 className="ml-2 underline"
@@ -421,8 +446,8 @@ export function UploadForm() {
               Import progress
             </h2>
             <p className="mt-0.5 text-xs text-[var(--muted)]">
-              Jobs persist in SQLite. Refresh-safe — poll while active. Cancel is
-              cooperative between files/items.
+              Jobs persist in SQLite. Refresh-safe — live updates while active.
+              Cancel is cooperative between files/items.
             </p>
           </div>
           <div className="flex flex-wrap gap-2">

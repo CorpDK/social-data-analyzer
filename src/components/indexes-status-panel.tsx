@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useJobSse } from "@/lib/use-job-sse";
 
 type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
 type IndexHealth = "ready" | "partial" | "stale" | "empty" | "unavailable";
@@ -221,40 +222,65 @@ export function IndexesStatusPanel() {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
-  const [pollingStopped, setPollingStopped] = useState(false);
+  const [streamPaused, setStreamPaused] = useState(false);
   const consecutiveLoadFailures = useRef(0);
 
-  const load = useCallback(async (manual = false) => {
-    if (manual) {
-      consecutiveLoadFailures.current = 0;
-      setPollingStopped(false);
-    }
-    try {
-      const response = await fetch("/api/search/status");
-      const payload = await readJsonResponse(
-        response,
-        "Failed to load index status",
-      );
-      if (!isStatusPayload(payload)) {
-        throw new Error("The server returned an invalid index status");
-      }
-      consecutiveLoadFailures.current = 0;
-      setPollingStopped(false);
-      setData(normalizeStatusPayload(payload));
-      setError(null);
-    } catch (loadError) {
-      consecutiveLoadFailures.current += 1;
-      if (consecutiveLoadFailures.current >= 3) setPollingStopped(true);
-      setError(
-        loadError instanceof Error ? loadError.message : "Failed to load status",
-      );
-    }
+  const applySnapshot = useCallback((payload: unknown) => {
+    if (!isStatusPayload(payload)) return false;
+    consecutiveLoadFailures.current = 0;
+    setStreamPaused(false);
+    setData(normalizeStatusPayload(payload));
+    setError(null);
+    return true;
   }, []);
+
+  const load = useCallback(
+    async (manual = false) => {
+      if (manual) {
+        consecutiveLoadFailures.current = 0;
+        setStreamPaused(false);
+      }
+      try {
+        const response = await fetch("/api/search/status");
+        const payload = await readJsonResponse(
+          response,
+          "Failed to load index status",
+        );
+        if (!applySnapshot(payload)) {
+          throw new Error("The server returned an invalid index status");
+        }
+      } catch (loadError) {
+        consecutiveLoadFailures.current += 1;
+        if (consecutiveLoadFailures.current >= 3) setStreamPaused(true);
+        setError(
+          loadError instanceof Error
+            ? loadError.message
+            : "Failed to load status",
+        );
+      }
+    },
+    [applySnapshot],
+  );
 
   useEffect(() => {
     const timer = window.setTimeout(() => void load(), 0);
     return () => window.clearTimeout(timer);
   }, [load]);
+
+  useJobSse({
+    url: "/api/search/status/stream",
+    enabled: !streamPaused,
+    onSnapshot: (payload) => {
+      if (!applySnapshot(payload)) {
+        setError("The server returned an invalid index status");
+      }
+    },
+    onStreamError: (message) => {
+      consecutiveLoadFailures.current += 1;
+      if (consecutiveLoadFailures.current >= 3) setStreamPaused(true);
+      setError(message);
+    },
+  });
 
   const activeJob =
     data?.job?.state === "running" ? data.job : null;
@@ -266,14 +292,6 @@ export function IndexesStatusPanel() {
       ...pendingJobs.map((job) => job.target),
     ].filter(Boolean),
   );
-
-  useEffect(() => {
-    if (!queueBusy || pollingStopped) return;
-    const timer = window.setInterval(() => {
-      void load();
-    }, 1500);
-    return () => window.clearInterval(timer);
-  }, [queueBusy, load, pollingStopped]);
 
   async function startReindex(provider: string) {
     setPending(provider);
@@ -349,7 +367,7 @@ export function IndexesStatusPanel() {
         >
           <span>
             {error}
-            {pollingStopped ? " Automatic polling paused." : ""}
+            {streamPaused ? " Live updates paused." : ""}
           </span>
           <button
             type="button"

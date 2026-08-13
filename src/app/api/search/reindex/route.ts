@@ -35,7 +35,8 @@ export async function GET() {
 
 /**
  * Start a background reindex on the Node process.
- * Returns immediately with the job record(s); poll GET / status for progress.
+ * Returns immediately with the job record(s); progress via GET /api/search/status
+ * or SSE GET /api/search/status/stream.
  *
  * `provider: "all-configured"` expands to one job per enabled+usable provider
  * for both saves and likes (queued behind any currently running job; skips

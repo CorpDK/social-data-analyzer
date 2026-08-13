@@ -47,3 +47,6 @@ next-env.d.ts
 /data/uploads/
 /data/imports/
 /data/spool/
+
+# local Instagram export samples (zip + extracted)
+/sample-data/

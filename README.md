@@ -128,7 +128,8 @@ jobs queued as `pending`. **Reindex all configured** enqueues one job per
 enabled provider × library (skipping targets that already have a
 pending/running job). Cancel stops the active job only; queued jobs keep their
 place. Cancel is cooperative between items. APIs:
-`GET /api/search/status`, `POST /api/search/reindex`, `GET /api/search/reindex`,
+`GET /api/search/status`, SSE `GET /api/search/status/stream`,
+`POST /api/search/reindex`, `GET /api/search/reindex`,
 `POST /api/search/reindex/cancel`.
 
 After upgrading, run **Reindex all configured** (or `pnpm run reindex`) so likes
@@ -139,7 +140,8 @@ Imports run as durable **background jobs** (same in-process pattern as reindex):
 `import_jobs` row, returns **202** `{ jobId }`, and processes asynchronously.
 Progress phases (`extracting` → `inferring_schemas` → `parsing_saves` →
 `parsing_likes` → `writing` → `indexing`) persist in SQLite; the Import page
-polls `GET /api/import/jobs` (~1.25s). Cancel via `POST /api/import/jobs/cancel`.
+subscribes to `GET /api/import/jobs/stream` (SSE). Cancel via
+`POST /api/import/jobs/cancel`.
 After a server restart, orphaned `running` jobs re-queue if the spool file
 still exists, otherwise they fail clearly. Spool files are deleted when a job
 finishes.

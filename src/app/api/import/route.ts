@@ -6,7 +6,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * Accept an export upload, spool it to disk, enqueue a background import job,
- * and return immediately (202). Poll GET /api/import/jobs for progress.
+ * and return immediately (202). Progress via GET /api/import/jobs or SSE
+ * GET /api/import/jobs/stream.
  */
 export async function POST(request: Request) {
   try {

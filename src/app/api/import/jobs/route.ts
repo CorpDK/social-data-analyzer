@@ -1,10 +1,5 @@
 import { NextResponse } from "next/server";
-import {
-  ensureImportJobRunner,
-  getActiveImportJob,
-  getPendingImportJobs,
-  getRecentImportJobs,
-} from "@/lib/import/jobs";
+import { getImportJobsStatus } from "@/lib/import/jobs";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,13 +7,7 @@ export const dynamic = "force-dynamic";
 /** Active + pending import jobs only (terminal jobs live in history / recentJobs). */
 export async function GET() {
   try {
-    ensureImportJobRunner();
-    return NextResponse.json({
-      job: getActiveImportJob(),
-      pendingJobs: getPendingImportJobs(),
-      recentJobs: getRecentImportJobs(5),
-      cancelSupported: true,
-    });
+    return NextResponse.json(getImportJobsStatus());
   } catch (error) {
     console.error("Failed to load import job status", error);
     return NextResponse.json(
