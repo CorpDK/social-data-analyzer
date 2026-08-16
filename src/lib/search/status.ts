@@ -10,6 +10,17 @@ import {
   type SearchLibrary,
 } from "./library";
 import {
+  assessReindexMemory,
+  CRITICAL_MIN_AVAILABLE_MB,
+  estimatedVectorMegabytes,
+  LARGE_LIBRARY_ITEM_THRESHOLD,
+  OLLAMA_CRITICAL_MIN_AVAILABLE_MB,
+  OLLAMA_LARGE_MIN_AVAILABLE_MB,
+  REMOTE_LARGE_MIN_AVAILABLE_MB,
+  readMemAvailableMb,
+  type ReindexMemoryAssessment,
+} from "./memory";
+import {
   embeddingProfilesMatch,
   getIndexedEmbeddingProfile,
   getIndexedEmbeddingProfileMeta,
@@ -24,6 +35,7 @@ import {
 } from "./providers";
 import {
   ensureJobRunner,
+  getActiveEmbeddingJob,
   getDisplayEmbeddingJob,
   getPendingEmbeddingJobs,
   getRecentEmbeddingJobs,
@@ -58,6 +70,13 @@ export type ProviderIndexStatus = {
   stored: (EmbeddingProfile & { updatedAt: number | null }) | null;
   expected: EmbeddingProfile | null;
   tableDimensions: number | null;
+  /** Soft / strong reindex warnings for this library+provider (UI confirm). */
+  reindexWarning: string | null;
+  reindexStrongWarning: string | null;
+  /** Server would refuse to start (any provider + low RAM). */
+  reindexRefused: boolean;
+  reindexRefuseReason: string | null;
+  estimatedVectorMb: number;
 };
 
 export type LibraryIndexStatus = {
@@ -65,7 +84,21 @@ export type LibraryIndexStatus = {
   libraryLabel: string;
   totalItems: number;
   ftsCount: number;
+  estimatedVectorMb: number;
   providers: ProviderIndexStatus[];
+};
+
+export type HostMemoryStatus = {
+  memAvailableMb: number | null;
+  largeLibraryItemThreshold: number;
+  /** Shared critical floor — refuse any provider below this. */
+  criticalMinAvailableMb: number;
+  /** Large-library floor for Voyage/OpenAI/local. */
+  remoteLargeMinAvailableMb: number;
+  /** Large-library floor for Ollama (local model). */
+  ollamaLargeMinAvailableMb: number;
+  /** @deprecated Same as criticalMinAvailableMb. */
+  ollamaCriticalMinAvailableMb: number;
 };
 
 export type SearchIndexStatus = {
@@ -79,6 +112,7 @@ export type SearchIndexStatus = {
     saves: LibraryIndexStatus;
     likes: LibraryIndexStatus;
   };
+  host: HostMemoryStatus;
   /** Active running job, or latest finished when idle. */
   job: EmbeddingJobRecord | null;
   /** Jobs waiting to run (FIFO by id). */
@@ -125,6 +159,7 @@ export function getProviderIndexStatus(
   library: SearchLibrary,
   provider: EmbeddingProvider,
   totalItems?: number,
+  memAvailableMb?: number | null,
 ): ProviderIndexStatus {
   const sqlite = getSqlite();
   const table = library === "saves" ? "saved_items" : "liked_items";
@@ -167,6 +202,13 @@ export function getProviderIndexStatus(
     health = "ready";
   }
 
+  const memory: ReindexMemoryAssessment = assessReindexMemory(
+    library,
+    provider,
+    total,
+    memAvailableMb ?? readMemAvailableMb(),
+  );
+
   return {
     library,
     libraryLabel: libraryLabel(library),
@@ -189,10 +231,18 @@ export function getProviderIndexStatus(
       : null,
     expected,
     tableDimensions,
+    reindexWarning: memory.warning,
+    reindexStrongWarning: memory.strongWarning,
+    reindexRefused: memory.refuse,
+    reindexRefuseReason: memory.refuseReason,
+    estimatedVectorMb: memory.estimatedVectorMb,
   };
 }
 
-function getLibraryIndexStatus(library: SearchLibrary): LibraryIndexStatus {
+function getLibraryIndexStatus(
+  library: SearchLibrary,
+  memAvailableMb: number | null,
+): LibraryIndexStatus {
   const sqlite = getSqlite();
   const itemsTable = library === "saves" ? "saved_items" : "liked_items";
   const ftsTable = library === "saves" ? "saved_items_fts" : "liked_items_fts";
@@ -219,8 +269,9 @@ function getLibraryIndexStatus(library: SearchLibrary): LibraryIndexStatus {
     libraryLabel: libraryLabel(library),
     totalItems,
     ftsCount,
+    estimatedVectorMb: estimatedVectorMegabytes(totalItems),
     providers: providers.map((provider) =>
-      getProviderIndexStatus(library, provider, totalItems),
+      getProviderIndexStatus(library, provider, totalItems, memAvailableMb),
     ),
   };
 }
@@ -228,17 +279,62 @@ function getLibraryIndexStatus(library: SearchLibrary): LibraryIndexStatus {
 export function getSearchIndexStatus(): SearchIndexStatus {
   ensureJobRunner();
 
-  const saves = getLibraryIndexStatus("saves");
-  const likes = getLibraryIndexStatus("likes");
+  const memAvailableMb = readMemAvailableMb();
+  const saves = getLibraryIndexStatus("saves", memAvailableMb);
+  const likes = getLibraryIndexStatus("likes", memAvailableMb);
 
   return {
     totalItems: saves.totalItems,
     ftsCount: saves.ftsCount,
     providers: saves.providers,
     libraries: { saves, likes },
+    host: {
+      memAvailableMb,
+      largeLibraryItemThreshold: LARGE_LIBRARY_ITEM_THRESHOLD,
+      criticalMinAvailableMb: CRITICAL_MIN_AVAILABLE_MB,
+      remoteLargeMinAvailableMb: REMOTE_LARGE_MIN_AVAILABLE_MB,
+      ollamaLargeMinAvailableMb: OLLAMA_LARGE_MIN_AVAILABLE_MB,
+      ollamaCriticalMinAvailableMb: OLLAMA_CRITICAL_MIN_AVAILABLE_MB,
+    },
     job: getDisplayEmbeddingJob(),
     pendingJobs: getPendingEmbeddingJobs(),
     recentJobs: getRecentEmbeddingJobs(8),
     cancelSupported: true,
+  };
+}
+
+const STREAM_FULL_REFRESH_MS = 5_000;
+
+type StreamStatusCache = {
+  at: number;
+  status: SearchIndexStatus;
+};
+
+const globalForStatus = globalThis as unknown as {
+  __searchStatusStreamCache?: StreamStatusCache | null;
+};
+
+/**
+ * SSE-friendly status: while a job is running, refresh expensive vec COUNTs
+ * at most every ~5s and otherwise merge cheap job queue fields into the
+ * last full snapshot (progress ticks use job.processed/total).
+ */
+export function getSearchIndexStatusForStream(): SearchIndexStatus {
+  ensureJobRunner();
+  const active = getActiveEmbeddingJob();
+  const now = Date.now();
+  const cache = globalForStatus.__searchStatusStreamCache ?? null;
+
+  if (!active || !cache || now - cache.at >= STREAM_FULL_REFRESH_MS) {
+    const status = getSearchIndexStatus();
+    globalForStatus.__searchStatusStreamCache = { at: now, status };
+    return status;
+  }
+
+  return {
+    ...cache.status,
+    job: getDisplayEmbeddingJob(),
+    pendingJobs: getPendingEmbeddingJobs(),
+    recentJobs: getRecentEmbeddingJobs(8),
   };
 }

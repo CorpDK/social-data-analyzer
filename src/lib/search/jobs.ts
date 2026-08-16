@@ -1,3 +1,5 @@
+import { spawn, type ChildProcess } from "node:child_process";
+import path from "node:path";
 import { getSqlite } from "../db";
 import {
   type EmbeddingProvider,
@@ -8,6 +10,12 @@ import {
   SEARCH_LIBRARIES,
   type SearchLibrary,
 } from "./library";
+import {
+  assessReindexMemory,
+  logReindexMemoryWarning,
+  mergeNodeOptionsMaxOldSpace,
+  resolveEmbeddingWorkerMaxOldSpaceMb,
+} from "./memory";
 import {
   RebuildCancelledError,
   rebuildConfiguredIndexes,
@@ -60,38 +68,166 @@ export type EmbeddingJobRecord = {
 type JobRunnerState = {
   activeJobId: number | null;
   cancelFlags: Map<number, boolean>;
+  activeChild: ChildProcess | null;
+  /** Job that owns `activeChild`, so a later job cannot clear another's handle. */
+  activeChildJobId: number | null;
+  /**
+   * Re-entrancy guard. `updateJob` publishes SSE events synchronously, and SSE
+   * snapshots call `ensureJobRunner()`, so any queue write can re-enter the
+   * queue on the same stack.
+   */
+  pumping: boolean;
+  /** Worker spawn attempts per job id; cleared when the job settles. */
+  attempts: Map<number, number>;
+  /** Earliest ms timestamp a pending job may start again (retry backoff). */
+  deferredUntil: Map<number, number>;
+  retryTimers: Map<number, ReturnType<typeof setTimeout>>;
+  /** Last failure logged per job, so a repeating failure cannot spam stacks. */
+  loggedFailures: Map<number, { message: string; count: number }>;
+  shutdownHooked: boolean;
 };
+
+/** Max worker spawns per job before it is failed for good. */
+export const MAX_EMBEDDING_WORKER_ATTEMPTS = 3;
+
+/** Backoff before re-spawning a worker; index = attempt number - 1. */
+export const EMBEDDING_WORKER_RETRY_BACKOFF_MS = [1_000, 4_000, 15_000] as const;
+
+/**
+ * A worker that dies faster than this never gets retried: startup-time failures
+ * (bad config, terminal job row, missing table) repeat instantly and would
+ * otherwise turn into a spawn loop.
+ */
+export const EMBEDDING_WORKER_FAST_FAILURE_MS = 2_000;
+
+/** Worker exit code meaning "do not retry me". */
+export const EMBEDDING_WORKER_PERMANENT_EXIT_CODE = 3;
+
+/** Grace period after a cancel request before the child is signalled. */
+const CANCEL_SIGTERM_GRACE_MS = 10_000;
+const CANCEL_SIGKILL_GRACE_MS = 5_000;
+
+/** Job failure that must never be retried (terminal row, disabled provider). */
+export class PermanentEmbeddingJobError extends Error {
+  readonly permanent = true;
+  constructor(message: string) {
+    super(message);
+    this.name = "PermanentEmbeddingJobError";
+  }
+}
+
+export function isPermanentEmbeddingJobError(error: unknown): boolean {
+  return (
+    error instanceof PermanentEmbeddingJobError ||
+    (typeof error === "object" &&
+      error !== null &&
+      (error as { permanent?: unknown }).permanent === true)
+  );
+}
 
 const globalForJobs = globalThis as unknown as {
   embeddingJobRunner?: JobRunnerState;
 };
 
 function runner(): JobRunnerState {
-  if (!globalForJobs.embeddingJobRunner) {
-    globalForJobs.embeddingJobRunner = {
+  const state = globalForJobs.embeddingJobRunner;
+  if (!state) {
+    const fresh: JobRunnerState = {
       activeJobId: null,
       cancelFlags: new Map(),
+      activeChild: null,
+      activeChildJobId: null,
+      pumping: false,
+      attempts: new Map(),
+      deferredUntil: new Map(),
+      retryTimers: new Map(),
+      loggedFailures: new Map(),
+      shutdownHooked: false,
     };
+    globalForJobs.embeddingJobRunner = fresh;
+    return fresh;
   }
-  return globalForJobs.embeddingJobRunner;
+
+  // HMR keeps the object on globalThis; older shapes miss the newer fields.
+  const legacy = state as Partial<JobRunnerState>;
+  if (legacy.activeChild === undefined) state.activeChild = null;
+  if (legacy.activeChildJobId === undefined) state.activeChildJobId = null;
+  if (legacy.pumping === undefined) state.pumping = false;
+  if (!legacy.attempts) state.attempts = new Map();
+  if (!legacy.deferredUntil) state.deferredUntil = new Map();
+  if (!legacy.retryTimers) state.retryTimers = new Map();
+  if (!legacy.loggedFailures) state.loggedFailures = new Map();
+  if (legacy.shutdownHooked === undefined) state.shutdownHooked = false;
+  return state;
 }
 
-/** Mark DB "running" rows as failed when this process is not actually running them. */
+function isTerminalJobState(state: EmbeddingJobState): boolean {
+  return state === "completed" || state === "failed" || state === "cancelled";
+}
+
+/**
+ * Prefer a child process for rebuilds so Ollama/API + chunk writes do not
+ * freeze the Next.js event loop as badly. Tests and the worker itself use
+ * inline mode (`EMBEDDING_WORKER_INLINE=1`).
+ *
+ * SQLite: WAL + busy_timeout; the child is the writer for vectors during the
+ * job, while the parent only updates cancel flags / reads status.
+ */
+function preferChildEmbeddingWorker(): boolean {
+  if (process.env.EMBEDDING_WORKER_INLINE === "1") return false;
+  if (process.env.EMBEDDING_WORKER_CHILD === "1") return false;
+  // test-parse uses the memory keyring + mocked fetch in-process
+  if (process.env.INSTAGRAM_SAVES_KEYRING === "memory") return false;
+  return true;
+}
+
+/**
+ * Reclaim orphaned "running" rows after restart/HMR.
+ * Interrupted jobs with progress are re-queued as pending so the next pump
+ * resumes (skip already-embedded ids) instead of wiping the vec table.
+ */
 function reclaimOrphanedJobs() {
   const state = runner();
-  if (state.activeJobId !== null) return;
-  const result = getSqlite()
+  // Never re-queue a row this process still owns: the child worker's row is
+  // `running` while it works, and re-queuing it here would let the queue spawn
+  // a second worker for the same job.
+  if (state.activeJobId !== null || state.activeChild || state.pumping) return;
+  reclaimOrphanedJobRows();
+}
+
+/** Caller must have verified that no job is owned by this process. */
+function reclaimOrphanedJobRows() {
+  const sqlite = getSqlite();
+
+  const cancelled = sqlite
     .prepare(
       `UPDATE embedding_jobs
-       SET state = 'failed',
-           error = COALESCE(error, 'Interrupted by server restart'),
-           message = 'Job interrupted by server restart',
+       SET state = 'cancelled',
+           message = 'Cancelled (interrupted while cancel was requested)',
+           error = NULL,
            finished_at = unixepoch(),
            updated_at = unixepoch()
-       WHERE state = 'running'`,
+       WHERE state = 'running' AND cancel_requested = 1`,
     )
     .run();
-  if (result.changes > 0) {
+
+  const resumed = sqlite
+    .prepare(
+      `UPDATE embedding_jobs
+       SET state = 'pending',
+           phase = 'queued',
+           message = CASE
+             WHEN processed > 0 THEN 'Resuming after server restart…'
+             ELSE 'Re-queued after server restart'
+           END,
+           error = NULL,
+           finished_at = NULL,
+           updated_at = unixepoch()
+       WHERE state = 'running' AND cancel_requested = 0`,
+    )
+    .run();
+
+  if (cancelled.changes > 0 || resumed.changes > 0) {
     publishJobEvent(SEARCH_STATUS_CHANNEL, true);
   }
 }
@@ -259,6 +395,16 @@ function getOpenJobForTarget(
   return row ? mapJobRow(row) : null;
 }
 
+const JOB_PROGRESS_MIN_INTERVAL_MS = 1_000;
+const JOB_PROGRESS_EVERY_N = 50;
+
+type JobProgressThrottle = {
+  lastWriteAt: number;
+  lastProcessed: number;
+};
+
+const jobProgressThrottle = new Map<number, JobProgressThrottle>();
+
 function updateJob(
   id: number,
   patch: {
@@ -322,7 +468,37 @@ function progressToPhase(phase: RebuildProgress["phase"]): EmbeddingJobPhase {
   return phase;
 }
 
-async function applyProgress(jobId: number, progress: RebuildProgress) {
+/**
+ * Persist job progress at most ~1 Hz or every N items.
+ * Always writes on preparing/fts/done and when force=true (complete/fail).
+ */
+async function applyProgress(
+  jobId: number,
+  progress: RebuildProgress,
+  force = false,
+) {
+  const state = jobProgressThrottle.get(jobId) ?? {
+    lastWriteAt: 0,
+    lastProcessed: -1,
+  };
+  const now = Date.now();
+  const shouldWrite =
+    force ||
+    progress.phase === "done" ||
+    progress.phase === "preparing" ||
+    progress.phase === "fts" ||
+    progress.processed === 0 ||
+    (progress.total > 0 && progress.processed >= progress.total) ||
+    progress.processed - state.lastProcessed >= JOB_PROGRESS_EVERY_N ||
+    now - state.lastWriteAt >= JOB_PROGRESS_MIN_INTERVAL_MS;
+
+  if (!shouldWrite) return;
+
+  jobProgressThrottle.set(jobId, {
+    lastWriteAt: now,
+    lastProcessed: progress.processed,
+  });
+
   updateJob(jobId, {
     phase: progressToPhase(progress.phase),
     processed: progress.processed,
@@ -330,6 +506,10 @@ async function applyProgress(jobId: number, progress: RebuildProgress) {
     currentProvider: progress.currentProvider ?? null,
     message: progress.message ?? null,
   });
+}
+
+function clearJobProgressThrottle(jobId: number) {
+  jobProgressThrottle.delete(jobId);
 }
 
 function shouldCancel(jobId: number): boolean {
@@ -368,50 +548,383 @@ function insertPendingJob(
   return job;
 }
 
-async function executeJob(jobId: number, target: EmbeddingJobTarget) {
-  const state = runner();
-  try {
-    const onProgress = (progress: RebuildProgress) =>
-      applyProgress(jobId, progress);
-    const cancel = () => shouldCancel(jobId);
+function libraryItemCount(library: SearchLibrary): number {
+  const table = library === "saves" ? "saved_items" : "liked_items";
+  return (
+    getSqlite().prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
+      c: number;
+    }
+  ).c;
+}
 
-    const parsed = parseLibraryJobTarget(target);
+/**
+ * Hard refuse any provider reindex when free RAM is critically low, or when
+ * a large library is below that provider's MemAvailable floor. Soft warnings
+ * are logged separately.
+ */
+function refuseReindexIfNeeded(
+  library: SearchLibrary,
+  provider: EmbeddingProvider,
+): string | null {
+  const assessment = assessReindexMemory(
+    library,
+    provider,
+    libraryItemCount(library),
+  );
+  logReindexMemoryWarning(assessment);
+  if (assessment.refuse) return assessment.refuseReason;
+  return null;
+}
 
-    // Legacy rows may still use all-configured; new code never creates them.
-    if (!parsed || parsed.kind === "all-configured") {
-      const result = await rebuildConfiguredIndexes({
+function embeddingWorkerEnv(): NodeJS.ProcessEnv {
+  const maxOldSpaceMb = resolveEmbeddingWorkerMaxOldSpaceMb();
+  return {
+    ...process.env,
+    EMBEDDING_WORKER_INLINE: "1",
+    EMBEDDING_WORKER_CHILD: "1",
+    EMBEDDING_WORKER_MAX_OLD_SPACE_MB: String(maxOldSpaceMb),
+    NODE_OPTIONS: mergeNodeOptionsMaxOldSpace(
+      process.env.NODE_OPTIONS,
+      maxOldSpaceMb,
+    ),
+  };
+}
+
+async function runEmbeddingJobInline(
+  jobId: number,
+  target: EmbeddingJobTarget,
+) {
+  const onProgress = (progress: RebuildProgress) =>
+    applyProgress(jobId, progress);
+  const cancel = () => shouldCancel(jobId);
+  const job = getEmbeddingJob(jobId);
+  const resume = Boolean(job && job.processed > 0);
+
+  const parsed = parseLibraryJobTarget(target);
+
+  // Legacy rows may still use all-configured; new code never creates them.
+  if (!parsed || parsed.kind === "all-configured") {
+    const result = await rebuildConfiguredIndexes({
+      onProgress,
+      shouldCancel: cancel,
+    });
+    clearJobProgressThrottle(jobId);
+    updateJob(jobId, {
+      state: "completed",
+      phase: "done",
+      processed: result.items,
+      total: result.items,
+      currentProvider: null,
+      message: `Rebuilt ${result.providers.join(", ")} for saves + likes (${result.items} items)`,
+      finished: true,
+    });
+  } else {
+    const result = await rebuildProviderIndex(
+      parsed.library,
+      parsed.provider,
+      {
+        resume,
         onProgress,
         shouldCancel: cancel,
-      });
-      updateJob(jobId, {
-        state: "completed",
-        phase: "done",
-        processed: result.items,
-        total: result.items,
-        currentProvider: null,
-        message: `Rebuilt ${result.providers.join(", ")} for saves + likes (${result.items} items)`,
-        finished: true,
-      });
-    } else {
-      const result = await rebuildProviderIndex(
-        parsed.library,
-        parsed.provider,
-        {
-          onProgress,
-          shouldCancel: cancel,
-        },
+      },
+    );
+    clearJobProgressThrottle(jobId);
+    updateJob(jobId, {
+      state: "completed",
+      phase: "done",
+      processed: result.items,
+      total: result.items,
+      currentProvider: parsed.provider,
+      message: `Rebuilt ${target} (${result.items} items)`,
+      finished: true,
+    });
+  }
+}
+
+export type WorkerExit = {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  elapsedMs: number;
+  /** The process could not be started at all. */
+  spawnFailed: boolean;
+  message: string;
+};
+
+export type WorkerExitClassification =
+  | "ok"
+  | "cancelled"
+  | "permanent"
+  | "transient";
+
+/**
+ * Decide whether a worker exit may be retried. Only slow, non-cancelled,
+ * non-permanent failures are transient — anything that fails at startup is
+ * permanent so the queue can never spin on it.
+ */
+export function classifyWorkerExit(exit: {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  elapsedMs: number;
+  spawnFailed?: boolean;
+  cancelRequested?: boolean;
+}): WorkerExitClassification {
+  if (exit.spawnFailed) return "permanent";
+  if (exit.code === 0) return "ok";
+  if (exit.cancelRequested) return "cancelled";
+  if (
+    exit.code === EMBEDDING_WORKER_PERMANENT_EXIT_CODE ||
+    exit.code === 2 // usage error
+  ) {
+    return "permanent";
+  }
+  if (exit.elapsedMs < EMBEDDING_WORKER_FAST_FAILURE_MS) return "permanent";
+  return "transient";
+}
+
+export function embeddingWorkerRetryDelayMs(attempt: number): number {
+  const index = Math.max(1, Math.floor(attempt)) - 1;
+  return (
+    EMBEDDING_WORKER_RETRY_BACKOFF_MS[index] ??
+    EMBEDDING_WORKER_RETRY_BACKOFF_MS[EMBEDDING_WORKER_RETRY_BACKOFF_MS.length - 1]!
+  );
+}
+
+export function planWorkerRetry(
+  attempt: number,
+  classification: WorkerExitClassification,
+): { retry: boolean; delayMs: number } {
+  if (classification !== "transient") return { retry: false, delayMs: 0 };
+  if (attempt >= MAX_EMBEDDING_WORKER_ATTEMPTS) {
+    return { retry: false, delayMs: 0 };
+  }
+  return { retry: true, delayMs: embeddingWorkerRetryDelayMs(attempt) };
+}
+
+function jobTargetBlockReason(target: EmbeddingJobTarget): string | null {
+  const parsed = parseLibraryJobTarget(target);
+  if (!parsed) return `Unknown reindex target "${target}"`;
+  if (parsed.kind === "all-configured") {
+    const anyConfigured = SEARCH_LIBRARIES.some(
+      (library) => configuredProviders(library).length > 0,
+    );
+    return anyConfigured
+      ? null
+      : "No providers are enabled (and credentialed where required)";
+  }
+  if (!isProviderConfigured(parsed.provider, parsed.library)) {
+    return `${parsed.provider} is not enabled for ${parsed.library} — turn it on in Settings (and add credentials if needed) before reindexing`;
+  }
+  return null;
+}
+
+/**
+ * Why this job must not be handed to a worker, or null when it is startable.
+ * Checked immediately before every spawn and inside the worker itself, so a
+ * terminal row or a provider that was disabled after enqueue can never produce
+ * a doomed child process.
+ */
+export function embeddingJobSpawnBlockReason(jobId: number): string | null {
+  const job = getEmbeddingJob(jobId);
+  if (!job) return `Embedding job ${jobId} no longer exists`;
+  if (isTerminalJobState(job.state)) {
+    return `Embedding job ${jobId} is ${job.state}; refusing to start a worker`;
+  }
+  return jobTargetBlockReason(job.target);
+}
+
+/** Log a failure once per distinct message; count repeats instead of spamming. */
+function logJobFailure(jobId: number, message: string) {
+  const state = runner();
+  const seen = state.loggedFailures.get(jobId);
+  if (seen && seen.message === message) {
+    seen.count += 1;
+    if (seen.count % 10 === 0) {
+      console.error(
+        `[embedding-jobs] job ${jobId}: ${message} (repeated ${seen.count}x)`,
       );
-      updateJob(jobId, {
-        state: "completed",
-        phase: "done",
-        processed: result.items,
-        total: result.items,
-        currentProvider: parsed.provider,
-        message: `Rebuilt ${target} (${result.items} items)`,
-        finished: true,
-      });
     }
+    return;
+  }
+  state.loggedFailures.set(jobId, { message, count: 1 });
+  console.error(`[embedding-jobs] job ${jobId}: ${message}`);
+}
+
+function failJob(jobId: number, error: string) {
+  updateJob(jobId, {
+    state: "failed",
+    message: "Reindex failed",
+    error,
+    finished: true,
+  });
+  logJobFailure(jobId, error);
+}
+
+function killActiveChild(signal: NodeJS.Signals = "SIGKILL") {
+  const state = runner();
+  const child = state.activeChild;
+  if (!child || child.killed || child.exitCode !== null) return;
+  try {
+    child.kill(signal);
+  } catch {
+    // already gone
+  }
+}
+
+/**
+ * Kill the worker if the parent exits. Deliberately no SIGINT/SIGTERM handlers:
+ * adding them would suppress Node's default termination for the dev server, and
+ * the child shares our process group so Ctrl-C already reaches it.
+ */
+function ensureShutdownHook() {
+  const state = runner();
+  if (state.shutdownHooked) return;
+  state.shutdownHooked = true;
+  process.on("exit", () => killActiveChild("SIGKILL"));
+}
+
+/** Escalate a cancel request to signals if the child ignores the cancel flag. */
+function scheduleChildTermination(jobId: number) {
+  const state = runner();
+  const child = state.activeChild;
+  if (!child || state.activeChildJobId !== jobId) return;
+
+  const term = setTimeout(() => {
+    if (state.activeChild !== child) return;
+    killActiveChild("SIGTERM");
+    const kill = setTimeout(() => {
+      if (state.activeChild !== child) return;
+      killActiveChild("SIGKILL");
+    }, CANCEL_SIGKILL_GRACE_MS);
+    kill.unref?.();
+  }, CANCEL_SIGTERM_GRACE_MS);
+  term.unref?.();
+}
+
+/**
+ * Spawn one worker child. Never rejects: the caller classifies the exit.
+ * At most one child may be alive per process.
+ */
+function spawnEmbeddingWorker(jobId: number): Promise<WorkerExit> {
+  const state = runner();
+  const script = path.join(process.cwd(), "scripts", "embedding-worker.ts");
+  const tsxCli = path.join(
+    process.cwd(),
+    "node_modules",
+    "tsx",
+    "dist",
+    "cli.mjs",
+  );
+
+  if (state.activeChild) {
+    return Promise.resolve({
+      code: null,
+      signal: null,
+      elapsedMs: 0,
+      spawnFailed: true,
+      message: `Another embedding worker (job ${state.activeChildJobId ?? "?"}) is still running`,
+    });
+  }
+
+  ensureShutdownHook();
+
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    let settled = false;
+    const useNice = process.platform === "linux";
+    const env = embeddingWorkerEnv();
+    const child = useNice
+      ? spawn(
+          "nice",
+          ["-n", "10", process.execPath, tsxCli, script, String(jobId)],
+          {
+            env,
+            stdio: ["ignore", "inherit", "inherit"],
+          },
+        )
+      : spawn(process.execPath, [tsxCli, script, String(jobId)], {
+          env,
+          stdio: ["ignore", "inherit", "inherit"],
+        });
+
+    state.activeChild = child;
+    state.activeChildJobId = jobId;
+
+    const finish = (exit: WorkerExit) => {
+      if (settled) return;
+      settled = true;
+      if (state.activeChild === child) {
+        state.activeChild = null;
+        state.activeChildJobId = null;
+      }
+      resolve(exit);
+    };
+
+    child.on("error", (error) => {
+      finish({
+        code: null,
+        signal: null,
+        elapsedMs: Date.now() - startedAt,
+        spawnFailed: true,
+        message: `Embedding worker could not start: ${error.message}`,
+      });
+    });
+
+    child.on("exit", (code, signal) => {
+      finish({
+        code,
+        signal,
+        elapsedMs: Date.now() - startedAt,
+        spawnFailed: false,
+        message:
+          code === 0
+            ? "Embedding worker finished"
+            : signal
+              ? `Embedding worker killed by ${signal}`
+              : `Embedding worker exited with code ${code ?? "unknown"}`,
+      });
+    });
+  });
+}
+
+/**
+ * Run one job to completion (inline). Used by the child worker entry and by
+ * the parent when child workers are disabled.
+ */
+export async function runEmbeddingJobById(jobId: number): Promise<void> {
+  const job = getEmbeddingJob(jobId);
+  if (!job) throw new PermanentEmbeddingJobError(`Embedding job ${jobId} not found`);
+  if (job.state !== "running" && job.state !== "pending") {
+    throw new PermanentEmbeddingJobError(
+      `Embedding job ${jobId} is ${job.state}; expected running or pending`,
+    );
+  }
+
+  // Last-resort guard: the queue validates this before spawning, but a provider
+  // can be disabled between enqueue and start. Terminal failure, never a retry.
+  const blocked = jobTargetBlockReason(job.target);
+  if (blocked) {
+    updateJob(jobId, {
+      state: "failed",
+      message: "Reindex failed",
+      error: blocked,
+      finished: true,
+    });
+    throw new PermanentEmbeddingJobError(blocked);
+  }
+
+  // Worker may be started while the row is still pending (CLI) — promote.
+  if (job.state === "pending") {
+    updateJob(jobId, {
+      state: "running",
+      phase: "queued",
+      message: `Starting rebuild for ${job.target}`,
+    });
+  }
+
+  try {
+    await runEmbeddingJobInline(jobId, job.target);
   } catch (error) {
+    clearJobProgressThrottle(jobId);
     if (error instanceof RebuildCancelledError || shouldCancel(jobId)) {
       updateJob(jobId, {
         state: "cancelled",
@@ -427,38 +940,206 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
         error: error instanceof Error ? error.message : "unknown error",
         finished: true,
       });
+      throw error;
     }
   } finally {
-    state.cancelFlags.delete(jobId);
+    clearJobProgressThrottle(jobId);
+  }
+}
+
+/**
+ * Re-queue a job for a later attempt. The row goes back to `pending` and is
+ * held out of the queue until the backoff expires, so no code path can respawn
+ * a worker immediately after a failure.
+ */
+function scheduleWorkerRetry(
+  jobId: number,
+  attempt: number,
+  delayMs: number,
+  reason: string,
+) {
+  const state = runner();
+  state.deferredUntil.set(jobId, Date.now() + delayMs);
+
+  const existingTimer = state.retryTimers.get(jobId);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  updateJob(jobId, {
+    state: "pending",
+    phase: "queued",
+    error: null,
+    message: `${reason} — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${MAX_EMBEDDING_WORKER_ATTEMPTS})`,
+  });
+  logJobFailure(jobId, `${reason} (attempt ${attempt}/${MAX_EMBEDDING_WORKER_ATTEMPTS})`);
+
+  const timer = setTimeout(() => {
+    runner().retryTimers.delete(jobId);
+    runner().deferredUntil.delete(jobId);
+    pumpQueue();
+  }, delayMs);
+  timer.unref?.();
+  state.retryTimers.set(jobId, timer);
+}
+
+/** Returns true when a retry was scheduled (job stays owned by the queue). */
+async function runJobViaChild(jobId: number): Promise<boolean> {
+  const state = runner();
+  const attempt = (state.attempts.get(jobId) ?? 0) + 1;
+  state.attempts.set(jobId, attempt);
+
+  const blocked = embeddingJobSpawnBlockReason(jobId);
+  if (blocked) {
+    const job = getEmbeddingJob(jobId);
+    // A terminal row needs no further writes — just refuse to spawn.
+    if (job && !isTerminalJobState(job.state)) failJob(jobId, blocked);
+    else logJobFailure(jobId, blocked);
+    return false;
+  }
+
+  const exit = await spawnEmbeddingWorker(jobId);
+  const cancelRequested = shouldCancel(jobId);
+  const classification = classifyWorkerExit({ ...exit, cancelRequested });
+  const after = getEmbeddingJob(jobId);
+
+  if (classification === "ok") {
+    if (after && !isTerminalJobState(after.state)) {
+      failJob(jobId, "Embedding worker exited without finalizing the job");
+    }
+    return false;
+  }
+
+  if (classification === "cancelled") {
+    if (after && !isTerminalJobState(after.state)) {
+      updateJob(jobId, {
+        state: "cancelled",
+        phase: "done",
+        message: "Reindex cancelled",
+        error: null,
+        finished: true,
+      });
+    }
+    return false;
+  }
+
+  // The worker already recorded its own terminal outcome (e.g. provider error,
+  // write failure). Respecting it is what keeps the queue from looping.
+  if (!after || isTerminalJobState(after.state)) {
+    logJobFailure(jobId, after?.error ?? exit.message);
+    return false;
+  }
+
+  const plan = planWorkerRetry(attempt, classification);
+  if (!plan.retry) {
+    failJob(
+      jobId,
+      `${exit.message} (gave up after ${attempt} attempt${attempt === 1 ? "" : "s"})`,
+    );
+    return false;
+  }
+
+  scheduleWorkerRetry(jobId, attempt, plan.delayMs, exit.message);
+  return true;
+}
+
+async function executeJob(jobId: number, target: EmbeddingJobTarget) {
+  const state = runner();
+  let retryScheduled = false;
+  try {
+    if (preferChildEmbeddingWorker()) {
+      retryScheduled = await runJobViaChild(jobId);
+    } else {
+      try {
+        await runEmbeddingJobInline(jobId, target);
+      } catch (error) {
+        clearJobProgressThrottle(jobId);
+        if (error instanceof RebuildCancelledError || shouldCancel(jobId)) {
+          updateJob(jobId, {
+            state: "cancelled",
+            phase: "done",
+            message: "Reindex cancelled",
+            error: null,
+            finished: true,
+          });
+        } else {
+          failJob(
+            jobId,
+            error instanceof Error ? error.message : "unknown error",
+          );
+        }
+      }
+    }
+  } finally {
+    clearJobProgressThrottle(jobId);
+    if (!retryScheduled) {
+      state.cancelFlags.delete(jobId);
+      state.attempts.delete(jobId);
+      state.deferredUntil.delete(jobId);
+      state.loggedFailures.delete(jobId);
+    }
     if (state.activeJobId === jobId) state.activeJobId = null;
+    if (state.activeChildJobId === jobId) {
+      state.activeChild = null;
+      state.activeChildJobId = null;
+    }
     // Start the next pending job (if any) after this one settles.
     pumpQueue();
   }
 }
 
-/** Promote the oldest pending job to running when the runner is idle. */
-function pumpQueue() {
-  const state = runner();
-  if (state.activeJobId !== null) return;
-
-  // DB may still say "running" after a crash — reclaim before starting another.
-  const dbActive = getActiveEmbeddingJob();
-  if (dbActive) {
-    reclaimOrphanedJobs();
+/** Fail queued jobs whose provider is no longer enabled/credentialed. */
+function failBlockedPendingJobs() {
+  for (const job of getPendingEmbeddingJobs()) {
+    const reason = jobTargetBlockReason(job.target);
+    if (reason) failJob(job.id, reason);
   }
+}
 
-  const next = getPendingEmbeddingJobs()[0];
-  if (!next) return;
+function startJob(state: JobRunnerState, job: EmbeddingJobRecord) {
+  // Claim the job *before* writing the row: `updateJob` notifies SSE listeners
+  // synchronously, those snapshots call `ensureJobRunner()`, and an unclaimed
+  // runner would re-queue this row and spawn another worker for it.
+  state.activeJobId = job.id;
+  state.cancelFlags.set(job.id, false);
+  state.deferredUntil.delete(job.id);
 
-  updateJob(next.id, {
+  updateJob(job.id, {
     state: "running",
     phase: "queued",
-    message: `Starting rebuild for ${next.target}`,
+    message:
+      job.processed > 0
+        ? `Resuming rebuild for ${job.target} (${job.processed}/${job.total})`
+        : `Starting rebuild for ${job.target}`,
   });
 
-  state.activeJobId = next.id;
-  state.cancelFlags.set(next.id, false);
-  void executeJob(next.id, next.target);
+  void executeJob(job.id, job.target);
+}
+
+/** Promote the oldest startable pending job to running when the runner is idle. */
+function pumpQueue() {
+  const state = runner();
+  if (state.pumping) return;
+  state.pumping = true;
+  try {
+    if (state.activeJobId !== null) return;
+    // One worker child at a time, no matter how many callers pump the queue.
+    if (state.activeChild) return;
+
+    // DB may still say "running" after a crash — reclaim before starting another.
+    // Ownership was just checked above, so reclaim the rows directly.
+    if (getActiveEmbeddingJob()) reclaimOrphanedJobRows();
+
+    failBlockedPendingJobs();
+
+    const now = Date.now();
+    const next = getPendingEmbeddingJobs().find(
+      (job) => (state.deferredUntil.get(job.id) ?? 0) <= now,
+    );
+    if (!next) return;
+
+    startJob(state, next);
+  } finally {
+    state.pumping = false;
+  }
 }
 
 /**
@@ -467,7 +1148,7 @@ function pumpQueue() {
  */
 export function ensureJobRunner() {
   const state = runner();
-  if (state.activeJobId !== null) return;
+  if (state.activeJobId !== null || state.activeChild || state.pumping) return;
   reclaimOrphanedJobs();
   pumpQueue();
 }
@@ -503,6 +1184,7 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
 
     const enqueued: EmbeddingJobRecord[] = [];
     const alreadyOpen: EmbeddingJobRecord[] = [];
+    const refused: string[] = [];
 
     for (const { library, provider } of pairs) {
       const concrete = formatJobTarget(library, provider);
@@ -511,10 +1193,22 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
         alreadyOpen.push(open);
         continue;
       }
+      const refuse = refuseReindexIfNeeded(library, provider);
+      if (refuse) {
+        refused.push(refuse);
+        continue;
+      }
       enqueued.push(insertPendingJob(library, provider));
     }
 
     if (enqueued.length === 0) {
+      if (refused.length > 0 && alreadyOpen.length === 0) {
+        return {
+          ok: false,
+          error: refused[0]!,
+          status: 503,
+        };
+      }
       return {
         ok: false,
         error:
@@ -559,6 +1253,11 @@ export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult 
     };
   }
 
+  const refuse = refuseReindexIfNeeded(parsed.library, parsed.provider);
+  if (refuse) {
+    return { ok: false, error: refuse, status: 503 };
+  }
+
   const concrete = formatJobTarget(parsed.library, parsed.provider);
   const open = getOpenJobForTarget(concrete);
   if (open) {
@@ -591,7 +1290,29 @@ export type CancelReindexResult =
 export function cancelReindexJob(jobId?: number): CancelReindexResult {
   ensureJobRunner();
 
+  const state = runner();
   const active = jobId ? getEmbeddingJob(jobId) : getActiveEmbeddingJob();
+
+  // A job waiting on retry backoff is still ours; cancel it outright.
+  if (active && active.state === "pending" && state.deferredUntil.has(active.id)) {
+    const timer = state.retryTimers.get(active.id);
+    if (timer) clearTimeout(timer);
+    state.retryTimers.delete(active.id);
+    state.deferredUntil.delete(active.id);
+    state.attempts.delete(active.id);
+    updateJob(active.id, {
+      state: "cancelled",
+      phase: "done",
+      message: "Reindex cancelled",
+      error: null,
+      finished: true,
+    });
+    const job = getEmbeddingJob(active.id);
+    return job
+      ? { ok: true, job }
+      : { ok: false, error: "Job disappeared", status: 500 };
+  }
+
   if (!active || active.state !== "running") {
     return {
       ok: false,
@@ -611,7 +1332,9 @@ export function cancelReindexJob(jobId?: number): CancelReindexResult {
     )
     .run(active.id);
 
-  runner().cancelFlags.set(active.id, true);
+  state.cancelFlags.set(active.id, true);
+  // Cooperative cancel first (clean partial state), signals if it hangs.
+  scheduleChildTermination(active.id);
   publishJobEvent(SEARCH_STATUS_CHANNEL, true);
 
   const job = getEmbeddingJob(active.id);

@@ -217,21 +217,54 @@ export function isRemoteEmbeddingConfigured(): boolean {
   );
 }
 
-export async function embedText(
-  text: string,
-  config: EmbeddingConfig = embeddingConfig(),
-  inputType: EmbeddingInputType = "document",
-): Promise<Float32Array> {
-  const { profile } = config;
-  if (profile.provider === "local") {
-    return embedTextLocal(text, profile.dimensions);
+/** Max texts per remote embedding HTTP request (Voyage / OpenAI / Ollama). */
+export const EMBEDDING_API_BATCH_SIZE = 64;
+
+function embeddingRequestTimeoutMs(batchSize: number): number {
+  const timeout = getEmbeddingTimeoutMs();
+  if (batchSize <= 1) return timeout;
+  // Modest headroom for batched remote calls without unbounded waits.
+  return Math.min(timeout * 8, timeout + batchSize * 250);
+}
+
+function parseEmbeddingResponse(
+  json: { data?: Array<{ embedding?: number[]; index?: number }> },
+  expectedCount: number,
+  dimensions: number,
+): Float32Array[] {
+  const rows = json.data;
+  if (!rows || rows.length !== expectedCount) {
+    throw new Error(
+      `Embedding API returned unexpected batch size (want ${expectedCount}, got ${rows?.length ?? 0})`,
+    );
   }
+
+  const ordered = [...rows].sort(
+    (a, b) => (a.index ?? 0) - (b.index ?? 0),
+  );
+  return ordered.map((row, i) => {
+    const values = row.embedding;
+    if (!values || values.length !== dimensions) {
+      throw new Error(
+        `Embedding API returned unexpected dimensions at index ${i} (want ${dimensions}, got ${values?.length ?? 0})`,
+      );
+    }
+    return Float32Array.from(values);
+  });
+}
+
+async function embedTextsRemote(
+  texts: string[],
+  config: EmbeddingConfig,
+  inputType: EmbeddingInputType,
+): Promise<Float32Array[]> {
+  const { profile } = config;
   if (!profile.endpoint) {
     throw new Error(`${profile.provider} embedding endpoint is not configured`);
   }
+  if (texts.length === 0) return [];
 
-  const timeout = getEmbeddingTimeoutMs();
-
+  const input = texts.length === 1 ? texts[0]! : texts;
   const response = await fetch(profile.endpoint, {
     method: "POST",
     headers: {
@@ -244,7 +277,7 @@ export async function embedText(
       profile.provider === "voyage"
         ? {
             model: profile.model,
-            input: text,
+            input,
             input_type: inputType,
             output_dimension: profile.dimensions,
             output_dtype: "float",
@@ -252,11 +285,11 @@ export async function embedText(
         : {
             // OpenAI + Ollama OpenAI-compatible /embeddings
             model: profile.model,
-            input: text,
+            input,
             dimensions: profile.dimensions,
           },
     ),
-    signal: AbortSignal.timeout(timeout),
+    signal: AbortSignal.timeout(embeddingRequestTimeoutMs(texts.length)),
   });
 
   if (!response.ok) {
@@ -267,13 +300,66 @@ export async function embedText(
   }
 
   const json = (await response.json()) as {
-    data?: Array<{ embedding?: number[] }>;
+    data?: Array<{ embedding?: number[]; index?: number }>;
   };
-  const values = json.data?.[0]?.embedding;
-  if (!values || values.length !== profile.dimensions) {
-    throw new Error(
-      `Embedding API returned unexpected dimensions (want ${profile.dimensions}, got ${values?.length ?? 0})`,
-    );
+  return parseEmbeddingResponse(json, texts.length, profile.dimensions);
+}
+
+/**
+ * Batch embed many texts. Remote providers send up to
+ * {@link EMBEDDING_API_BATCH_SIZE} inputs per request.
+ * Query-time search should keep using {@link embedText}.
+ */
+export async function embedTexts(
+  texts: string[],
+  config: EmbeddingConfig = embeddingConfig(),
+  inputType: EmbeddingInputType = "document",
+): Promise<Float32Array[]> {
+  const { profile } = config;
+  if (texts.length === 0) return [];
+
+  if (profile.provider === "local") {
+    return texts.map((text) => embedTextLocal(text, profile.dimensions));
   }
-  return Float32Array.from(values);
+
+  // Ollama's OpenAI-compatible endpoint usually accepts array input; if a
+  // batch request fails, fall back to sequential singles for that slice.
+  if (profile.provider === "ollama") {
+    const out: Float32Array[] = [];
+    for (let i = 0; i < texts.length; i += EMBEDDING_API_BATCH_SIZE) {
+      const slice = texts.slice(i, i + EMBEDDING_API_BATCH_SIZE);
+      if (slice.length === 1) {
+        out.push(...(await embedTextsRemote(slice, config, inputType)));
+        continue;
+      }
+      try {
+        out.push(...(await embedTextsRemote(slice, config, inputType)));
+      } catch {
+        for (const text of slice) {
+          out.push(...(await embedTextsRemote([text], config, inputType)));
+        }
+      }
+    }
+    return out;
+  }
+
+  const out: Float32Array[] = [];
+  for (let i = 0; i < texts.length; i += EMBEDDING_API_BATCH_SIZE) {
+    const slice = texts.slice(i, i + EMBEDDING_API_BATCH_SIZE);
+    out.push(...(await embedTextsRemote(slice, config, inputType)));
+  }
+  return out;
+}
+
+/** Single-text embed (query search and one-off updates). */
+export async function embedText(
+  text: string,
+  config: EmbeddingConfig = embeddingConfig(),
+  inputType: EmbeddingInputType = "document",
+): Promise<Float32Array> {
+  const [embedding] = await embedTexts([text], config, inputType);
+  if (!embedding) {
+    throw new Error("Embedding API returned an empty result");
+  }
+  return embedding;
 }

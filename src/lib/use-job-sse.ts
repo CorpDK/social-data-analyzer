@@ -36,6 +36,8 @@ export function useJobSse({
     if (!enabled) return;
 
     let closed = false;
+    /** Set when server signals idle — do not reconnect until effect remounts. */
+    let idleDone = false;
     let source: EventSource | null = null;
     let reconnectTimer: number | null = null;
     let failures = 0;
@@ -59,7 +61,7 @@ export function useJobSse({
     };
 
     const scheduleReconnect = () => {
-      if (closed) return;
+      if (closed || idleDone) return;
       if (failures >= maxFailures) {
         onStreamErrorRef.current?.(
           "Live updates paused after repeated connection failures",
@@ -76,7 +78,7 @@ export function useJobSse({
     };
 
     const connect = () => {
-      if (closed) return;
+      if (closed || idleDone) return;
       cleanupSource();
 
       const es = new EventSource(url);
@@ -95,6 +97,10 @@ export function useJobSse({
       });
 
       es.addEventListener("idle", (event) => {
+        // Server is done — close and stop reconnecting. Parent should flip
+        // `enabled` false; without this, a server close would storm reconnects.
+        idleDone = true;
+        clearReconnect();
         try {
           const data = JSON.parse((event as MessageEvent).data) as unknown;
           failures = 0;
@@ -104,6 +110,7 @@ export function useJobSse({
         } catch {
           onIdleRef.current?.(undefined);
         }
+        cleanupSource();
       });
 
       es.addEventListener("error", (event) => {
@@ -123,6 +130,10 @@ export function useJobSse({
       };
 
       es.onerror = () => {
+        if (closed || idleDone) {
+          cleanupSource();
+          return;
+        }
         // Connection dropped or server closed — reconnect with backoff.
         failures += 1;
         cleanupSource();

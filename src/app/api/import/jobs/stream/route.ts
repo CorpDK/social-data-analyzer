@@ -9,7 +9,8 @@ export const dynamic = "force-dynamic";
 
 /**
  * Server-Sent Events for import job progress.
- * Emits `snapshot` on connect and on change; `idle` then closes when the queue drains.
+ * Emits `snapshot` on connect and on change; emits `idle` when the queue drains
+ * (stream stays open — client closes EventSource so it does not auto-reconnect).
  */
 export async function GET(request: Request) {
   return createJobSseResponse({

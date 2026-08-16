@@ -262,18 +262,48 @@ function ensureSearchSchema(sqlite: Database.Database) {
   migrateLegacyRemoteVectorTable(sqlite, legacyRemoteProvider);
 }
 
+/**
+ * True inside `scripts/embedding-worker.ts` (and any inline worker run). Such a
+ * process must never reclaim job rows: its own job is legitimately `running`,
+ * and re-queuing it as `pending` lets the parent queue start a second worker
+ * for the same job.
+ */
+function isJobWorkerProcess(): boolean {
+  return process.env.EMBEDDING_WORKER_CHILD === "1";
+}
+
 function reclaimJobsAfterProcessRestart(sqlite: Database.Database) {
+  if (isJobWorkerProcess()) return;
+
   // This is intentionally connection-startup work, not schema-ensure work:
   // HMR may re-run schema ensure while a real in-process job is still active.
+  // Interrupted embedding jobs re-queue as pending so rebuild can resume
+  // (skip already-embedded ids) instead of failing and leaving a partial index.
   sqlite
     .prepare(
       `UPDATE embedding_jobs
-       SET state = 'failed',
-           error = COALESCE(error, 'Interrupted by server restart'),
-           message = 'Job interrupted by server restart',
+       SET state = 'cancelled',
+           message = 'Cancelled (interrupted while cancel was requested)',
+           error = NULL,
            finished_at = unixepoch(),
            updated_at = unixepoch()
-       WHERE state = 'running'`,
+       WHERE state = 'running' AND cancel_requested = 1`,
+    )
+    .run();
+
+  sqlite
+    .prepare(
+      `UPDATE embedding_jobs
+       SET state = 'pending',
+           phase = 'queued',
+           message = CASE
+             WHEN processed > 0 THEN 'Resuming after server restart…'
+             ELSE 'Re-queued after server restart'
+           END,
+           error = NULL,
+           finished_at = NULL,
+           updated_at = unixepoch()
+       WHERE state = 'running' AND cancel_requested = 0`,
     )
     .run();
 
@@ -527,6 +557,23 @@ export function getSqlite() {
 if (globalForDb.sqlite && process.env.NODE_ENV !== "production") {
   ensureDatabaseSchema(globalForDb.sqlite);
   schemaEnsuredForModule = true;
+}
+
+/**
+ * Close the shared connection and release its file descriptors. Used by
+ * short-lived processes (the embedding worker) on every exit path.
+ */
+export function closeSqlite() {
+  const sqlite = globalForDb.sqlite;
+  if (!sqlite) return;
+  globalForDb.sqlite = undefined;
+  globalForDb.db = undefined;
+  schemaEnsuredForModule = false;
+  try {
+    sqlite.close();
+  } catch {
+    // already closed
+  }
 }
 
 export function getDb() {

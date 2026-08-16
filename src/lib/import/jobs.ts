@@ -55,6 +55,8 @@ export type ImportJobRecord = {
 type JobRunnerState = {
   activeJobId: number | null;
   cancelFlags: Map<number, boolean>;
+  /** Guards re-entry: job writes publish SSE events synchronously. */
+  pumping: boolean;
 };
 
 const globalForImportJobs = globalThis as unknown as {
@@ -62,13 +64,20 @@ const globalForImportJobs = globalThis as unknown as {
 };
 
 function runner(): JobRunnerState {
-  if (!globalForImportJobs.importJobRunner) {
-    globalForImportJobs.importJobRunner = {
+  const state = globalForImportJobs.importJobRunner;
+  if (!state) {
+    const fresh: JobRunnerState = {
       activeJobId: null,
       cancelFlags: new Map(),
+      pumping: false,
     };
+    globalForImportJobs.importJobRunner = fresh;
+    return fresh;
   }
-  return globalForImportJobs.importJobRunner;
+  if ((state as Partial<JobRunnerState>).pumping === undefined) {
+    state.pumping = false;
+  }
+  return state;
 }
 
 function parseDetails(raw: string | null): ImportProgressDetails | null {
@@ -149,8 +158,12 @@ const JOB_SELECT = `SELECT id, filename, content_hash, spool_path, kind, state, 
 /** Mark orphaned running rows: re-queue if spool exists, else fail. */
 function reclaimOrphanedJobs() {
   const state = runner();
-  if (state.activeJobId !== null) return;
+  if (state.activeJobId !== null || state.pumping) return;
+  reclaimOrphanedJobRows();
+}
 
+/** Caller must have verified that no job is owned by this process. */
+function reclaimOrphanedJobRows() {
   const sqlite = getSqlite();
   const orphaned = sqlite
     .prepare(`SELECT id, spool_path FROM import_jobs WHERE state = 'running'`)
@@ -496,25 +509,35 @@ async function executeJob(jobId: number) {
 
 function pumpQueue() {
   const state = runner();
-  if (state.activeJobId !== null) return;
+  if (state.pumping) return;
+  state.pumping = true;
+  try {
+    if (state.activeJobId !== null) return;
 
-  const dbActive = getActiveImportJob();
-  if (dbActive) {
-    reclaimOrphanedJobs();
+    const dbActive = getActiveImportJob();
+    if (dbActive) {
+      reclaimOrphanedJobRows();
+    }
+
+    const next = getPendingImportJobs()[0];
+    if (!next) return;
+
+    // Claim before writing: `updateJob` notifies SSE listeners synchronously and
+    // those snapshots call `ensureImportJobRunner()`, which would otherwise
+    // re-enter and start this job twice.
+    state.activeJobId = next.id;
+    state.cancelFlags.set(next.id, false);
+
+    updateJob(next.id, {
+      state: "running",
+      phase: "queued",
+      message: `Starting import of ${next.filename}`,
+    });
+
+    void executeJob(next.id);
+  } finally {
+    state.pumping = false;
   }
-
-  const next = getPendingImportJobs()[0];
-  if (!next) return;
-
-  updateJob(next.id, {
-    state: "running",
-    phase: "queued",
-    message: `Starting import of ${next.filename}`,
-  });
-
-  state.activeJobId = next.id;
-  state.cancelFlags.set(next.id, false);
-  void executeJob(next.id);
 }
 
 /**
@@ -523,7 +546,7 @@ function pumpQueue() {
  */
 export function ensureImportJobRunner() {
   const state = runner();
-  if (state.activeJobId !== null) return;
+  if (state.activeJobId !== null || state.pumping) return;
   reclaimOrphanedJobs();
   pumpQueue();
 }

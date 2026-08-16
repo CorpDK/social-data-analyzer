@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useJobSse } from "@/lib/use-job-sse";
 
 type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
@@ -36,6 +36,11 @@ type ProviderIndexStatus = {
     endpoint: string | null;
   } | null;
   tableDimensions: number | null;
+  reindexWarning?: string | null;
+  reindexStrongWarning?: string | null;
+  reindexRefused?: boolean;
+  reindexRefuseReason?: string | null;
+  estimatedVectorMb?: number;
 };
 
 type LibraryIndexStatus = {
@@ -43,6 +48,7 @@ type LibraryIndexStatus = {
   libraryLabel: string;
   totalItems: number;
   ftsCount: number;
+  estimatedVectorMb?: number;
   providers: ProviderIndexStatus[];
 };
 
@@ -63,6 +69,15 @@ type EmbeddingJob = {
   updatedAt: number;
 };
 
+type HostMemoryStatus = {
+  memAvailableMb: number | null;
+  largeLibraryItemThreshold: number;
+  criticalMinAvailableMb?: number;
+  remoteLargeMinAvailableMb?: number;
+  ollamaLargeMinAvailableMb: number;
+  ollamaCriticalMinAvailableMb: number;
+};
+
 type StatusPayload = {
   totalItems: number;
   ftsCount: number;
@@ -71,10 +86,18 @@ type StatusPayload = {
     saves: LibraryIndexStatus;
     likes: LibraryIndexStatus;
   };
+  host?: HostMemoryStatus;
   job: EmbeddingJob | null;
   pendingJobs: EmbeddingJob[];
   recentJobs?: EmbeddingJob[];
   cancelSupported: boolean;
+};
+
+type PendingConfirm = {
+  provider: string;
+  title: string;
+  body: string;
+  strong: boolean;
 };
 
 function errorFromPayload(payload: unknown, fallback: string): string {
@@ -223,7 +246,11 @@ export function IndexesStatusPanel() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [streamPaused, setStreamPaused] = useState(false);
+  const [confirm, setConfirm] = useState<PendingConfirm | null>(null);
   const consecutiveLoadFailures = useRef(0);
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const confirmTitleId = useId();
+  const confirmDescId = useId();
 
   const applySnapshot = useCallback((payload: unknown) => {
     if (!isStatusPayload(payload)) return false;
@@ -267,6 +294,27 @@ export function IndexesStatusPanel() {
     return () => window.clearTimeout(timer);
   }, [load]);
 
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    if (confirm) {
+      if (!dialog.open) dialog.showModal();
+    } else if (dialog.open) {
+      dialog.close();
+    }
+  }, [confirm]);
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (!dialog) return;
+    function onCancel(event: Event) {
+      event.preventDefault();
+      setConfirm(null);
+    }
+    dialog.addEventListener("cancel", onCancel);
+    return () => dialog.removeEventListener("cancel", onCancel);
+  }, []);
+
   useJobSse({
     url: "/api/search/status/stream",
     enabled: !streamPaused,
@@ -293,9 +341,127 @@ export function IndexesStatusPanel() {
     ].filter(Boolean),
   );
 
-  async function startReindex(provider: string) {
+  // Indexes UI only lists providers enabled for that library (Settings toggles).
+  // Disabled rows (e.g. credentials saved but toggled off) stay off this page.
+  const libraries: LibraryIndexStatus[] = [
+    data?.libraries?.saves ?? {
+      library: "saves" as const,
+      libraryLabel: "Saves",
+      totalItems: data?.totalItems ?? 0,
+      ftsCount: data?.ftsCount ?? 0,
+      providers: data?.providers ?? [],
+    },
+    data?.libraries?.likes ?? {
+      library: "likes" as const,
+      libraryLabel: "Likes",
+      totalItems: 0,
+      ftsCount: 0,
+      providers: [],
+    },
+  ].map((library) => ({
+    ...library,
+    providers: library.providers.filter((provider) => provider.enabled),
+  }));
+
+  function findProvider(target: string): ProviderIndexStatus | null {
+    for (const library of libraries) {
+      const match = library.providers.find(
+        (provider) => (provider.target ?? provider.provider) === target,
+      );
+      if (match) return match;
+    }
+    return null;
+  }
+
+  function warningForTarget(provider: string): {
+    refused: boolean;
+    refuseReason: string | null;
+    warning: string | null;
+    strong: boolean;
+  } {
+    if (provider === "all-configured") {
+      const configured = libraries.flatMap((library) =>
+        library.providers.filter((row) => row.configured),
+      );
+      const refusedRows = configured.filter((row) => row.reindexRefused);
+      const messages: string[] = [];
+      let strong = false;
+
+      if (
+        configured.length > 0 &&
+        refusedRows.length === configured.length
+      ) {
+        const reason =
+          refusedRows[0]?.reindexRefuseReason ??
+          "Reindex refused: host RAM is too low for all configured providers.";
+        return {
+          refused: true,
+          refuseReason: reason,
+          warning: reason,
+          strong: true,
+        };
+      }
+
+      for (const row of configured) {
+        if (row.reindexRefused && row.reindexRefuseReason) {
+          strong = true;
+          messages.push(row.reindexRefuseReason);
+        } else if (row.reindexStrongWarning) {
+          strong = true;
+          messages.push(row.reindexStrongWarning);
+        } else if (row.reindexWarning) {
+          messages.push(row.reindexWarning);
+        }
+      }
+      const host = data?.host;
+      const hostLine =
+        host?.memAvailableMb != null
+          ? `Host MemAvailable ~${Math.round(host.memAvailableMb)} MB.`
+          : null;
+      if (refusedRows.length > 0) {
+        strong = true;
+      }
+      return {
+        refused: false,
+        refuseReason: null,
+        warning:
+          messages.length > 0
+            ? [...messages.slice(0, 3), hostLine].filter(Boolean).join("\n\n")
+            : hostLine,
+        strong,
+      };
+    }
+
+    const row = findProvider(provider);
+    if (!row) {
+      return {
+        refused: false,
+        refuseReason: null,
+        warning: null,
+        strong: false,
+      };
+    }
+    if (row.reindexRefused) {
+      return {
+        refused: true,
+        refuseReason: row.reindexRefuseReason ?? "Reindex refused",
+        warning: row.reindexRefuseReason ?? null,
+        strong: true,
+      };
+    }
+    const warning = row.reindexStrongWarning ?? row.reindexWarning ?? null;
+    return {
+      refused: false,
+      refuseReason: null,
+      warning,
+      strong: Boolean(row.reindexStrongWarning),
+    };
+  }
+
+  async function executeReindex(provider: string) {
     setPending(provider);
     setActionError(null);
+    setConfirm(null);
     try {
       const response = await fetch("/api/search/reindex", {
         method: "POST",
@@ -311,6 +477,24 @@ export function IndexesStatusPanel() {
     } finally {
       setPending(null);
     }
+  }
+
+  function requestReindex(provider: string) {
+    const risk = warningForTarget(provider);
+    if (risk.refused && risk.refuseReason) {
+      setActionError(risk.refuseReason);
+      return;
+    }
+    if (risk.warning) {
+      setConfirm({
+        provider,
+        title: risk.strong ? "Large / low-RAM reindex" : "Confirm reindex",
+        body: risk.warning,
+        strong: risk.strong,
+      });
+      return;
+    }
+    void executeReindex(provider);
   }
 
   async function cancelReindex() {
@@ -358,8 +542,57 @@ export function IndexesStatusPanel() {
     );
   }
 
+  const host = data?.host;
+
   return (
     <div className="space-y-4">
+      <dialog
+        ref={dialogRef}
+        aria-labelledby={confirmTitleId}
+        aria-describedby={confirmDescId}
+        className="m-auto w-[min(100%,28rem)] rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-0 text-[var(--ink)] shadow-xl backdrop:bg-black/45 open:flex open:flex-col"
+      >
+        {confirm ? (
+          <div className="space-y-4 p-5">
+            <div className="space-y-1.5">
+              <h3
+                id={confirmTitleId}
+                className={`font-[family-name:var(--font-fraunces)] text-xl ${
+                  confirm.strong ? "text-[var(--warn)]" : ""
+                }`}
+              >
+                {confirm.title}
+              </h3>
+              <p
+                id={confirmDescId}
+                className="whitespace-pre-wrap text-sm text-[var(--muted)]"
+              >
+                {confirm.body}
+              </p>
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                className={secondaryButton}
+                onClick={() => setConfirm(null)}
+                disabled={pending !== null}
+                autoFocus
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className={primaryButton}
+                disabled={pending !== null}
+                onClick={() => void executeReindex(confirm.provider)}
+              >
+                {pending === confirm.provider ? "Starting…" : "Continue"}
+              </button>
+            </div>
+          </div>
+        ) : null}
+      </dialog>
+
       {error ? (
         <div
           className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--danger)]/40 bg-[var(--surface)] px-3.5 py-2 text-sm text-[var(--danger)]"
@@ -387,9 +620,33 @@ export function IndexesStatusPanel() {
             <p className="mt-0.5 text-xs text-[var(--muted)]">
               One job runs at a time; others queue per library+provider. Cancel
               stops only the active job — queued jobs keep their place. Cancel
-              is cooperative between items. Reindex all configured rebuilds
-              both Saves and Likes indexes.
+              is cooperative between items. Interrupted rebuilds resume from
+              already-embedded rows. Reindex all configured rebuilds both Saves
+              and Likes indexes.
             </p>
+            {host?.memAvailableMb != null ? (
+              <p className="mt-1 text-[11px] text-[var(--muted)]">
+                MemAvailable ~{Math.round(host.memAvailableMb)} MB
+                {(() => {
+                  const critical =
+                    host.criticalMinAvailableMb ??
+                    host.ollamaCriticalMinAvailableMb;
+                  const remote =
+                    host.remoteLargeMinAvailableMb ??
+                    host.ollamaLargeMinAvailableMb;
+                  if (host.memAvailableMb < critical) {
+                    return ` · reindex blocked below ${critical} MB`;
+                  }
+                  if (host.memAvailableMb < remote) {
+                    return ` · large Voyage/OpenAI/local need ≥${remote} MB; Ollama ≥${host.ollamaLargeMinAvailableMb} MB`;
+                  }
+                  if (host.memAvailableMb < host.ollamaLargeMinAvailableMb) {
+                    return ` · large Ollama needs ≥${host.ollamaLargeMinAvailableMb} MB`;
+                  }
+                  return "";
+                })()}
+              </p>
+            ) : null}
           </div>
           <div className="flex flex-wrap gap-2">
             <button
@@ -404,7 +661,7 @@ export function IndexesStatusPanel() {
               type="button"
               className={primaryButton}
               disabled={pending !== null}
-              onClick={() => void startReindex("all-configured")}
+              onClick={() => requestReindex("all-configured")}
             >
               {pending === "all-configured"
                 ? "Queueing…"
@@ -508,24 +765,7 @@ export function IndexesStatusPanel() {
       </section>
 
       <div className="space-y-6">
-        {(
-          [
-            data?.libraries?.saves ?? {
-              library: "saves" as const,
-              libraryLabel: "Saves",
-              totalItems: data?.totalItems ?? 0,
-              ftsCount: data?.ftsCount ?? 0,
-              providers: data?.providers ?? [],
-            },
-            data?.libraries?.likes ?? {
-              library: "likes" as const,
-              libraryLabel: "Likes",
-              totalItems: 0,
-              ftsCount: 0,
-              providers: [],
-            },
-          ] as LibraryIndexStatus[]
-        ).map((library) => (
+        {libraries.map((library) => (
           <section key={library.library} className="space-y-2">
             <div className="flex flex-wrap items-baseline justify-between gap-2">
               <h2 className="font-[family-name:var(--font-fraunces)] text-lg">
@@ -544,6 +784,12 @@ export function IndexesStatusPanel() {
                     {library.ftsCount}
                   </span>
                 </span>
+                {library.estimatedVectorMb != null &&
+                library.estimatedVectorMb >= 1 ? (
+                  <span>
+                    ~{Math.round(library.estimatedVectorMb)} MB vectors
+                  </span>
+                ) : null}
               </div>
             </div>
 
@@ -553,7 +799,10 @@ export function IndexesStatusPanel() {
                 const target = provider.target ?? provider.provider;
                 const providerBusy = openTargets.has(target);
                 const canReindex =
-                  provider.configured && !providerBusy && pending === null;
+                  provider.configured &&
+                  !providerBusy &&
+                  pending === null &&
+                  !provider.reindexRefused;
                 const model =
                   provider.stored?.model ?? provider.expected?.model ?? "—";
                 const dimensions =
@@ -599,6 +848,15 @@ export function IndexesStatusPanel() {
                       {provider.hint ? (
                         <p className="mt-0.5 truncate text-[11px] leading-snug text-[var(--muted)]">
                           {provider.hint}
+                        </p>
+                      ) : null}
+                      {provider.reindexRefused && provider.reindexRefuseReason ? (
+                        <p className="mt-0.5 text-[11px] leading-snug text-[var(--danger)]">
+                          {provider.reindexRefuseReason}
+                        </p>
+                      ) : provider.reindexStrongWarning ? (
+                        <p className="mt-0.5 text-[11px] leading-snug text-[var(--warn)]">
+                          {provider.reindexStrongWarning}
                         </p>
                       ) : null}
                     </div>
@@ -675,8 +933,13 @@ export function IndexesStatusPanel() {
                         <button
                           type="button"
                           className={primaryButton}
-                          disabled={!canReindex}
-                          onClick={() => void startReindex(target)}
+                          disabled={!canReindex && !provider.reindexRefused}
+                          title={
+                            provider.reindexRefused
+                              ? (provider.reindexRefuseReason ?? undefined)
+                              : undefined
+                          }
+                          onClick={() => requestReindex(target)}
                         >
                           {pending === target
                             ? "Starting…"
@@ -684,9 +947,11 @@ export function IndexesStatusPanel() {
                               ? activeJob?.target === target
                                 ? "Running…"
                                 : "Queued"
-                              : provider.health === "ready"
-                                ? "Rebuild"
-                                : "Reindex"}
+                              : provider.reindexRefused
+                                ? "Blocked"
+                                : provider.health === "ready"
+                                  ? "Rebuild"
+                                  : "Reindex"}
                         </button>
                       ) : (
                         <Link className={secondaryButton} href="/settings">

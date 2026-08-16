@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "test:parse": "pnpm exec tsx scripts/test-parse.ts",
-    "reindex": "pnpm exec tsx scripts/reindex-search.ts"
+    "reindex": "pnpm exec tsx scripts/reindex-search.ts",
+    "embedding-worker": "node --max-old-space-size=2048 ./node_modules/tsx/dist/cli.mjs scripts/embedding-worker.ts"
   },
   "dependencies": {
     "@napi-rs/keyring": "^1.3.0",

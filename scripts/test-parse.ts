@@ -9,6 +9,7 @@ async function main() {
   );
   process.env.INSTAGRAM_SAVES_DB = tmpDb;
   process.env.INSTAGRAM_SAVES_KEYRING = "memory";
+  process.env.EMBEDDING_WORKER_INLINE = "1";
   delete process.env.EMBEDDING_PROVIDER;
   delete process.env.OPENAI_API_KEY;
   delete process.env.VOYAGE_API_KEY;
@@ -614,12 +615,13 @@ async function main() {
       typeof body.output_dimension === "number"
         ? body.output_dimension
         : Number(body.dimensions);
+    const inputValue = body.input;
+    const batchSize = Array.isArray(inputValue) ? inputValue.length : 1;
     return Response.json({
-      data: [
-        {
-          embedding: Array.from({ length: dimensions }, (_, i) => (i ? 0 : 1)),
-        },
-      ],
+      data: Array.from({ length: batchSize }, (_, index) => ({
+        index,
+        embedding: Array.from({ length: dimensions }, (__, i) => (i ? 0 : 1)),
+      })),
     });
   };
 
@@ -976,6 +978,354 @@ async function main() {
     throw new Error("Expected embedding jobs after all-configured queue");
   }
 
+  // --- Resume + RAM gate helpers (no real Ollama / large DB work) ---
+  const {
+    assessReindexMemory,
+    CRITICAL_MIN_AVAILABLE_MB,
+    OLLAMA_LARGE_MIN_AVAILABLE_MB,
+    REMOTE_LARGE_MIN_AVAILABLE_MB,
+    mergeNodeOptionsMaxOldSpace,
+  } = await import("../src/lib/search/memory");
+  const { rebuildProviderIndex } = await import("../src/lib/search/sync");
+
+  const refuseLarge = assessReindexMemory("likes", "ollama", 25_000, 800);
+  if (!refuseLarge.refuse || !refuseLarge.refuseReason) {
+    throw new Error("Ollama likes reindex must refuse when MemAvailable is low");
+  }
+  const allowSmall = assessReindexMemory("saves", "ollama", 100, 900);
+  if (allowSmall.refuse) {
+    throw new Error("Small saves Ollama reindex should not hard-refuse at ~900 MB");
+  }
+  if (!allowSmall.warning) {
+    throw new Error("Small saves Ollama reindex should soft-warn when RAM is tight");
+  }
+  const softVoyage = assessReindexMemory("likes", "voyage", 25_000, 4_000);
+  if (softVoyage.refuse || !softVoyage.warning) {
+    throw new Error("Large Voyage likes reindex should warn but not refuse at 4 GiB");
+  }
+  const refuseVoyageLarge = assessReindexMemory("likes", "voyage", 25_000, 800);
+  if (!refuseVoyageLarge.refuse || !refuseVoyageLarge.refuseReason) {
+    throw new Error("Large Voyage likes reindex must refuse below remote large floor");
+  }
+  const refuseCriticalVoyage = assessReindexMemory("saves", "openai", 100, 400);
+  if (!refuseCriticalVoyage.refuse) {
+    throw new Error("Any provider must refuse when MemAvailable is critically low");
+  }
+  const allowVoyageLarge = assessReindexMemory("likes", "voyage", 25_000, 1_200);
+  if (allowVoyageLarge.refuse) {
+    throw new Error("Large Voyage likes should be allowed above remote large floor");
+  }
+  if (!allowVoyageLarge.warning) {
+    throw new Error("Large Voyage likes should soft-warn when allowed");
+  }
+  if (OLLAMA_LARGE_MIN_AVAILABLE_MB < 1024) {
+    throw new Error("Ollama large threshold should be at least 1 GiB");
+  }
+  if (REMOTE_LARGE_MIN_AVAILABLE_MB < CRITICAL_MIN_AVAILABLE_MB) {
+    throw new Error("Remote large floor must be above critical floor");
+  }
+  const mergedOpts = mergeNodeOptionsMaxOldSpace("--enable-source-maps", 2048);
+  if (
+    !mergedOpts.includes("--enable-source-maps") ||
+    !mergedOpts.includes("--max-old-space-size=2048")
+  ) {
+    throw new Error("NODE_OPTIONS merge must append max-old-space-size");
+  }
+  const keepExisting = mergeNodeOptionsMaxOldSpace(
+    "--max-old-space-size=4096 --trace-warnings",
+    2048,
+  );
+  if (!keepExisting.includes("--max-old-space-size=4096")) {
+    throw new Error("NODE_OPTIONS merge must not overwrite existing heap cap");
+  }
+
+  const statusWithHost = getSearchIndexStatus();
+  if (
+    !statusWithHost.host ||
+    typeof statusWithHost.host.ollamaLargeMinAvailableMb !== "number" ||
+    typeof statusWithHost.host.criticalMinAvailableMb !== "number" ||
+    typeof statusWithHost.host.remoteLargeMinAvailableMb !== "number"
+  ) {
+    throw new Error("Status payload must include host memory thresholds");
+  }
+
+  // Partial local index + resume must keep existing rows and fill the rest.
+  const localIds = (
+    sqlite.prepare(`SELECT id FROM saved_items ORDER BY id`).all() as Array<{
+      id: number;
+    }>
+  ).map((row) => row.id);
+  if (localIds.length < 2) {
+    throw new Error("Need at least 2 saved items for resume test");
+  }
+  await rebuildProviderIndex("saves", "local");
+  const keepId = localIds[0]!;
+  sqlite
+    .prepare(`DELETE FROM saved_items_vec_local WHERE item_id != ?`)
+    .run(BigInt(keepId));
+  const beforeResume = (
+    sqlite
+      .prepare(`SELECT count(*) AS c FROM saved_items_vec_local`)
+      .get() as { c: number }
+  ).c;
+  if (beforeResume !== 1) {
+    throw new Error(`Expected 1 local vector before resume (got ${beforeResume})`);
+  }
+  await rebuildProviderIndex("saves", "local", { resume: true });
+  const afterResume = (
+    sqlite
+      .prepare(`SELECT count(*) AS c FROM saved_items_vec_local`)
+      .get() as { c: number }
+  ).c;
+  if (afterResume !== localIds.length) {
+    throw new Error(
+      `Resume should restore full local coverage (${localIds.length}, got ${afterResume})`,
+    );
+  }
+  const kept = sqlite
+    .prepare(`SELECT 1 AS ok FROM saved_items_vec_local WHERE item_id = ?`)
+    .get(BigInt(keepId));
+  if (!kept) {
+    throw new Error("Resume must keep the already-embedded row");
+  }
+
+  // --- Resume chunk writes must be idempotent (UNIQUE constraint regression) ---
+  const { writeEmbeddingChunk } = await import("../src/lib/search/sync");
+  const { embeddingConfigForProvider } = await import(
+    "../src/lib/search/embeddings"
+  );
+  const localDims = embeddingConfigForProvider("local").profile.dimensions;
+  const duplicateChunk = [
+    { id: keepId, embedding: new Float32Array(localDims).fill(0.5) },
+  ];
+  const vecCountBefore = (
+    sqlite
+      .prepare(`SELECT count(*) AS c FROM saved_items_vec_local`)
+      .get() as { c: number }
+  ).c;
+  // The resume path re-writes ids that may already exist (interrupted chunk,
+  // stale skip set): it must not fail the job.
+  writeEmbeddingChunk("saves", "local", duplicateChunk, "upsert", sqlite);
+  writeEmbeddingChunk("saves", "local", duplicateChunk, "upsert", sqlite);
+  const vecCountAfter = (
+    sqlite
+      .prepare(`SELECT count(*) AS c FROM saved_items_vec_local`)
+      .get() as { c: number }
+  ).c;
+  if (vecCountAfter !== vecCountBefore) {
+    throw new Error(
+      `Idempotent chunk writes must not add rows (${vecCountBefore} -> ${vecCountAfter})`,
+    );
+  }
+  let insertOnlyRejected = false;
+  try {
+    writeEmbeddingChunk("saves", "local", duplicateChunk, "insert-only", sqlite);
+  } catch {
+    insertOnlyRejected = true;
+  }
+  if (!insertOnlyRejected) {
+    throw new Error(
+      "insert-only writes should still conflict — the resume path must use upsert",
+    );
+  }
+  // Resuming with a fully populated table must be a no-op, not a conflict.
+  await rebuildProviderIndex("saves", "local", { resume: true });
+  const vecCountAfterResume = (
+    sqlite
+      .prepare(`SELECT count(*) AS c FROM saved_items_vec_local`)
+      .get() as { c: number }
+  ).c;
+  if (vecCountAfterResume !== localIds.length) {
+    throw new Error(
+      `Resume over a complete index should keep coverage (${localIds.length}, got ${vecCountAfterResume})`,
+    );
+  }
+
+  // --- Worker spawn guards: terminal jobs, disabled providers, retry caps ---
+  const {
+    embeddingJobSpawnBlockReason,
+    classifyWorkerExit,
+    planWorkerRetry,
+    embeddingWorkerRetryDelayMs,
+    MAX_EMBEDDING_WORKER_ATTEMPTS,
+    EMBEDDING_WORKER_FAST_FAILURE_MS,
+    ensureJobRunner,
+    getEmbeddingJob,
+  } = await import("../src/lib/search/jobs");
+
+  const insertJobRow = (target: string, state: string): number => {
+    const info = sqlite
+      .prepare(
+        `INSERT INTO embedding_jobs(target, state, phase, processed, total, message)
+         VALUES (?, ?, 'queued', 0, 0, 'synthetic test row')`,
+      )
+      .run(target, state);
+    return Number(info.lastInsertRowid);
+  };
+
+  const failedJobId = insertJobRow("local", "failed");
+  const failedReason = embeddingJobSpawnBlockReason(failedJobId);
+  if (!failedReason || !failedReason.includes("failed")) {
+    throw new Error("A failed job must never be startable by a worker");
+  }
+  ensureJobRunner();
+  if (getEmbeddingJob(failedJobId)?.state !== "failed") {
+    throw new Error("Terminal jobs must not be revived by the queue");
+  }
+  if (embeddingJobSpawnBlockReason(failedJobId + 10_000) === null) {
+    throw new Error("A missing job must never be startable");
+  }
+
+  // A provider disabled after enqueue must fail its queued job, not spawn for it.
+  updateSettingsKeys({ voyageEnabled: false });
+  const staleVoyageJobId = insertJobRow("voyage", "pending");
+  const staleReason = embeddingJobSpawnBlockReason(staleVoyageJobId);
+  if (!staleReason || !staleReason.includes("not enabled")) {
+    throw new Error(
+      `Queued job for a disabled provider must be blocked (got ${staleReason})`,
+    );
+  }
+  ensureJobRunner();
+  const staleVoyageJob = getEmbeddingJob(staleVoyageJobId);
+  if (staleVoyageJob?.state !== "failed" || !staleVoyageJob.error) {
+    throw new Error(
+      `Stale disabled-provider job should fail terminally (got ${staleVoyageJob?.state})`,
+    );
+  }
+  updateSettingsKeys({ voyageEnabled: true });
+
+  const enabledLocalJobId = insertJobRow("local", "pending");
+  if (embeddingJobSpawnBlockReason(enabledLocalJobId) !== null) {
+    throw new Error("An enabled provider's pending job should be startable");
+  }
+  sqlite
+    .prepare(
+      `UPDATE embedding_jobs SET state = 'cancelled', finished_at = unixepoch() WHERE id = ?`,
+    )
+    .run(enabledLocalJobId);
+  if (embeddingJobSpawnBlockReason(enabledLocalJobId) === null) {
+    throw new Error("A cancelled job must never be startable");
+  }
+
+  // Retry classification: only slow, non-cancelled failures may respawn.
+  if (
+    classifyWorkerExit({ code: 0, signal: null, elapsedMs: 10_000 }) !== "ok"
+  ) {
+    throw new Error("Exit code 0 should classify as ok");
+  }
+  if (
+    classifyWorkerExit({
+      code: 1,
+      signal: null,
+      elapsedMs: EMBEDDING_WORKER_FAST_FAILURE_MS - 1,
+    }) !== "permanent"
+  ) {
+    throw new Error("Instant worker failures must be permanent (no respawn)");
+  }
+  if (
+    classifyWorkerExit({ code: 3, signal: null, elapsedMs: 60_000 }) !==
+    "permanent"
+  ) {
+    throw new Error("Worker exit code 3 must be permanent");
+  }
+  if (
+    classifyWorkerExit({
+      code: 1,
+      signal: null,
+      elapsedMs: 30_000,
+      cancelRequested: true,
+    }) !== "cancelled"
+  ) {
+    throw new Error("Cancelled runs must not be retried as failures");
+  }
+  if (
+    classifyWorkerExit({ code: null, signal: null, elapsedMs: 5, spawnFailed: true }) !==
+    "permanent"
+  ) {
+    throw new Error("Spawn failures must be permanent");
+  }
+  const transientExit = classifyWorkerExit({
+    code: 1,
+    signal: null,
+    elapsedMs: 30_000,
+  });
+  if (transientExit !== "transient") {
+    throw new Error("Slow non-zero exits should be retryable");
+  }
+
+  const firstRetry = planWorkerRetry(1, "transient");
+  const secondRetry = planWorkerRetry(2, "transient");
+  const cappedRetry = planWorkerRetry(MAX_EMBEDDING_WORKER_ATTEMPTS, "transient");
+  if (!firstRetry.retry || firstRetry.delayMs < 1_000) {
+    throw new Error("First transient failure should retry after a backoff");
+  }
+  if (!secondRetry.retry || secondRetry.delayMs <= firstRetry.delayMs) {
+    throw new Error("Backoff must grow between attempts");
+  }
+  if (cappedRetry.retry) {
+    throw new Error(
+      `Retries must stop at ${MAX_EMBEDDING_WORKER_ATTEMPTS} attempts`,
+    );
+  }
+  if (planWorkerRetry(1, "permanent").retry) {
+    throw new Error("Permanent failures must never retry");
+  }
+  if (embeddingWorkerRetryDelayMs(1) !== 1_000) {
+    throw new Error("First retry backoff should be 1s");
+  }
+  if (embeddingWorkerRetryDelayMs(99) < embeddingWorkerRetryDelayMs(2)) {
+    throw new Error("Backoff lookup should clamp to the longest delay");
+  }
+
+  // --- SSE re-entrancy: a status subscriber must not re-queue a claimed job ---
+  // This mirrors the /api/search/status/stream handler, whose every snapshot
+  // calls ensureJobRunner(). Job writes publish synchronously, so an unclaimed
+  // runner used to re-queue the row it had just started and start it again.
+  const { subscribeJobEvents, SEARCH_STATUS_CHANNEL } = await import(
+    "../src/lib/sse"
+  );
+  let maxConcurrentRunning = 0;
+  let reentrantPumps = 0;
+  const unsubscribeStatus = subscribeJobEvents(SEARCH_STATUS_CHANNEL, () => {
+    reentrantPumps += 1;
+    const running = (
+      sqlite
+        .prepare(`SELECT count(*) AS c FROM embedding_jobs WHERE state = 'running'`)
+        .get() as { c: number }
+    ).c;
+    maxConcurrentRunning = Math.max(maxConcurrentRunning, running);
+    ensureJobRunner();
+  });
+
+  try {
+    const reentrant = startReindexJob("local");
+    if (!reentrant.ok) {
+      throw new Error(`Reentrancy job should start: ${reentrant.error}`);
+    }
+    const reentrantSettled = await waitForIdleJob(60_000);
+    if (reentrantSettled?.state !== "completed") {
+      throw new Error(
+        `Job should complete once with SSE subscribers attached (got ${reentrantSettled?.state}: ${reentrantSettled?.error})`,
+      );
+    }
+    if (reentrantPumps === 0) {
+      throw new Error("Expected the status subscriber to observe job events");
+    }
+    if (maxConcurrentRunning > 1) {
+      throw new Error(
+        `Only one job may run at a time (saw ${maxConcurrentRunning})`,
+      );
+    }
+    const reentrantJob = getEmbeddingJob(reentrant.job.id);
+    if (reentrantJob?.state !== "completed") {
+      throw new Error(
+        `Re-entrancy guard job should end completed (got ${reentrantJob?.state})`,
+      );
+    }
+  } finally {
+    unsubscribeStatus();
+  }
+
   const { resetLibrary, RESET_LIBRARY_CONFIRMATION_PHRASE } = await import(
     "../src/lib/settings/reset-library"
   );
@@ -1079,6 +1429,101 @@ async function main() {
   }
   if (!rejectedBadPhrase) {
     throw new Error("resetLibrary must reject a wrong confirmation phrase");
+  }
+
+  // --- Chunked sync + API batching (synthetic; no real remote / prod DB) ---
+  {
+    const {
+      EMBEDDING_SYNC_CHUNK_SIZE,
+      rebuildProviderIndex,
+    } = await import("../src/lib/search/sync");
+    const { EMBEDDING_API_BATCH_SIZE } = await import(
+      "../src/lib/search/embeddings"
+    );
+    if (EMBEDDING_SYNC_CHUNK_SIZE < 64 || EMBEDDING_SYNC_CHUNK_SIZE > 256) {
+      throw new Error(
+        `EMBEDDING_SYNC_CHUNK_SIZE should be 64–256 (got ${EMBEDDING_SYNC_CHUNK_SIZE})`,
+      );
+    }
+
+    const importId = (
+      sqlite
+        .prepare(
+          `INSERT INTO imports(filename, content_hash, status, items_added)
+           VALUES ('synthetic-chunk-test.json', 'synth-chunk-hash', 'completed', 0)`,
+        )
+        .run().lastInsertRowid
+    );
+    const syntheticN = EMBEDDING_SYNC_CHUNK_SIZE * 2 + 17;
+    const insertLike = sqlite.prepare(
+      `INSERT INTO liked_items(
+        media_key, href, shortcode, author_username, media_type, source,
+        liked_at, first_seen_import_id, last_seen_import_id, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'post', 'liked_posts', unixepoch(), ?, ?, unixepoch(), unixepoch())`,
+    );
+    sqlite.transaction(() => {
+      for (let i = 0; i < syntheticN; i += 1) {
+        insertLike.run(
+          `synth-like-${i}`,
+          `https://www.instagram.com/p/syn${i}/`,
+          `syn${i}`,
+          `author_${i % 11}`,
+          importId,
+          importId,
+        );
+      }
+    })();
+
+    updateSettingsKeys({
+      openaiEnabled: { saves: false, likes: true },
+      voyageEnabled: false,
+      ollamaEnabled: false,
+      localEnabled: { saves: true, likes: true },
+    });
+
+    const requestsBeforeBatch = embeddingRequests;
+    await rebuildProviderIndex("likes", "openai");
+    const batchRequests = embeddingRequests - requestsBeforeBatch;
+    const likesTotal = (
+      sqlite.prepare(`SELECT count(*) AS c FROM liked_items`).get() as {
+        c: number;
+      }
+    ).c;
+    const expectedBatches = Math.ceil(likesTotal / EMBEDDING_API_BATCH_SIZE);
+    if (batchRequests !== expectedBatches) {
+      throw new Error(
+        `OpenAI likes rebuild should batch: want ${expectedBatches} HTTP calls for ${likesTotal} rows, got ${batchRequests}`,
+      );
+    }
+    const likesOpenAiCount = (
+      sqlite
+        .prepare(`SELECT count(*) AS c FROM liked_items_vec_openai`)
+        .get() as { c: number }
+    ).c;
+    if (likesOpenAiCount !== likesTotal) {
+      throw new Error(
+        `Chunked likes openai rebuild should cover all ${likesTotal} rows (got ${likesOpenAiCount})`,
+      );
+    }
+
+    await rebuildProviderIndex("likes", "local");
+    const likesLocalCount = (
+      sqlite
+        .prepare(`SELECT count(*) AS c FROM liked_items_vec_local`)
+        .get() as { c: number }
+    ).c;
+    if (likesLocalCount !== likesTotal) {
+      throw new Error(
+        `Chunked likes local rebuild should cover all ${likesTotal} rows (got ${likesLocalCount})`,
+      );
+    }
+
+    updateSettingsKeys({
+      openaiEnabled: true,
+      voyageEnabled: true,
+      ollamaEnabled: true,
+      localEnabled: true,
+    });
   }
 
   const settingsBeforeReset = getSettingsKeysStatus();

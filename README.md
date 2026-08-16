@@ -132,6 +132,32 @@ place. Cancel is cooperative between items. APIs:
 `POST /api/search/reindex`, `GET /api/search/reindex`,
 `POST /api/search/reindex/cancel`.
 
+**Resume:** If the server restarts mid-rebuild, the interrupted job is
+re-queued as `pending` (keeping `processed`). The next run skips item ids
+already present in that provider’s vec table when the stored profile still
+matches Settings. A brand-new Reindex/Rebuild always recreates the vec table.
+Cancel leaves a partial table; the next *new* job wipes and rebuilds.
+
+**RAM / large libraries:** Status includes `host.memAvailableMb` (Linux). The
+Indexes UI warns before large reindexes (≥20k items, or likes ≥5k) and when
+estimated vector payload is high (stronger copy for Ollama). The server
+**refuses all providers** when `MemAvailable` is below ~512 MB, and refuses
+**large-library** rebuilds when below ~1024 MB (Voyage/OpenAI/local) or
+~1536 MB (Ollama, local model RAM). Tight-but-allowed cases still soft-warn
+in the UI. HTTP `POST /api/search/reindex` returns **503** with the refuse
+message; Indexes shows Blocked + the same reason.
+
+**Embedding worker:** Rebuilds normally run in a nice’d child process
+(`pnpm embedding-worker <jobId>`, spawned by the job runner) so heavy embed
+work is isolated from the Next.js UI event loop. The spawn sets
+`NODE_OPTIONS=--max-old-space-size=2048` (override with
+`EMBEDDING_WORKER_MAX_OLD_SPACE_MB`; existing `NODE_OPTIONS` flags are kept
+and an already-set max-old-space-size is not overwritten). Progress still
+updates `embedding_jobs` (SSE unchanged). Set `EMBEDDING_WORKER_INLINE=1` to
+force in-process execution (tests do this via the memory keyring). On Linux,
+systemd `MemoryMax=` on a unit wrapping the app is an optional extra OS
+cap if you want hard cgroup limits.
+
 After upgrading, run **Reindex all configured** (or `pnpm run reindex`) so likes
 vector indexes are built — existing likes rows are not re-embedded automatically
 until import changes or a reindex.
@@ -196,6 +222,6 @@ on the Import page — metadata will backfill without wiping your library.
 - This uses Meta's official data download only — not the live Instagram API (saved posts are not exposed there).
 - Media CDN URLs inside exports can expire; the app stores Instagram permalinks.
 - Database files under `data/` are local-only and gitignored (including `-wal` / `-shm`). Import spools under `data/imports/` are also gitignored.
-- Infra-only env vars (not in Settings): `INSTAGRAM_SAVES_DB`, `INSTAGRAM_SAVES_KEYRING=memory` for tests.
+- Infra-only env vars (not in Settings): `INSTAGRAM_SAVES_DB`, `INSTAGRAM_SAVES_KEYRING=memory` for tests, `EMBEDDING_WORKER_INLINE=1`, `EMBEDDING_WORKER_MAX_OLD_SPACE_MB` (default 2048).
 - Development schema changes apply on hot reload; bump `SCHEMA_VERSION` when adding or changing tables/indexes.
 - Schema explorer stores lightweight type trees in `import_schemas` (`import_id`, `file_path`, `schema_json`, sizes). Import parses each JSON file fully (no byte truncation); arrays sample up to 20 elements (first / last / random middle) for element shapes. Existing `import_schemas` rows are not upgraded automatically — re-import to refresh schemas.
