@@ -43,8 +43,29 @@ export type { VectorIndexName, SearchLibrary } from "./library";
 /** Rows embedded + written per chunk (keeps peak vector RAM bounded). */
 export const EMBEDDING_SYNC_CHUNK_SIZE = 128;
 
+/**
+ * Max bind params per `IN (...)` clause. SQLite's default
+ * SQLITE_MAX_VARIABLE_NUMBER is often 32766 (sometimes 999); staying well
+ * under avoids silent "too many SQL variables" failures on large imports.
+ */
+export const SQL_IN_CLAUSE_BATCH_SIZE = 500;
+
 async function yieldToEventLoop() {
   await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
+/** Split ids into batches safe for a single SQLite `IN (...)` clause. */
+export function chunkIdsForSqlIn(
+  ids: number[],
+  batchSize: number = SQL_IN_CLAUSE_BATCH_SIZE,
+): number[][] {
+  if (ids.length === 0) return [];
+  const size = Math.max(1, Math.floor(batchSize));
+  const chunks: number[][] = [];
+  for (let i = 0; i < ids.length; i += size) {
+    chunks.push(ids.slice(i, i + size));
+  }
+  return chunks;
 }
 
 /** Progress ticks from rebuild loops: every N items or ~1 Hz. */
@@ -82,11 +103,22 @@ export type EmbeddingSyncResult = {
   message: string;
 };
 
-function allSavesSearchRows(
-  sqlite: Database.Database = getSqlite(),
+function mapSavesSearchRow(row: unknown): SavesSearchRow {
+  const typed = row as Omit<SavesSearchRow, "collections"> & {
+    collections: string;
+  };
+  return {
+    ...typed,
+    collections: typed.collections
+      ? typed.collections.split("\u001f").filter(Boolean)
+      : [],
+  };
+}
+
+function querySavesSearchRowsBatch(
+  sqlite: Database.Database,
   itemIds?: number[],
 ): SavesSearchRow[] {
-  if (itemIds?.length === 0) return [];
   const where = itemIds
     ? `WHERE si.id IN (${itemIds.map(() => "?").join(", ")})`
     : "";
@@ -105,24 +137,31 @@ function allSavesSearchRows(
       GROUP BY si.id`,
     )
     .all(...(itemIds ?? []))
-    .map((row) => {
-      const typed = row as Omit<SavesSearchRow, "collections"> & {
-        collections: string;
-      };
-      return {
-        ...typed,
-        collections: typed.collections
-          ? typed.collections.split("\u001f").filter(Boolean)
-          : [],
-      };
-    });
+    .map(mapSavesSearchRow);
 }
 
-function allLikesSearchRows(
+/**
+ * Load saves rows for embedding. When `itemIds` is provided, queries are
+ * chunked so large imports never hit SQLite's bind-variable limit.
+ * Exported for tests (synthetic >32k id sets).
+ */
+export function allSavesSearchRows(
   sqlite: Database.Database = getSqlite(),
   itemIds?: number[],
-): LikesSearchRow[] {
+): SavesSearchRow[] {
   if (itemIds?.length === 0) return [];
+  if (!itemIds) return querySavesSearchRowsBatch(sqlite);
+  const out: SavesSearchRow[] = [];
+  for (const batch of chunkIdsForSqlIn(itemIds)) {
+    out.push(...querySavesSearchRowsBatch(sqlite, batch));
+  }
+  return out;
+}
+
+function queryLikesSearchRowsBatch(
+  sqlite: Database.Database,
+  itemIds?: number[],
+): LikesSearchRow[] {
   const where = itemIds
     ? `WHERE id IN (${itemIds.map(() => "?").join(", ")})`
     : "";
@@ -139,6 +178,23 @@ function allLikesSearchRows(
       ${where}`,
     )
     .all(...(itemIds ?? [])) as LikesSearchRow[];
+}
+
+/**
+ * Load likes rows for embedding. Chunks `IN (...)` when filtering by ids.
+ * Exported for tests (synthetic >32k id sets).
+ */
+export function allLikesSearchRows(
+  sqlite: Database.Database = getSqlite(),
+  itemIds?: number[],
+): LikesSearchRow[] {
+  if (itemIds?.length === 0) return [];
+  if (!itemIds) return queryLikesSearchRowsBatch(sqlite);
+  const out: LikesSearchRow[] = [];
+  for (const batch of chunkIdsForSqlIn(itemIds)) {
+    out.push(...queryLikesSearchRowsBatch(sqlite, batch));
+  }
+  return out;
 }
 
 export function upsertItemFts(

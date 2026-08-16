@@ -8,6 +8,12 @@ import {
   type ImportLog,
 } from "./import-log";
 import {
+  DEFAULT_IMPORT_ZIP_SAFETY_LIMITS,
+  importZipEntryTooLargeMessage,
+  importZipExtractBudgetExceededMessage,
+  type ImportZipSafetyLimits,
+} from "./import-limits";
+import {
   inferFileSchema,
   type FileSchemaCatalogEntry,
 } from "./json-schema-infer";
@@ -84,12 +90,25 @@ export type ImportRunOptions = {
   shouldCancel?: () => boolean;
   /** Precomputed hash when the spool writer already hashed the bytes. */
   contentHash?: string;
+  /**
+   * Override zip extract safety caps (tests). Production uses
+   * DEFAULT_IMPORT_ZIP_SAFETY_LIMITS from import-limits.
+   */
+  zipSafetyLimits?: Partial<ImportZipSafetyLimits>;
 };
 
 export class ImportCancelledError extends Error {
   constructor(message = "Import cancelled") {
     super(message);
     this.name = "ImportCancelledError";
+  }
+}
+
+/** Fail-closed zip / extract safety violation (bomb, over-cap entry, budget). */
+export class ImportZipSafetyError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ImportZipSafetyError";
   }
 }
 
@@ -168,7 +187,31 @@ async function syncEmbeddingsAfterImport(
   }
 }
 
-function extractJsonFilesFromZip(
+function resolveZipSafetyLimits(
+  overrides?: Partial<ImportZipSafetyLimits>,
+): ImportZipSafetyLimits {
+  return {
+    maxEntryUncompressedBytes:
+      overrides?.maxEntryUncompressedBytes ??
+      DEFAULT_IMPORT_ZIP_SAFETY_LIMITS.maxEntryUncompressedBytes,
+    maxTotalExtractedJsonBytes:
+      overrides?.maxTotalExtractedJsonBytes ??
+      DEFAULT_IMPORT_ZIP_SAFETY_LIMITS.maxTotalExtractedJsonBytes,
+  };
+}
+
+/**
+ * Extract JSON text files from an Instagram export zip.
+ *
+ * Safety: per-entry uncompressed size and total extracted-JSON budget are
+ * enforced before/after `getData()`. Fail closed with ImportZipSafetyError.
+ *
+ * Residual peak RAM: still holds the zip buffer + AdmZip structures + every
+ * extracted JSON string simultaneously. Streaming extract is Gate B+ D2.
+ *
+ * Exported for unit tests (over-cap / bomb fixtures with tiny limits).
+ */
+export function extractJsonFilesFromZip(
   buffer: Buffer,
   options?: ImportRunOptions,
 ): Array<{
@@ -176,11 +219,13 @@ function extractJsonFilesFromZip(
   content: string;
   byteSize: number;
 }> {
+  const limits = resolveZipSafetyLimits(options?.zipSafetyLimits);
   const zip = new AdmZip(buffer);
   const entries = zip.getEntries();
   const files: Array<{ name: string; content: string; byteSize: number }> = [];
   const total = entries.length;
   let scanned = 0;
+  let extractedJsonBytes = 0;
 
   for (const entry of entries) {
     throwIfCancelled(options?.shouldCancel);
@@ -195,16 +240,69 @@ function extractJsonFilesFromZip(
     if (name.includes("__MACOSX") || name.split("/").pop()?.startsWith(".")) {
       continue;
     }
-    try {
-      const data = entry.getData();
-      files.push({
-        name,
-        content: data.toString("utf8"),
-        byteSize: data.byteLength,
-      });
-    } catch {
-      // Skip unreadable entries
+
+    const headerUncompressed =
+      typeof entry.header?.size === "number" ? entry.header.size : null;
+    if (
+      headerUncompressed != null &&
+      headerUncompressed > limits.maxEntryUncompressedBytes
+    ) {
+      throw new ImportZipSafetyError(
+        importZipEntryTooLargeMessage(
+          name,
+          headerUncompressed,
+          limits.maxEntryUncompressedBytes,
+        ),
+      );
     }
+    if (
+      headerUncompressed != null &&
+      extractedJsonBytes + headerUncompressed > limits.maxTotalExtractedJsonBytes
+    ) {
+      throw new ImportZipSafetyError(
+        importZipExtractBudgetExceededMessage(
+          name,
+          extractedJsonBytes + headerUncompressed,
+          limits.maxTotalExtractedJsonBytes,
+        ),
+      );
+    }
+
+    let data: Buffer;
+    try {
+      data = entry.getData();
+    } catch (error) {
+      if (error instanceof ImportZipSafetyError) throw error;
+      // Skip corrupt / unreadable entries (non-safety failures).
+      continue;
+    }
+
+    const byteSize = data.byteLength;
+    if (byteSize > limits.maxEntryUncompressedBytes) {
+      throw new ImportZipSafetyError(
+        importZipEntryTooLargeMessage(
+          name,
+          byteSize,
+          limits.maxEntryUncompressedBytes,
+        ),
+      );
+    }
+    if (extractedJsonBytes + byteSize > limits.maxTotalExtractedJsonBytes) {
+      throw new ImportZipSafetyError(
+        importZipExtractBudgetExceededMessage(
+          name,
+          extractedJsonBytes + byteSize,
+          limits.maxTotalExtractedJsonBytes,
+        ),
+      );
+    }
+
+    extractedJsonBytes += byteSize;
+    files.push({
+      name,
+      content: data.toString("utf8"),
+      byteSize,
+    });
 
     if (scanned % 25 === 0 || scanned === total) {
       void options?.onProgress?.({

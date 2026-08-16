@@ -1031,12 +1031,18 @@ async function main() {
   ) {
     throw new Error("NODE_OPTIONS merge must append max-old-space-size");
   }
-  const keepExisting = mergeNodeOptionsMaxOldSpace(
-    "--max-old-space-size=4096 --trace-warnings",
+  const overrideInherited = mergeNodeOptionsMaxOldSpace(
+    "--max-old-space-size=15641 --trace-warnings",
     2048,
   );
-  if (!keepExisting.includes("--max-old-space-size=4096")) {
-    throw new Error("NODE_OPTIONS merge must not overwrite existing heap cap");
+  if (
+    overrideInherited.includes("--max-old-space-size=15641") ||
+    !overrideInherited.includes("--max-old-space-size=2048") ||
+    !overrideInherited.includes("--trace-warnings")
+  ) {
+    throw new Error(
+      "NODE_OPTIONS merge must replace inherited max-old-space-size with the worker cap",
+    );
   }
 
   const statusWithHost = getSearchIndexStatus();
@@ -1324,6 +1330,198 @@ async function main() {
     }
   } finally {
     unsubscribeStatus();
+  }
+
+  // --- Gate B+: SQL IN() chunking + zip extract safety ---
+  const {
+    allSavesSearchRows,
+    allLikesSearchRows,
+    chunkIdsForSqlIn,
+    SQL_IN_CLAUSE_BATCH_SIZE,
+  } = await import("../src/lib/search/sync");
+  const {
+    extractJsonFilesFromZip,
+    ImportZipSafetyError,
+    importExportArchive,
+  } = await import("../src/lib/import-export");
+  const {
+    IMPORT_MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
+    IMPORT_MAX_EXTRACTED_JSON_BYTES,
+  } = await import("../src/lib/import-limits");
+  const AdmZip = (await import("adm-zip")).default;
+
+  const chunkProbe = chunkIdsForSqlIn(
+    Array.from({ length: 1_250 }, (_, i) => i + 1),
+  );
+  if (
+    chunkProbe.length !== 3 ||
+    chunkProbe[0]!.length !== SQL_IN_CLAUSE_BATCH_SIZE ||
+    chunkProbe[2]!.length !== 250
+  ) {
+    throw new Error("chunkIdsForSqlIn must split into ≤ SQL_IN_CLAUSE_BATCH_SIZE batches");
+  }
+
+  // Synthetic >32k ids: unchunked IN() hits SQLite variable limits and drops work.
+  const OVER_SQLITE_IN_LIMIT = 40_000;
+  const importRow = sqlite
+    .prepare(
+      `INSERT INTO imports (filename, content_hash, status, items_found, items_added)
+       VALUES ('bulk-in-test.zip', ?, 'completed', 0, 0)`,
+    )
+    .run(`bulk-in-${Date.now()}`);
+  const bulkImportId = Number(importRow.lastInsertRowid);
+  const insertSaved = sqlite.prepare(
+    `INSERT INTO saved_items (
+      media_key, href, shortcode, media_type, author_username,
+      first_seen_import_id, last_seen_import_id
+    ) VALUES (?, ?, ?, 'reel', 'bulk.author', ?, ?)`,
+  );
+  const insertLiked = sqlite.prepare(
+    `INSERT INTO liked_items (
+      media_key, href, shortcode, media_type, author_username, source,
+      first_seen_import_id, last_seen_import_id
+    ) VALUES (?, ?, ?, 'reel', 'bulk.author', 'liked_posts', ?, ?)`,
+  );
+  sqlite.transaction(() => {
+    for (let i = 0; i < OVER_SQLITE_IN_LIMIT; i++) {
+      const key = `bulk-in-${i}`;
+      insertSaved.run(key, `https://www.instagram.com/reel/${key}/`, key, bulkImportId, bulkImportId);
+      insertLiked.run(
+        `like-${key}`,
+        `https://www.instagram.com/reel/like-${key}/`,
+        `like-${key}`,
+        bulkImportId,
+        bulkImportId,
+      );
+    }
+  })();
+
+  const savesIds = (
+    sqlite
+      .prepare(`SELECT id FROM saved_items WHERE media_key LIKE 'bulk-in-%'`)
+      .all() as Array<{ id: number }>
+  ).map((r) => r.id);
+  const likesIds = (
+    sqlite
+      .prepare(`SELECT id FROM liked_items WHERE media_key LIKE 'like-bulk-in-%'`)
+      .all() as Array<{ id: number }>
+  ).map((r) => r.id);
+  if (savesIds.length !== OVER_SQLITE_IN_LIMIT || likesIds.length !== OVER_SQLITE_IN_LIMIT) {
+    throw new Error("Failed to seed 40k saves/likes for IN() overflow test");
+  }
+
+  let savesLoaded: Array<{ id: number }>;
+  let likesLoaded: Array<{ id: number }>;
+  try {
+    savesLoaded = allSavesSearchRows(sqlite, savesIds);
+    likesLoaded = allLikesSearchRows(sqlite, likesIds);
+  } catch (error) {
+    throw new Error(
+      `Chunked IN() lookup must not throw for ${OVER_SQLITE_IN_LIMIT} ids: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (savesLoaded.length !== OVER_SQLITE_IN_LIMIT) {
+    throw new Error(
+      `Chunked saves IN() silently dropped rows: got ${savesLoaded.length}, expected ${OVER_SQLITE_IN_LIMIT}`,
+    );
+  }
+  if (likesLoaded.length !== OVER_SQLITE_IN_LIMIT) {
+    throw new Error(
+      `Chunked likes IN() silently dropped rows: got ${likesLoaded.length}, expected ${OVER_SQLITE_IN_LIMIT}`,
+    );
+  }
+  sqlite.prepare(`DELETE FROM liked_items WHERE media_key LIKE 'like-bulk-in-%'`).run();
+  sqlite.prepare(`DELETE FROM saved_items WHERE media_key LIKE 'bulk-in-%'`).run();
+  sqlite.prepare(`DELETE FROM imports WHERE id = ?`).run(bulkImportId);
+
+  // Zip entry / total budget fail closed (tiny limits so fixtures stay small).
+  if (
+    IMPORT_MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES < 64 * 1024 * 1024 ||
+    IMPORT_MAX_EXTRACTED_JSON_BYTES < IMPORT_MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES
+  ) {
+    throw new Error("Production zip safety caps look misconfigured");
+  }
+
+  const okZip = new AdmZip();
+  okZip.addFile(
+    "your_instagram_activity/saved/saved_posts.json",
+    Buffer.from('{"saved_saved_media":[]}', "utf8"),
+  );
+  const okFiles = extractJsonFilesFromZip(okZip.toBuffer(), {
+    zipSafetyLimits: {
+      maxEntryUncompressedBytes: 10_000,
+      maxTotalExtractedJsonBytes: 20_000,
+    },
+  });
+  if (okFiles.length !== 1) {
+    throw new Error("Under-cap zip should extract JSON entries");
+  }
+
+  const overEntryZip = new AdmZip();
+  overEntryZip.addFile(
+    "your_instagram_activity/saved/saved_posts.json",
+    Buffer.alloc(2_000, 0x20),
+  );
+  let overEntryCaught = false;
+  try {
+    extractJsonFilesFromZip(overEntryZip.toBuffer(), {
+      zipSafetyLimits: {
+        maxEntryUncompressedBytes: 500,
+        maxTotalExtractedJsonBytes: 50_000,
+      },
+    });
+  } catch (error) {
+    overEntryCaught = error instanceof ImportZipSafetyError;
+    if (
+      !overEntryCaught ||
+      !(error instanceof Error) ||
+      !error.message.includes("too large when uncompressed")
+    ) {
+      throw new Error("Over-cap entry must throw ImportZipSafetyError with clear message");
+    }
+  }
+  if (!overEntryCaught) {
+    throw new Error("Over-cap zip entry must fail closed");
+  }
+
+  const overBudgetZip = new AdmZip();
+  overBudgetZip.addFile("a.json", Buffer.from('{"a":1}', "utf8"));
+  overBudgetZip.addFile("b.json", Buffer.from('{"b":2,"pad":"xxxxxxxxxxxxxxxx"}', "utf8"));
+  let overBudgetCaught = false;
+  try {
+    extractJsonFilesFromZip(overBudgetZip.toBuffer(), {
+      zipSafetyLimits: {
+        maxEntryUncompressedBytes: 10_000,
+        maxTotalExtractedJsonBytes: 12,
+      },
+    });
+  } catch (error) {
+    overBudgetCaught = error instanceof ImportZipSafetyError;
+    if (
+      !overBudgetCaught ||
+      !(error instanceof Error) ||
+      !error.message.includes("in-memory budget")
+    ) {
+      throw new Error("Extract budget exceeded must throw ImportZipSafetyError with clear message");
+    }
+  }
+  if (!overBudgetCaught) {
+    throw new Error("Total extracted-JSON budget must fail closed");
+  }
+
+  const archiveFail = await importExportArchive(overEntryZip.toBuffer(), "bomb-entry.zip", {
+    zipSafetyLimits: {
+      maxEntryUncompressedBytes: 500,
+      maxTotalExtractedJsonBytes: 50_000,
+    },
+  });
+  if (
+    archiveFail.status !== "failed" ||
+    !archiveFail.message.includes("too large when uncompressed")
+  ) {
+    throw new Error("importExportArchive must surface zip safety failures as failed imports");
   }
 
   const { resetLibrary, RESET_LIBRARY_CONFIRMATION_PHRASE } = await import(

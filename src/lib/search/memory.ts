@@ -237,7 +237,9 @@ export function resolveEmbeddingWorkerMaxOldSpaceMb(): number {
 
 /**
  * Merge `--max-old-space-size=N` into NODE_OPTIONS without clobbering unrelated
- * flags. If max-old-space-size is already present, leave it unchanged.
+ * flags. The requested heap cap is authoritative: any inherited
+ * `--max-old-space-size` (e.g. Next's large parent heap) is replaced so the
+ * embedding worker stays at EMBEDDING_WORKER_MAX_OLD_SPACE_MB / default 2048.
  */
 export function mergeNodeOptionsMaxOldSpace(
   existing: string | undefined,
@@ -246,6 +248,9 @@ export function mergeNodeOptionsMaxOldSpace(
   const flag = `--max-old-space-size=${maxOldSpaceMb}`;
   const trimmed = existing?.trim() ?? "";
   if (!trimmed) return flag;
-  if (/(?:^|\s)--max-old-space-size=\d+/.test(trimmed)) return trimmed;
-  return `${trimmed} ${flag}`;
+  const withoutHeap = trimmed
+    .replace(/(?:^|\s)--max-old-space-size=\d+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return withoutHeap ? `${withoutHeap} ${flag}` : flag;
 }

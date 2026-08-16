@@ -6,8 +6,10 @@
  * in SQLite (WAL); only this process should write vectors while the job runs.
  *
  * The job runner sets `NODE_OPTIONS=--max-old-space-size=…` (default 2048 MB,
- * override with `EMBEDDING_WORKER_MAX_OLD_SPACE_MB`) and prefers `nice -n 10`
- * on Linux. Manual CLI runs should set the same env if you want the heap cap.
+ * override with `EMBEDDING_WORKER_MAX_OLD_SPACE_MB`), replacing any inherited
+ * parent heap cap (e.g. Next's large max-old-space-size), and prefers
+ * `nice -n 10` on Linux. Manual CLI runs should set the same env if you want
+ * the heap cap.
  *
  * Usage: `pnpm embedding-worker <jobId>`
  * Or:    `pnpm exec tsx scripts/embedding-worker.ts <jobId>`
