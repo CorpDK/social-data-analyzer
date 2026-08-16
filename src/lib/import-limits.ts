@@ -22,15 +22,22 @@ export const IMPORT_MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES = 512 * 1024 * 1024;
 export const IMPORT_MAX_ZIP_ENTRY_LABEL = "512MB";
 
 /**
- * Total budget for all extracted JSON payloads held in memory during import.
- * Remains below the upload cap; media in the zip is never extracted.
+ * Total budget for JSON bytes streamed out of a zip during import (running
+ * sum of per-entry sizes). Media in the zip is never extracted.
  *
- * Residual peak-RAM note: the import path still may hold the full spool
- * buffer + AdmZip parse structures + every JSON string at once. Entry/total
- * caps bound extracted JSON, but streaming extract is still required to fully
- * clear that peak (Gate B+ D2).
+ * Peak RAM (Gate B+ D2): production zip import streams from the spool path via
+ * yauzl and parse-and-drops each JSON file (schema + parse accumulators only).
+ * It does not hold the full spool buffer + all JSON strings at once. Caps still
+ * fail closed on bombs / oversized entries.
  */
 export const IMPORT_MAX_EXTRACTED_JSON_BYTES = 768 * 1024 * 1024;
+
+/**
+ * Items per SQLite write transaction during import persist.
+ * Avoids one transaction per row on large Meta exports while keeping progress
+ * ticks responsive (Gate B+ N2).
+ */
+export const IMPORT_WRITE_BATCH_SIZE = 500;
 
 /** Human-readable label for total extracted-JSON budget errors. */
 export const IMPORT_MAX_EXTRACTED_JSON_LABEL = "768MB";

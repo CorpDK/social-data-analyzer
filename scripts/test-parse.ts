@@ -1347,8 +1347,16 @@ async function main() {
   const {
     IMPORT_MAX_ZIP_ENTRY_UNCOMPRESSED_BYTES,
     IMPORT_MAX_EXTRACTED_JSON_BYTES,
+    IMPORT_WRITE_BATCH_SIZE,
   } = await import("../src/lib/import-limits");
   const AdmZip = (await import("adm-zip")).default;
+  const nodeFs = await import("node:fs");
+  const nodeOs = await import("node:os");
+  const nodePath = await import("node:path");
+
+  if (IMPORT_WRITE_BATCH_SIZE < 100 || IMPORT_WRITE_BATCH_SIZE > 5_000) {
+    throw new Error("IMPORT_WRITE_BATCH_SIZE looks misconfigured");
+  }
 
   const chunkProbe = chunkIdsForSqlIn(
     Array.from({ length: 1_250 }, (_, i) => i + 1),
@@ -1449,7 +1457,7 @@ async function main() {
     "your_instagram_activity/saved/saved_posts.json",
     Buffer.from('{"saved_saved_media":[]}', "utf8"),
   );
-  const okFiles = extractJsonFilesFromZip(okZip.toBuffer(), {
+  const okFiles = await extractJsonFilesFromZip(okZip.toBuffer(), {
     zipSafetyLimits: {
       maxEntryUncompressedBytes: 10_000,
       maxTotalExtractedJsonBytes: 20_000,
@@ -1459,6 +1467,30 @@ async function main() {
     throw new Error("Under-cap zip should extract JSON entries");
   }
 
+  // Path-based extract (production spool path) must not require a Buffer.
+  const spoolZipPath = nodePath.join(
+    nodeOs.tmpdir(),
+    `ig-saves-spool-extract-${Date.now()}.zip`,
+  );
+  nodeFs.writeFileSync(spoolZipPath, okZip.toBuffer());
+  try {
+    const fromPath = await extractJsonFilesFromZip(spoolZipPath, {
+      zipSafetyLimits: {
+        maxEntryUncompressedBytes: 10_000,
+        maxTotalExtractedJsonBytes: 20_000,
+      },
+    });
+    if (fromPath.length !== 1 || fromPath[0]!.name !== okFiles[0]!.name) {
+      throw new Error("Path-based yauzl extract must match buffer extract");
+    }
+  } finally {
+    try {
+      nodeFs.unlinkSync(spoolZipPath);
+    } catch {
+      // ignore
+    }
+  }
+
   const overEntryZip = new AdmZip();
   overEntryZip.addFile(
     "your_instagram_activity/saved/saved_posts.json",
@@ -1466,7 +1498,7 @@ async function main() {
   );
   let overEntryCaught = false;
   try {
-    extractJsonFilesFromZip(overEntryZip.toBuffer(), {
+    await extractJsonFilesFromZip(overEntryZip.toBuffer(), {
       zipSafetyLimits: {
         maxEntryUncompressedBytes: 500,
         maxTotalExtractedJsonBytes: 50_000,
@@ -1491,7 +1523,7 @@ async function main() {
   overBudgetZip.addFile("b.json", Buffer.from('{"b":2,"pad":"xxxxxxxxxxxxxxxx"}', "utf8"));
   let overBudgetCaught = false;
   try {
-    extractJsonFilesFromZip(overBudgetZip.toBuffer(), {
+    await extractJsonFilesFromZip(overBudgetZip.toBuffer(), {
       zipSafetyLimits: {
         maxEntryUncompressedBytes: 10_000,
         maxTotalExtractedJsonBytes: 12,

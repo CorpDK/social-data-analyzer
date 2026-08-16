@@ -740,35 +740,62 @@ function isSavedJsonFile(name: string): boolean {
   return lower.includes("saved") || lower.includes("collection");
 }
 
-export function parseExportJsonFiles(
-  files: Array<{ name: string; content: string }>,
-): ParseResult {
-  const items = new Map<string, ParsedSavedItem>();
-  const savedJsonFiles: string[] = [];
-  const warnings: string[] = [];
+/** Mutable accumulator for streaming zip extract (parse-and-drop per file). */
+export type SavesParseAccumulator = {
+  items: Map<string, ParsedSavedItem>;
+  savedJsonFiles: string[];
+  warnings: string[];
+};
 
-  for (const file of files) {
-    if (!shouldParseJsonFile(file.name)) continue;
+export function createSavesParseAccumulator(): SavesParseAccumulator {
+  return {
+    items: new Map(),
+    savedJsonFiles: [],
+    warnings: [],
+  };
+}
 
-    if (isSavedJsonFile(file.name)) {
-      savedJsonFiles.push(file.name);
-    }
+/** Parse one JSON file into an accumulator; caller may drop `content` afterward. */
+export function accumulateExportJsonFile(
+  acc: SavesParseAccumulator,
+  file: { name: string; content: string },
+): void {
+  if (!shouldParseJsonFile(file.name)) return;
 
-    try {
-      const json = JSON.parse(file.content) as unknown;
-      parseJsonDocument(json, items, file.name);
-    } catch {
-      warnings.push(`Skipped malformed JSON: ${file.name}`);
-    }
+  if (isSavedJsonFile(file.name)) {
+    acc.savedJsonFiles.push(file.name);
   }
 
-  const parsedItems = [...items.values()].sort((a, b) => {
+  try {
+    const json = JSON.parse(file.content) as unknown;
+    parseJsonDocument(json, acc.items, file.name);
+  } catch {
+    acc.warnings.push(`Skipped malformed JSON: ${file.name}`);
+  }
+}
+
+export function finalizeSavesParse(acc: SavesParseAccumulator): ParseResult {
+  const parsedItems = [...acc.items.values()].sort((a, b) => {
     const at = a.savedAt?.getTime() ?? 0;
     const bt = b.savedAt?.getTime() ?? 0;
     return bt - at;
   });
 
-  return { items: parsedItems, savedJsonFiles, warnings };
+  return {
+    items: parsedItems,
+    savedJsonFiles: acc.savedJsonFiles,
+    warnings: acc.warnings,
+  };
+}
+
+export function parseExportJsonFiles(
+  files: Array<{ name: string; content: string }>,
+): ParseResult {
+  const acc = createSavesParseAccumulator();
+  for (const file of files) {
+    accumulateExportJsonFile(acc, file);
+  }
+  return finalizeSavesParse(acc);
 }
 
 function likedSourceFromPath(name: string): LikedSource | null {
@@ -986,6 +1013,53 @@ function parseLikedJsonDocument(
   }
 }
 
+/** Mutable accumulator for streaming likes parse (parse-and-drop per file). */
+export type LikesParseAccumulator = {
+  items: Map<string, ParsedLikedItem>;
+  likedJsonFiles: string[];
+  warnings: string[];
+};
+
+export function createLikesParseAccumulator(): LikesParseAccumulator {
+  return {
+    items: new Map(),
+    likedJsonFiles: [],
+    warnings: [],
+  };
+}
+
+export function accumulateLikedExportJsonFile(
+  acc: LikesParseAccumulator,
+  file: { name: string; content: string },
+): void {
+  if (!shouldParseLikedJsonFile(file.name)) return;
+  const source = likedSourceFromPath(file.name);
+  if (!source) return;
+
+  acc.likedJsonFiles.push(file.name);
+
+  try {
+    const json = JSON.parse(file.content) as unknown;
+    parseLikedJsonDocument(json, acc.items, source);
+  } catch {
+    acc.warnings.push(`Skipped malformed likes JSON: ${file.name}`);
+  }
+}
+
+export function finalizeLikesParse(acc: LikesParseAccumulator): LikesParseResult {
+  const parsedItems = [...acc.items.values()].sort((a, b) => {
+    const at = a.likedAt?.getTime() ?? 0;
+    const bt = b.likedAt?.getTime() ?? 0;
+    return bt - at;
+  });
+
+  return {
+    items: parsedItems,
+    likedJsonFiles: acc.likedJsonFiles,
+    warnings: acc.warnings,
+  };
+}
+
 /**
  * Parse Instagram likes export files:
  * - `your_instagram_activity/likes/liked_posts.json` (posts + reels)
@@ -997,30 +1071,9 @@ function parseLikedJsonDocument(
 export function parseLikedExportJsonFiles(
   files: Array<{ name: string; content: string }>,
 ): LikesParseResult {
-  const items = new Map<string, ParsedLikedItem>();
-  const likedJsonFiles: string[] = [];
-  const warnings: string[] = [];
-
+  const acc = createLikesParseAccumulator();
   for (const file of files) {
-    if (!shouldParseLikedJsonFile(file.name)) continue;
-    const source = likedSourceFromPath(file.name);
-    if (!source) continue;
-
-    likedJsonFiles.push(file.name);
-
-    try {
-      const json = JSON.parse(file.content) as unknown;
-      parseLikedJsonDocument(json, items, source);
-    } catch {
-      warnings.push(`Skipped malformed likes JSON: ${file.name}`);
-    }
+    accumulateLikedExportJsonFile(acc, file);
   }
-
-  const parsedItems = [...items.values()].sort((a, b) => {
-    const at = a.likedAt?.getTime() ?? 0;
-    const bt = b.likedAt?.getTime() ?? 0;
-    return bt - at;
-  });
-
-  return { items: parsedItems, likedJsonFiles, warnings };
+  return finalizeLikesParse(acc);
 }

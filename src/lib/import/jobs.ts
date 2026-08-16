@@ -403,30 +403,39 @@ async function executeJob(jobId: number) {
       message: `Reading ${job.filename}…`,
     });
 
-    const buffer = readSpoolFile(job.spoolPath);
-    if (buffer.byteLength === 0) {
-      throw new Error("File is empty.");
-    }
-    if (buffer.byteLength > IMPORT_MAX_FILE_BYTES) {
-      throw new Error(importFileTooLargeMessage());
-    }
-
     const onProgress = (progress: ImportProgress) =>
       applyProgress(jobId, progress);
     const cancel = () => shouldCancel(jobId);
 
-    const result =
-      job.kind === "json"
-        ? await importExportJson(buffer.toString("utf8"), job.filename, {
-            onProgress,
-            shouldCancel: cancel,
-            contentHash: job.contentHash ?? undefined,
-          })
-        : await importExportArchive(buffer, job.filename, {
-            onProgress,
-            shouldCancel: cancel,
-            contentHash: job.contentHash ?? undefined,
-          });
+    let result;
+    if (job.kind === "json") {
+      const buffer = readSpoolFile(job.spoolPath);
+      if (buffer.byteLength === 0) {
+        throw new Error("File is empty.");
+      }
+      if (buffer.byteLength > IMPORT_MAX_FILE_BYTES) {
+        throw new Error(importFileTooLargeMessage());
+      }
+      result = await importExportJson(buffer.toString("utf8"), job.filename, {
+        onProgress,
+        shouldCancel: cancel,
+        contentHash: job.contentHash ?? undefined,
+      });
+    } else {
+      const stat = fs.statSync(job.spoolPath);
+      if (stat.size === 0) {
+        throw new Error("File is empty.");
+      }
+      if (stat.size > IMPORT_MAX_FILE_BYTES) {
+        throw new Error(importFileTooLargeMessage());
+      }
+      // Stream from spool path — do not readFileSync the whole zip into RAM.
+      result = await importExportArchive(job.spoolPath, job.filename, {
+        onProgress,
+        shouldCancel: cancel,
+        contentHash: job.contentHash ?? undefined,
+      });
+    }
 
     if (shouldCancel(jobId)) {
       updateJob(jobId, {

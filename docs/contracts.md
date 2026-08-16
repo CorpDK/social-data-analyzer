@@ -34,10 +34,11 @@ Kinds: `zip` | `json`
 Progress details may include: `filesScanned`, `jsonFiles`, `schemasInferred`,
 `itemsParsed`, `likesParsed`, add/update/skip counts, `importId`.
 
-Zip extract fails closed on per-entry uncompressed size and total extracted-JSON
-budget (`ImportZipSafetyError` → failed import with a clear message). Peak RAM
-from full spool + AdmZip + all JSON strings is still a known residual (streaming
-extract is a separate Gate B+ item).
+Zip extract streams from the spool path via yauzl (no full-spool
+`readFileSync` + AdmZip). Each JSON entry is schema-inferred and parsed, then
+dropped before the next (parse-and-drop). Per-entry / total JSON caps still
+fail closed (`ImportZipSafetyError`). Import writes batch ~500 rows per
+transaction (`IMPORT_WRITE_BATCH_SIZE`).
 
 ## Embedding jobs (`embedding_jobs`)
 

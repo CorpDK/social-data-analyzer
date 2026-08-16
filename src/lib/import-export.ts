@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
-import AdmZip from "adm-zip";
+import fs from "node:fs";
 import { and, eq } from "drizzle-orm";
+import yauzl, { type Entry, type ZipFile } from "yauzl";
 import { getDb, getSqlite, schema } from "./db";
 import {
   buildImportLogFromItems,
@@ -9,6 +10,7 @@ import {
 } from "./import-log";
 import {
   DEFAULT_IMPORT_ZIP_SAFETY_LIMITS,
+  IMPORT_WRITE_BATCH_SIZE,
   importZipEntryTooLargeMessage,
   importZipExtractBudgetExceededMessage,
   type ImportZipSafetyLimits,
@@ -18,10 +20,18 @@ import {
   type FileSchemaCatalogEntry,
 } from "./json-schema-infer";
 import {
+  accumulateExportJsonFile,
+  accumulateLikedExportJsonFile,
+  createLikesParseAccumulator,
+  createSavesParseAccumulator,
+  finalizeLikesParse,
+  finalizeSavesParse,
   parseExportJsonFiles,
   parseLikedExportJsonFiles,
+  type LikesParseResult,
   type ParsedLikedItem,
   type ParsedSavedItem,
+  type ParseResult,
 } from "./parse-export";
 import { upsertLikedItemFts } from "./likes-fts";
 import {
@@ -29,6 +39,9 @@ import {
   syncLikedItemEmbeddings,
   upsertItemFts,
 } from "./search/sync";
+
+/** Zip bytes in memory, or a spool/file path streamed via yauzl. */
+export type ZipImportSource = Buffer | string;
 
 const { imports, savedItems, itemCollections, importSchemas, likedItems } =
   schema;
@@ -116,6 +129,404 @@ function hashBuffer(buffer: Buffer): string {
   return createHash("sha256").update(buffer).digest("hex");
 }
 
+function hashFile(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash("sha256");
+    const stream = fs.createReadStream(filePath);
+    stream.on("data", (chunk) => hash.update(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(hash.digest("hex")));
+  });
+}
+
+async function hashZipSource(source: ZipImportSource): Promise<string> {
+  if (typeof source === "string") return hashFile(source);
+  return hashBuffer(source);
+}
+
+function openZipSource(source: ZipImportSource): Promise<ZipFile> {
+  return new Promise((resolve, reject) => {
+    const options = { lazyEntries: true, validateEntrySizes: true } as const;
+    if (typeof source === "string") {
+      yauzl.open(source, options, (err, zipfile) => {
+        if (err || !zipfile) reject(err ?? new Error("Failed to open zip"));
+        else resolve(zipfile);
+      });
+    } else {
+      yauzl.fromBuffer(source, options, (err, zipfile) => {
+        if (err || !zipfile) reject(err ?? new Error("Failed to open zip"));
+        else resolve(zipfile);
+      });
+    }
+  });
+}
+
+function isJsonZipEntryName(name: string): boolean {
+  if (!name.toLowerCase().endsWith(".json")) return false;
+  if (name.includes("__MACOSX") || name.split("/").pop()?.startsWith(".")) {
+    return false;
+  }
+  return true;
+}
+
+function readZipEntryBuffer(
+  zipfile: ZipFile,
+  entry: Entry,
+  maxBytes: number,
+): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    zipfile.openReadStream(entry, (err, readStream) => {
+      if (err || !readStream) {
+        reject(err ?? new Error("Failed to open zip entry stream"));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let size = 0;
+      let settled = false;
+
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        readStream.destroy();
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+
+      readStream.on("data", (chunk: Buffer) => {
+        size += chunk.byteLength;
+        if (size > maxBytes) {
+          fail(
+            new ImportZipSafetyError(
+              importZipEntryTooLargeMessage(
+                entry.fileName.replace(/\\/g, "/"),
+                size,
+                maxBytes,
+              ),
+            ),
+          );
+          return;
+        }
+        chunks.push(chunk);
+      });
+      readStream.on("error", fail);
+      readStream.on("end", () => {
+        if (settled) return;
+        settled = true;
+        resolve(Buffer.concat(chunks));
+      });
+    });
+  });
+}
+
+type ZipJsonEntryHandler = (file: {
+  name: string;
+  content: string;
+  byteSize: number;
+  scanned: number;
+  jsonFiles: number;
+}) => void | Promise<void>;
+
+/**
+ * Stream JSON entries from a zip (path or buffer) with fail-closed size caps.
+ * Invokes `onEntry` once per JSON file; does not retain entry contents itself.
+ */
+async function forEachZipJsonEntry(
+  source: ZipImportSource,
+  options: ImportRunOptions | undefined,
+  onEntry: ZipJsonEntryHandler,
+): Promise<{ filesScanned: number; jsonFiles: number }> {
+  const limits = resolveZipSafetyLimits(options?.zipSafetyLimits);
+  const zipfile = await openZipSource(source);
+  let filesScanned = 0;
+  let jsonFiles = 0;
+  let extractedJsonBytes = 0;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const fail = (error: unknown) => {
+        if (settled) return;
+        settled = true;
+        reject(error instanceof Error ? error : new Error(String(error)));
+      };
+      const done = () => {
+        if (settled) return;
+        settled = true;
+        resolve();
+      };
+
+      zipfile.on("error", fail);
+      zipfile.on("end", done);
+
+      zipfile.on("entry", (entry: Entry) => {
+        void (async () => {
+          try {
+            throwIfCancelled(options?.shouldCancel);
+            filesScanned += 1;
+            const name = entry.fileName.replace(/\\/g, "/");
+
+            if (/\/$/.test(entry.fileName) || !isJsonZipEntryName(name)) {
+              zipfile.readEntry();
+              return;
+            }
+
+            const headerUncompressed =
+              typeof entry.uncompressedSize === "number"
+                ? entry.uncompressedSize
+                : null;
+            if (
+              headerUncompressed != null &&
+              headerUncompressed > limits.maxEntryUncompressedBytes
+            ) {
+              throw new ImportZipSafetyError(
+                importZipEntryTooLargeMessage(
+                  name,
+                  headerUncompressed,
+                  limits.maxEntryUncompressedBytes,
+                ),
+              );
+            }
+            if (
+              headerUncompressed != null &&
+              extractedJsonBytes + headerUncompressed >
+                limits.maxTotalExtractedJsonBytes
+            ) {
+              throw new ImportZipSafetyError(
+                importZipExtractBudgetExceededMessage(
+                  name,
+                  extractedJsonBytes + headerUncompressed,
+                  limits.maxTotalExtractedJsonBytes,
+                ),
+              );
+            }
+
+            let data: Buffer;
+            try {
+              data = await readZipEntryBuffer(
+                zipfile,
+                entry,
+                limits.maxEntryUncompressedBytes,
+              );
+            } catch (error) {
+              if (error instanceof ImportZipSafetyError) throw error;
+              // Skip corrupt / unreadable entries (non-safety failures).
+              zipfile.readEntry();
+              return;
+            }
+
+            const byteSize = data.byteLength;
+            if (byteSize > limits.maxEntryUncompressedBytes) {
+              throw new ImportZipSafetyError(
+                importZipEntryTooLargeMessage(
+                  name,
+                  byteSize,
+                  limits.maxEntryUncompressedBytes,
+                ),
+              );
+            }
+            if (
+              extractedJsonBytes + byteSize > limits.maxTotalExtractedJsonBytes
+            ) {
+              throw new ImportZipSafetyError(
+                importZipExtractBudgetExceededMessage(
+                  name,
+                  extractedJsonBytes + byteSize,
+                  limits.maxTotalExtractedJsonBytes,
+                ),
+              );
+            }
+
+            extractedJsonBytes += byteSize;
+            jsonFiles += 1;
+            const content = data.toString("utf8");
+            await onEntry({
+              name,
+              content,
+              byteSize,
+              scanned: filesScanned,
+              jsonFiles,
+            });
+            zipfile.readEntry();
+          } catch (error) {
+            fail(error);
+            try {
+              zipfile.close();
+            } catch {
+              // ignore
+            }
+          }
+        })();
+      });
+
+      zipfile.readEntry();
+    });
+  } finally {
+    try {
+      zipfile.close();
+    } catch {
+      // ignore
+    }
+  }
+
+  return { filesScanned, jsonFiles };
+}
+
+/**
+ * Extract JSON text files from an Instagram export zip (buffer or path).
+ *
+ * Safety: per-entry uncompressed size and total extracted-JSON budget are
+ * enforced before/after streaming entry bytes. Fail closed with ImportZipSafetyError.
+ *
+ * Prefer `processZipExportStreaming` for production imports (parse-and-drop).
+ * This helper retains all JSON strings and is mainly for tests / callers that
+ * need the raw file list.
+ */
+export async function extractJsonFilesFromZip(
+  source: ZipImportSource,
+  options?: ImportRunOptions,
+): Promise<Array<{ name: string; content: string; byteSize: number }>> {
+  const files: Array<{ name: string; content: string; byteSize: number }> = [];
+
+  const { filesScanned, jsonFiles } = await forEachZipJsonEntry(
+    source,
+    options,
+    async (file) => {
+      files.push({
+        name: file.name,
+        content: file.content,
+        byteSize: file.byteSize,
+      });
+      if (file.scanned % 25 === 0) {
+        await emitProgress(options?.onProgress, {
+          phase: "extracting",
+          processed: file.scanned,
+          total: Math.max(1, file.scanned),
+          message: `Scanning zip… ${file.jsonFiles} JSON file${file.jsonFiles === 1 ? "" : "s"} found`,
+          details: { filesScanned: file.scanned, jsonFiles: file.jsonFiles },
+        });
+      }
+    },
+  );
+
+  await emitProgress(options?.onProgress, {
+    phase: "extracting",
+    processed: Math.max(1, filesScanned),
+    total: Math.max(1, filesScanned),
+    message: `Found ${jsonFiles} JSON file${jsonFiles === 1 ? "" : "s"}`,
+    details: { filesScanned, jsonFiles },
+  });
+
+  return files;
+}
+
+type StreamedZipExport = {
+  schemaCatalog: FileSchemaCatalogEntry[];
+  parsed: ParseResult;
+  likedParsed: LikesParseResult;
+  fileNames: string[];
+};
+
+/**
+ * Stream zip JSON entries: infer schema + accumulate saves/likes parse state,
+ * then drop each file's content before the next entry (Gate B+ D2).
+ */
+async function processZipExportStreaming(
+  source: ZipImportSource,
+  options?: ImportRunOptions,
+): Promise<StreamedZipExport> {
+  const schemaCatalog: FileSchemaCatalogEntry[] = [];
+  const savesAcc = createSavesParseAccumulator();
+  const likesAcc = createLikesParseAccumulator();
+  const fileNames: string[] = [];
+
+  await emitProgress(options?.onProgress, {
+    phase: "extracting",
+    processed: 0,
+    total: 1,
+    message: "Opening zip archive…",
+    details: { filesScanned: 0, jsonFiles: 0 },
+  });
+
+  const { filesScanned, jsonFiles } = await forEachZipJsonEntry(
+    source,
+    options,
+    async (file) => {
+      fileNames.push(file.name);
+
+      await emitProgress(options?.onProgress, {
+        phase: "extracting",
+        processed: file.scanned,
+        total: Math.max(1, file.scanned),
+        message: `Scanning zip… ${file.jsonFiles} JSON file${file.jsonFiles === 1 ? "" : "s"} found`,
+        details: { filesScanned: file.scanned, jsonFiles: file.jsonFiles },
+      });
+
+      await emitProgress(options?.onProgress, {
+        phase: "inferring_schemas",
+        processed: file.jsonFiles,
+        total: Math.max(1, file.jsonFiles),
+        message: `Inferring schemas… ${file.jsonFiles}`,
+        details: {
+          schemasInferred: file.jsonFiles,
+          jsonFiles: file.jsonFiles,
+        },
+      });
+      schemaCatalog.push(
+        inferFileSchema(file.name, file.content, {
+          byteSize: file.byteSize,
+          truncatedRead: false,
+        }),
+      );
+
+      await emitProgress(options?.onProgress, {
+        phase: "parsing_saves",
+        processed: file.jsonFiles,
+        total: Math.max(1, file.jsonFiles),
+        message: `Parsing saves… ${file.jsonFiles} file${file.jsonFiles === 1 ? "" : "s"}`,
+        details: { jsonFiles: file.jsonFiles },
+      });
+      accumulateExportJsonFile(savesAcc, file);
+
+      await emitProgress(options?.onProgress, {
+        phase: "parsing_likes",
+        processed: file.jsonFiles,
+        total: Math.max(1, file.jsonFiles),
+        message: "Parsing likes…",
+        details: { jsonFiles: file.jsonFiles },
+      });
+      accumulateLikedExportJsonFile(likesAcc, file);
+
+      if (file.jsonFiles % 5 === 0) await yieldToEventLoop();
+    },
+  );
+
+  const parsed = finalizeSavesParse(savesAcc);
+  const likedParsed = finalizeLikesParse(likesAcc);
+
+  await emitProgress(options?.onProgress, {
+    phase: "extracting",
+    processed: Math.max(1, filesScanned),
+    total: Math.max(1, filesScanned),
+    message: `Found ${jsonFiles} JSON file${jsonFiles === 1 ? "" : "s"}`,
+    details: { filesScanned, jsonFiles },
+  });
+  await emitProgress(options?.onProgress, {
+    phase: "parsing_saves",
+    processed: Math.max(1, jsonFiles),
+    total: Math.max(1, jsonFiles),
+    message: `Parsed ${parsed.items.length} saved item${parsed.items.length === 1 ? "" : "s"}`,
+    details: { jsonFiles, itemsParsed: parsed.items.length },
+  });
+  await emitProgress(options?.onProgress, {
+    phase: "parsing_likes",
+    processed: Math.max(1, jsonFiles),
+    total: Math.max(1, jsonFiles),
+    message: `Parsed ${likedParsed.items.length} liked item${likedParsed.items.length === 1 ? "" : "s"}`,
+    details: { jsonFiles, likesParsed: likedParsed.items.length },
+  });
+
+  return { schemaCatalog, parsed, likedParsed, fileNames };
+}
+
 async function emitProgress(
   onProgress: ImportRunOptions["onProgress"],
   progress: ImportProgress,
@@ -198,124 +609,6 @@ function resolveZipSafetyLimits(
       overrides?.maxTotalExtractedJsonBytes ??
       DEFAULT_IMPORT_ZIP_SAFETY_LIMITS.maxTotalExtractedJsonBytes,
   };
-}
-
-/**
- * Extract JSON text files from an Instagram export zip.
- *
- * Safety: per-entry uncompressed size and total extracted-JSON budget are
- * enforced before/after `getData()`. Fail closed with ImportZipSafetyError.
- *
- * Residual peak RAM: still holds the zip buffer + AdmZip structures + every
- * extracted JSON string simultaneously. Streaming extract is Gate B+ D2.
- *
- * Exported for unit tests (over-cap / bomb fixtures with tiny limits).
- */
-export function extractJsonFilesFromZip(
-  buffer: Buffer,
-  options?: ImportRunOptions,
-): Array<{
-  name: string;
-  content: string;
-  byteSize: number;
-}> {
-  const limits = resolveZipSafetyLimits(options?.zipSafetyLimits);
-  const zip = new AdmZip(buffer);
-  const entries = zip.getEntries();
-  const files: Array<{ name: string; content: string; byteSize: number }> = [];
-  const total = entries.length;
-  let scanned = 0;
-  let extractedJsonBytes = 0;
-
-  for (const entry of entries) {
-    throwIfCancelled(options?.shouldCancel);
-    scanned += 1;
-
-    if (entry.isDirectory) {
-      continue;
-    }
-    const name = entry.entryName.replace(/\\/g, "/");
-    if (!name.toLowerCase().endsWith(".json")) continue;
-    // Skip Mac metadata / junk
-    if (name.includes("__MACOSX") || name.split("/").pop()?.startsWith(".")) {
-      continue;
-    }
-
-    const headerUncompressed =
-      typeof entry.header?.size === "number" ? entry.header.size : null;
-    if (
-      headerUncompressed != null &&
-      headerUncompressed > limits.maxEntryUncompressedBytes
-    ) {
-      throw new ImportZipSafetyError(
-        importZipEntryTooLargeMessage(
-          name,
-          headerUncompressed,
-          limits.maxEntryUncompressedBytes,
-        ),
-      );
-    }
-    if (
-      headerUncompressed != null &&
-      extractedJsonBytes + headerUncompressed > limits.maxTotalExtractedJsonBytes
-    ) {
-      throw new ImportZipSafetyError(
-        importZipExtractBudgetExceededMessage(
-          name,
-          extractedJsonBytes + headerUncompressed,
-          limits.maxTotalExtractedJsonBytes,
-        ),
-      );
-    }
-
-    let data: Buffer;
-    try {
-      data = entry.getData();
-    } catch (error) {
-      if (error instanceof ImportZipSafetyError) throw error;
-      // Skip corrupt / unreadable entries (non-safety failures).
-      continue;
-    }
-
-    const byteSize = data.byteLength;
-    if (byteSize > limits.maxEntryUncompressedBytes) {
-      throw new ImportZipSafetyError(
-        importZipEntryTooLargeMessage(
-          name,
-          byteSize,
-          limits.maxEntryUncompressedBytes,
-        ),
-      );
-    }
-    if (extractedJsonBytes + byteSize > limits.maxTotalExtractedJsonBytes) {
-      throw new ImportZipSafetyError(
-        importZipExtractBudgetExceededMessage(
-          name,
-          extractedJsonBytes + byteSize,
-          limits.maxTotalExtractedJsonBytes,
-        ),
-      );
-    }
-
-    extractedJsonBytes += byteSize;
-    files.push({
-      name,
-      content: data.toString("utf8"),
-      byteSize,
-    });
-
-    if (scanned % 25 === 0 || scanned === total) {
-      void options?.onProgress?.({
-        phase: "extracting",
-        processed: scanned,
-        total: Math.max(1, total),
-        message: `Scanning zip… ${files.length} JSON file${files.length === 1 ? "" : "s"} found`,
-        details: { filesScanned: scanned, jsonFiles: files.length },
-      });
-    }
-  }
-
-  return files;
 }
 
 async function catalogSchemasWithProgress(
@@ -678,6 +971,7 @@ async function applyParsedItems(
   let skipped = 0;
   const changedIds: number[] = [];
   const total = items.length;
+  const batchSize = Math.max(1, IMPORT_WRITE_BATCH_SIZE);
 
   await emitProgress(options?.onProgress, {
     phase: "writing",
@@ -693,25 +987,27 @@ async function applyParsedItems(
     },
   });
 
-  for (let i = 0; i < items.length; i++) {
+  for (let i = 0; i < items.length; i += batchSize) {
     throwIfCancelled(options?.shouldCancel);
-    const item = items[i]!;
-    const outcome = db.transaction((tx) =>
-      applyOneParsedItem(tx, importId, item),
+    const batch = items.slice(i, i + batchSize);
+    const outcomes = db.transaction((tx) =>
+      batch.map((item) => applyOneParsedItem(tx, importId, item)),
     );
 
-    if (outcome.kind === "added") {
-      added += 1;
-      changedIds.push(outcome.id);
-    } else if (outcome.kind === "updated") {
-      updated += 1;
-      changedIds.push(outcome.id);
-    } else {
-      skipped += 1;
+    for (const outcome of outcomes) {
+      if (outcome.kind === "added") {
+        added += 1;
+        changedIds.push(outcome.id);
+      } else if (outcome.kind === "updated") {
+        updated += 1;
+        changedIds.push(outcome.id);
+      } else {
+        skipped += 1;
+      }
     }
 
-    const processed = i + 1;
-    if (processed === total || processed % 20 === 0) {
+    const processed = Math.min(i + batch.length, total);
+    if (processed === total || processed % batchSize === 0 || processed % 20 === 0) {
       await emitProgress(options?.onProgress, {
         phase: "writing",
         processed,
@@ -726,7 +1022,7 @@ async function applyParsedItems(
         },
       });
     }
-    if (processed % 50 === 0) await yieldToEventLoop();
+    await yieldToEventLoop();
   }
 
   return { added, updated, skipped, changedIds };
@@ -743,6 +1039,7 @@ async function applyLikedItems(
   let skipped = 0;
   const changedIds: number[] = [];
   const total = items.length;
+  const batchSize = Math.max(1, IMPORT_WRITE_BATCH_SIZE);
 
   if (total === 0) {
     return { added: 0, updated: 0, skipped: 0, changedIds };
@@ -762,25 +1059,31 @@ async function applyLikedItems(
     },
   });
 
-  for (let i = 0; i < items.length; i++) {
+  for (let i = 0; i < items.length; i += batchSize) {
     throwIfCancelled(options?.shouldCancel);
-    const item = items[i]!;
-    const outcome = db.transaction((tx) =>
-      applyOneLikedItem(tx, importId, item),
+    const batch = items.slice(i, i + batchSize);
+    const outcomes = db.transaction((tx) =>
+      batch.map((item) => applyOneLikedItem(tx, importId, item)),
     );
 
-    if (outcome.kind === "added") {
-      added += 1;
-      changedIds.push(outcome.id);
-    } else if (outcome.kind === "updated") {
-      updated += 1;
-      changedIds.push(outcome.id);
-    } else {
-      skipped += 1;
+    for (const outcome of outcomes) {
+      if (outcome.kind === "added") {
+        added += 1;
+        changedIds.push(outcome.id);
+      } else if (outcome.kind === "updated") {
+        updated += 1;
+        changedIds.push(outcome.id);
+      } else {
+        skipped += 1;
+      }
     }
 
-    const processed = i + 1;
-    if (processed === total || processed % 50 === 0) {
+    const processed = Math.min(i + batch.length, total);
+    if (
+      processed === total ||
+      processed % batchSize === 0 ||
+      processed % 50 === 0
+    ) {
       await emitProgress(options?.onProgress, {
         phase: "writing",
         processed,
@@ -795,7 +1098,7 @@ async function applyLikedItems(
         },
       });
     }
-    if (processed % 50 === 0) await yieldToEventLoop();
+    await yieldToEventLoop();
   }
 
   return { added, updated, skipped, changedIds };
@@ -978,12 +1281,13 @@ async function finishSuccessfulImport(args: {
 }
 
 export async function importExportArchive(
-  buffer: Buffer,
+  source: ZipImportSource,
   filename: string,
   options?: ImportRunOptions,
 ): Promise<ImportResult> {
   const db = getDb();
-  const contentHash = options?.contentHash ?? hashBuffer(buffer);
+  const contentHash =
+    options?.contentHash ?? (await hashZipSource(source));
 
   await emitProgress(options?.onProgress, {
     phase: "received",
@@ -1004,17 +1308,9 @@ export async function importExportArchive(
     )
     .get();
 
-  await emitProgress(options?.onProgress, {
-    phase: "extracting",
-    processed: 0,
-    total: 1,
-    message: "Opening zip archive…",
-    details: { filesScanned: 0, jsonFiles: 0 },
-  });
-
-  let files: Array<{ name: string; content: string; byteSize: number }>;
+  let streamed: StreamedZipExport;
   try {
-    files = extractJsonFilesFromZip(buffer, options);
+    streamed = await processZipExportStreaming(source, options);
   } catch (error) {
     if (error instanceof ImportCancelledError) throw error;
     const message =
@@ -1055,24 +1351,11 @@ export async function importExportArchive(
     };
   }
 
-  await emitProgress(options?.onProgress, {
-    phase: "extracting",
-    processed: 1,
-    total: 1,
-    message: `Found ${files.length} JSON file${files.length === 1 ? "" : "s"}`,
-    details: { jsonFiles: files.length, filesScanned: files.length },
-  });
-
-  const schemaCatalog = await catalogSchemasWithProgress(files, options);
-  const parsed = await parseExportJsonFilesWithProgress(files, options);
-  const likedParsed = await parseLikedExportJsonFilesWithProgress(
-    files,
-    options,
-  );
+  const { schemaCatalog, parsed, likedParsed, fileNames } = streamed;
   const items = parsed.items;
   const liked = likedParsed.items;
   const importLog = buildImportLogFromItems(
-    files,
+    fileNames.map((name) => ({ name })),
     parsed.savedJsonFiles,
     items,
     parsed.warnings,
@@ -1112,7 +1395,7 @@ export async function importExportArchive(
       details: {
         importId: failed.id,
         schemasInferred: schemaCatalog.length,
-        jsonFiles: files.length,
+        jsonFiles: fileNames.length,
       },
     });
 
