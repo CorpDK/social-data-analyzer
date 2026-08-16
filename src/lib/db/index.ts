@@ -1,3 +1,10 @@
+/**
+ * SQLite connection + idempotent DDL.
+ *
+ * Ownership: Drizzle (`getDb` + `./schema`) owns the relational catalog;
+ * raw SQL owns FTS/vec/jobs/`app_settings`/SCHEMA_VERSION DDL.
+ * See docs/db-boundary.md — do not add Drizzle Kit migrations here.
+ */
 import Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import fs from "node:fs";

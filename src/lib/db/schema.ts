@@ -1,3 +1,8 @@
+/**
+ * Drizzle models for the relational catalog only (imports, items, collections,
+ * schemas). Job queues, FTS, vec tables, and app_settings stay raw SQL —
+ * see docs/db-boundary.md.
+ */
 import { relations, sql } from "drizzle-orm";
 import {
   index,

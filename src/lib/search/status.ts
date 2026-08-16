@@ -42,6 +42,15 @@ import {
   type EmbeddingJobRecord,
 } from "./jobs";
 
+export type {
+  EmbeddingJobDto,
+  EmbeddingProfileDto,
+  HostMemoryStatusDto,
+  LibraryIndexStatusDto,
+  ProviderIndexStatusDto,
+  SearchIndexStatusDto,
+} from "./status-dto";
+
 export type IndexHealth =
   | "ready"
   | "partial"

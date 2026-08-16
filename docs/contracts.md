@@ -3,6 +3,8 @@
 Behavior contracts for import and embedding jobs. Refactors must preserve these
 shapes and event names unless this doc is updated in the same change.
 
+SQLite access ownership (Drizzle vs raw SQL): see `docs/db-boundary.md`.
+
 ## Smoke baseline
 
 ```bash
@@ -24,6 +26,11 @@ Shared helper: `createJobSseResponse`.
 | `error`     | Stream failure                            | `{ message }` (or encode helper) |
 
 Clients: `use-job-sse.ts` — backoff + `maxFailures`; close on `idle` when configured.
+
+**Idle policy (intentional asymmetry):**
+- Import stream: emits `idle` when the queue drains (upload form closes EventSource).
+- Search status stream: does **not** emit `idle` — Indexes UI keeps watching
+  coverage/health while idle. Cheapening fingerprints / idle vec COUNTs is Gate A.
 
 ## Import jobs (`import_jobs` / `ImportJobRecord`)
 
