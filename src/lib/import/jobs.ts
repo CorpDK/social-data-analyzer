@@ -20,15 +20,15 @@ import {
   spoolUploadedFile,
 } from "./spool";
 import { IMPORT_JOBS_CHANNEL, publishJobEvent } from "../sse";
+import type {
+  ImportJobKind as ImportJobKindDto,
+  ImportJobState as ImportJobStateDto,
+  ImportJobsStatusDto,
+} from "./jobs-dto";
 
-export type ImportJobState =
-  | "pending"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-export type ImportJobKind = "zip" | "json";
+export type { ImportJobDetailsDto as ImportProgressDetailsWire } from "./jobs-dto";
+export type ImportJobState = ImportJobStateDto;
+export type ImportJobKind = ImportJobKindDto;
 
 export type ImportJobRecord = {
   id: number;
@@ -267,12 +267,7 @@ export function getRecentImportJobs(limit = 8): ImportJobRecord[] {
   return rows.map(mapJobRow);
 }
 
-export type ImportJobsStatus = {
-  job: ImportJobRecord | null;
-  pendingJobs: ImportJobRecord[];
-  recentJobs: ImportJobRecord[];
-  cancelSupported: true;
-};
+export type ImportJobsStatus = ImportJobsStatusDto;
 
 /** Snapshot for GET /api/import/jobs and the SSE stream. */
 export function getImportJobsStatus(): ImportJobsStatus {

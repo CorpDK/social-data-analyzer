@@ -13,7 +13,7 @@ full ORM rewrite of FTS/vec/jobs.
 | Import / embedding job rows | Raw SQL | `import_jobs`, `embedding_jobs` in `import/jobs.ts`, `search/jobs.ts` |
 | FTS5 indexes | Raw SQL | `saved_items_fts`, `liked_items_fts` — sync + hybrid search |
 | sqlite-vec tables + embedding profiles | Raw SQL | `*_vec_*`, `embedding_index_profiles` — `search/sync.ts`, status |
-| Schema bootstrap / version | Raw SQL DDL | `ensureDatabaseSchema` in `src/lib/db/index.ts` + `SCHEMA_VERSION` |
+| Schema bootstrap / version | Raw SQL DDL | `ensureDatabaseSchema` + `SCHEMA_VERSION` in `src/lib/db/ddl.ts` |
 
 ## Rules of thumb
 
@@ -21,7 +21,7 @@ full ORM rewrite of FTS/vec/jobs.
   persists into.
 - **Raw `better-sqlite3` (`getSqlite()`)** = FTS, vectors, job queues,
   `app_settings`, and all idempotent DDL / migrations.
-- Bump `SCHEMA_VERSION` whenever the idempotent DDL in `db/index.ts` gains or
+- Bump `SCHEMA_VERSION` whenever the idempotent DDL in `db/ddl.ts` gains or
   changes a table/index. Development re-applies DDL on module re-evaluation.
 - Do **not** introduce Drizzle Kit migrations while `SCHEMA_VERSION` churn stays
   rare (see quality roadmap deferred list).
@@ -31,5 +31,6 @@ full ORM rewrite of FTS/vec/jobs.
 ## Related
 
 - Wire/job contracts: `docs/contracts.md`
-- Connection + DDL entry: `src/lib/db/index.ts`
+- Connection entry: `src/lib/db/index.ts` (`getSqlite` / `getDb`)
+- DDL + `SCHEMA_VERSION`: `src/lib/db/ddl.ts`
 - Drizzle catalog only: `src/lib/db/schema.ts`

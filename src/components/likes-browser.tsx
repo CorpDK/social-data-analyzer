@@ -3,6 +3,10 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState, useTransition } from "react";
+import type {
+  EmbeddingProvider,
+  SearchProviderInfoDto,
+} from "@/lib/search/status-dto";
 
 type LikeRow = {
   id: number;
@@ -15,14 +19,7 @@ type LikeRow = {
   alsoSaved?: boolean;
 };
 
-type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
-
-type ProviderInfo = {
-  available: EmbeddingProvider[];
-  configured: Record<EmbeddingProvider, boolean>;
-  enabled?: Record<EmbeddingProvider, boolean>;
-  default: EmbeddingProvider;
-};
+type ProviderInfo = SearchProviderInfoDto;
 
 type LikesResponse = {
   items: LikeRow[];

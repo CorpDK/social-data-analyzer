@@ -3,30 +3,40 @@ import { getSqlite } from "../db";
 import {
   buildLikedSearchDocument,
   buildSearchDocument,
-  type LikedSearchableItem,
-  type SearchableItem,
 } from "./document";
 import {
   embedTextLocal,
   embedTexts,
   embeddingConfigForProvider,
-  embeddingToBuffer,
   isRemoteEmbeddingConfigured,
   localEmbeddingConfig,
   type EmbeddingConfig,
-  type EmbeddingProfile,
   type EmbeddingProvider,
 } from "./embeddings";
 import {
-  ALL_VECTOR_INDEXES,
   formatJobTarget,
   itemsTableName,
-  profileIndexName,
   SEARCH_LIBRARIES,
   type SearchLibrary,
   type VectorIndexName,
   vectorTableName,
 } from "./library";
+import {
+  ftsCount,
+  upsertItemFts,
+  upsertLikedItemFtsDoc,
+} from "./sync-fts";
+import {
+  embeddingProfilesMatch,
+  getIndexedEmbeddingProfile,
+  recreateVectorTable,
+  vecCount,
+  vectorIndexMatchesConfig,
+  vectorTableDimensions,
+  writeEmbeddingChunk,
+  writeEmbeddingProfile,
+  type EmbeddingWriteMode,
+} from "./sync-vec-store";
 import {
   assessReindexMemory,
   estimatedVectorMegabytes,
@@ -52,6 +62,28 @@ export {
   allLikesSearchRows,
 } from "./sync-rows";
 export type { SavesSearchRow, LikesSearchRow } from "./sync-rows";
+export {
+  ftsCount,
+  removeItemSearch,
+  removeLikedItemSearch,
+  upsertItemFts,
+  upsertLikedItemFtsDoc,
+} from "./sync-fts";
+export {
+  embeddingProfilesMatch,
+  getIndexedEmbeddingProfile,
+  getIndexedEmbeddingProfileMeta,
+  insertItemEmbedding,
+  upsertItemEmbedding,
+  upsertSavesItemEmbedding,
+  vecCount,
+  vecCountSaves,
+  vectorIndexMatchesConfig,
+  vectorTableDimensions,
+  writeEmbeddingChunk,
+  type EmbeddingWriteMode,
+  type IndexedEmbeddingProfileMeta,
+} from "./sync-vec-store";
 
 /** Rows embedded + written per chunk (keeps peak vector RAM bounded). */
 export const EMBEDDING_SYNC_CHUNK_SIZE = 128;
@@ -91,283 +123,6 @@ export type EmbeddingSyncResult = {
   providers: string[];
   message: string;
 };
-
-export function upsertItemFts(
-  itemId: number,
-  item: SearchableItem,
-  sqlite: Database.Database = getSqlite(),
-) {
-  const doc = buildSearchDocument(item);
-  sqlite.prepare(`DELETE FROM saved_items_fts WHERE rowid = ?`).run(itemId);
-  sqlite
-    .prepare(
-      `INSERT INTO saved_items_fts(
-        rowid, author_username, shortcode, media_key, media_type, collections
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      itemId,
-      doc.authorUsername,
-      doc.shortcode,
-      doc.mediaKey,
-      doc.mediaType,
-      doc.collections,
-    );
-}
-
-export function upsertLikedItemFtsDoc(
-  itemId: number,
-  item: LikedSearchableItem,
-  sqlite: Database.Database = getSqlite(),
-) {
-  const doc = buildLikedSearchDocument(item);
-  sqlite.prepare(`DELETE FROM liked_items_fts WHERE rowid = ?`).run(itemId);
-  sqlite
-    .prepare(
-      `INSERT INTO liked_items_fts(
-        rowid, author_username, shortcode, media_key, media_type, source
-      ) VALUES (?, ?, ?, ?, ?, ?)`,
-    )
-    .run(
-      itemId,
-      doc.authorUsername,
-      doc.shortcode,
-      doc.mediaKey,
-      doc.mediaType,
-      doc.source,
-    );
-}
-
-/** Insert into an empty / freshly recreated vec table (no prior DELETE). */
-export function insertItemEmbedding(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  itemId: number,
-  embedding: Float32Array,
-  sqlite: Database.Database = getSqlite(),
-) {
-  sqlite
-    .prepare(
-      `INSERT INTO ${vectorTableName(library, index)}(item_id, embedding) VALUES (?, ?)`,
-    )
-    .run(BigInt(itemId), embeddingToBuffer(embedding));
-}
-
-/** True single-item upsert (DELETE + INSERT). Prefer chunk inserts on rebuild. */
-export function upsertItemEmbedding(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  itemId: number,
-  embedding: Float32Array,
-  sqlite: Database.Database = getSqlite(),
-) {
-  const table = vectorTableName(library, index);
-  const id = BigInt(itemId);
-  sqlite.prepare(`DELETE FROM ${table} WHERE item_id = ?`).run(id);
-  sqlite
-    .prepare(`INSERT INTO ${table}(item_id, embedding) VALUES (?, ?)`)
-    .run(id, embeddingToBuffer(embedding));
-}
-
-/** @deprecated Prefer upsertItemEmbedding("saves", …). Kept for call sites. */
-export function upsertSavesItemEmbedding(
-  index: VectorIndexName,
-  itemId: number,
-  embedding: Float32Array,
-  sqlite: Database.Database = getSqlite(),
-) {
-  upsertItemEmbedding("saves", index, itemId, embedding, sqlite);
-}
-
-export function removeItemSearch(
-  itemId: number,
-  sqlite: Database.Database = getSqlite(),
-) {
-  sqlite.prepare(`DELETE FROM saved_items_fts WHERE rowid = ?`).run(itemId);
-  for (const index of ALL_VECTOR_INDEXES) {
-    if (vectorTableDimensions("saves", index, sqlite) !== null) {
-      sqlite
-        .prepare(
-          `DELETE FROM ${vectorTableName("saves", index)} WHERE item_id = ?`,
-        )
-        .run(BigInt(itemId));
-    }
-  }
-}
-
-export function removeLikedItemSearch(
-  itemId: number,
-  sqlite: Database.Database = getSqlite(),
-) {
-  sqlite.prepare(`DELETE FROM liked_items_fts WHERE rowid = ?`).run(itemId);
-  for (const index of ALL_VECTOR_INDEXES) {
-    if (vectorTableDimensions("likes", index, sqlite) !== null) {
-      sqlite
-        .prepare(
-          `DELETE FROM ${vectorTableName("likes", index)} WHERE item_id = ?`,
-        )
-        .run(BigInt(itemId));
-    }
-  }
-}
-
-export function ftsCount(
-  library: SearchLibrary = "saves",
-  sqlite: Database.Database = getSqlite(),
-): number {
-  const table = library === "saves" ? "saved_items_fts" : "liked_items_fts";
-  return (
-    sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
-      c: number;
-    }
-  ).c;
-}
-
-export function vecCount(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
-): number {
-  if (vectorTableDimensions(library, index, sqlite) === null) return 0;
-  return (
-    sqlite
-      .prepare(
-        `SELECT count(*) AS c FROM ${vectorTableName(library, index)}`,
-      )
-      .get() as { c: number }
-  ).c;
-}
-
-/** Saves-only overload used by older call sites that pass just the index. */
-export function vecCountSaves(
-  index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
-): number {
-  return vecCount("saves", index, sqlite);
-}
-
-export function vectorTableDimensions(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
-): number | null {
-  const row = sqlite
-    .prepare(
-      `SELECT sql FROM sqlite_master
-       WHERE type = 'table' AND name = ?`,
-    )
-    .get(vectorTableName(library, index)) as
-    | { sql: string | null }
-    | undefined;
-  const match = row?.sql?.match(/embedding\s+FLOAT\[(\d+)\]/i);
-  return match ? Number(match[1]) : null;
-}
-
-function recreateVectorTable(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  dimensions: number,
-  sqlite: Database.Database,
-) {
-  const table = vectorTableName(library, index);
-  sqlite.exec(`
-    DROP TABLE IF EXISTS ${table};
-    CREATE VIRTUAL TABLE ${table} USING vec0(
-      item_id INTEGER PRIMARY KEY,
-      embedding FLOAT[${dimensions}]
-    );
-  `);
-}
-
-export type IndexedEmbeddingProfileMeta = EmbeddingProfile & {
-  updatedAt: number;
-};
-
-export function getIndexedEmbeddingProfileMeta(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
-): IndexedEmbeddingProfileMeta | null {
-  const row = sqlite
-    .prepare(
-      `SELECT provider, model, dimensions, endpoint, updated_at AS updatedAt
-       FROM embedding_index_profiles WHERE index_name = ?`,
-    )
-    .get(profileIndexName(library, index)) as
-    | IndexedEmbeddingProfileMeta
-    | undefined;
-  return row ?? null;
-}
-
-export function getIndexedEmbeddingProfile(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
-): EmbeddingProfile | null {
-  const meta = getIndexedEmbeddingProfileMeta(library, index, sqlite);
-  if (!meta) return null;
-  return {
-    provider: meta.provider,
-    model: meta.model,
-    dimensions: meta.dimensions,
-    endpoint: meta.endpoint,
-  };
-}
-
-export function embeddingProfilesMatch(
-  left: EmbeddingProfile,
-  right: EmbeddingProfile,
-): boolean {
-  return (
-    left.provider === right.provider &&
-    left.model === right.model &&
-    left.dimensions === right.dimensions &&
-    left.endpoint === right.endpoint
-  );
-}
-
-function writeEmbeddingProfile(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  profile: EmbeddingProfile,
-  sqlite: Database.Database,
-) {
-  sqlite
-    .prepare(
-      `INSERT INTO embedding_index_profiles(
-        index_name, provider, model, dimensions, endpoint, updated_at
-      ) VALUES (?, ?, ?, ?, ?, unixepoch())
-      ON CONFLICT(index_name) DO UPDATE SET
-        provider = excluded.provider,
-        model = excluded.model,
-        dimensions = excluded.dimensions,
-        endpoint = excluded.endpoint,
-        updated_at = unixepoch()`,
-    )
-    .run(
-      profileIndexName(library, index),
-      profile.provider,
-      profile.model,
-      profile.dimensions,
-      profile.endpoint,
-    );
-}
-
-export function vectorIndexMatchesConfig(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  config: EmbeddingConfig,
-  sqlite: Database.Database = getSqlite(),
-): boolean {
-  const indexed = getIndexedEmbeddingProfile(library, index, sqlite);
-  return Boolean(
-    indexed &&
-      vecCount(library, index, sqlite) > 0 &&
-      vectorTableDimensions(library, index, sqlite) ===
-        config.profile.dimensions &&
-      embeddingProfilesMatch(indexed, config.profile),
-  );
-}
 
 function chunkRows<T>(rows: T[], size = EMBEDDING_SYNC_CHUNK_SIZE): T[][] {
   if (rows.length === 0) return [];
@@ -443,13 +198,6 @@ async function generateLikesEmbeddingsChunk(
   }));
 }
 
-/**
- * How chunk rows are written. `insert-only` is the fast path and is valid *only*
- * for a table we just recreated in this call; anything that keeps existing rows
- * must use `upsert` so a re-run cannot hit a primary-key conflict.
- */
-export type EmbeddingWriteMode = "insert-only" | "upsert";
-
 function prepareVectorTableForStore(
   library: SearchLibrary,
   index: VectorIndexName,
@@ -470,29 +218,6 @@ function prepareVectorTableForStore(
   }
   // Extending an existing table: upsert (DELETE + INSERT) per row.
   return { writeMode: "upsert" };
-}
-
-/**
- * Write one chunk of embeddings in a single transaction.
- * Exported for tests: `upsert` must stay idempotent for the resume path.
- */
-export function writeEmbeddingChunk(
-  library: SearchLibrary,
-  index: VectorIndexName,
-  generated: GeneratedEmbedding[],
-  writeMode: EmbeddingWriteMode,
-  sqlite: Database.Database = getSqlite(),
-) {
-  if (generated.length === 0) return;
-  sqlite.transaction(() => {
-    for (const result of generated) {
-      if (writeMode === "upsert") {
-        upsertItemEmbedding(library, index, result.id, result.embedding, sqlite);
-      } else {
-        insertItemEmbedding(library, index, result.id, result.embedding, sqlite);
-      }
-    }
-  })();
 }
 
 /**

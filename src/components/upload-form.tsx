@@ -7,69 +7,16 @@ import {
   IMPORT_MAX_FILE_LABEL,
   importFileTooLargeMessage,
 } from "@/lib/import-limits";
+import type {
+  ImportJobDetailsDto,
+  ImportJobDto,
+  ImportJobState,
+  ImportJobsStatusDto,
+} from "@/lib/import/jobs-dto";
 import { useJobSse } from "@/lib/use-job-sse";
 
-type ImportJobState =
-  | "pending"
-  | "running"
-  | "completed"
-  | "failed"
-  | "cancelled";
-
-type ImportJobDetails = {
-  filesScanned?: number;
-  jsonFiles?: number;
-  schemasInferred?: number;
-  itemsParsed?: number;
-  likesParsed?: number;
-  itemsAdded?: number;
-  itemsUpdated?: number;
-  itemsSkipped?: number;
-  likesAdded?: number;
-  likesUpdated?: number;
-  likesSkipped?: number;
-  importId?: number | null;
-};
-
-type ImportJobResult = {
-  importId?: number | null;
-  status?: "completed" | "duplicate" | "failed";
-  message?: string;
-  itemsFound?: number;
-  itemsAdded?: number;
-  itemsUpdated?: number;
-  itemsSkipped?: number;
-  likesFound?: number;
-  likesAdded?: number;
-  likesUpdated?: number;
-  likesSkipped?: number;
-};
-
-type ImportJob = {
-  id: number;
-  filename: string;
-  state: ImportJobState;
-  phase: string;
-  processed: number;
-  total: number;
-  percent: number;
-  message: string | null;
-  error: string | null;
-  details: ImportJobDetails | null;
-  result: ImportJobResult | null;
-  importId: number | null;
-  cancelRequested: boolean;
-  startedAt: number;
-  finishedAt: number | null;
-  updatedAt: number;
-};
-
-type JobsPayload = {
-  job: ImportJob | null;
-  pendingJobs: ImportJob[];
-  recentJobs?: ImportJob[];
-  cancelSupported?: boolean;
-};
+type ImportJob = ImportJobDto;
+type JobsPayload = ImportJobsStatusDto;
 
 function errorFromPayload(payload: unknown, fallback: string): string {
   if (
@@ -160,7 +107,7 @@ function phaseLabel(phase: string): string {
   }
 }
 
-function DetailCounts({ details }: { details: ImportJobDetails | null }) {
+function DetailCounts({ details }: { details: ImportJobDetailsDto | null }) {
   if (!details) return null;
   const parts: string[] = [];
   if (details.jsonFiles != null) parts.push(`${details.jsonFiles} JSON files`);

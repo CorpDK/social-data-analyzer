@@ -6,6 +6,14 @@
 
 export type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
 export type SearchLibrary = "saves" | "likes";
+
+/** Provider picker payload returned with browse/search API responses. */
+export type SearchProviderInfoDto = {
+  available: EmbeddingProvider[];
+  configured: Record<EmbeddingProvider, boolean>;
+  enabled?: Record<EmbeddingProvider, boolean>;
+  default: EmbeddingProvider;
+};
 export type IndexHealth =
   | "ready"
   | "partial"

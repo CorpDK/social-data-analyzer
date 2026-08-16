@@ -1,5 +1,4 @@
-import { spawn, type ChildProcess } from "node:child_process";
-import path from "node:path";
+import type { ChildProcess } from "node:child_process";
 import { getSqlite } from "../db";
 import {
   type EmbeddingProvider,
@@ -13,9 +12,15 @@ import {
 import {
   assessReindexMemory,
   logReindexMemoryWarning,
-  mergeNodeOptionsMaxOldSpace,
-  resolveEmbeddingWorkerMaxOldSpaceMb,
 } from "./memory";
+import {
+  shouldPersistRebuildProgress,
+  type JobProgressThrottle,
+} from "./jobs-progress";
+import {
+  scheduleEmbeddingChildTermination,
+  spawnEmbeddingWorker,
+} from "./jobs-spawn";
 import {
   RebuildCancelledError,
   rebuildConfiguredIndexes,
@@ -106,10 +111,6 @@ type JobRunnerState = {
   loggedFailures: Map<number, { message: string; count: number }>;
   shutdownHooked: boolean;
 };
-
-/** Grace period after a cancel request before the child is signalled. */
-const CANCEL_SIGTERM_GRACE_MS = 10_000;
-const CANCEL_SIGKILL_GRACE_MS = 5_000;
 
 const globalForJobs = globalThis as unknown as {
   embeddingJobRunner?: JobRunnerState;
@@ -381,14 +382,6 @@ function getOpenJobForTarget(
   return row ? mapJobRow(row) : null;
 }
 
-const JOB_PROGRESS_MIN_INTERVAL_MS = 1_000;
-const JOB_PROGRESS_EVERY_N = 50;
-
-type JobProgressThrottle = {
-  lastWriteAt: number;
-  lastProcessed: number;
-};
-
 const jobProgressThrottle = new Map<number, JobProgressThrottle>();
 
 function updateJob(
@@ -468,17 +461,7 @@ async function applyProgress(
     lastProcessed: -1,
   };
   const now = Date.now();
-  const shouldWrite =
-    force ||
-    progress.phase === "done" ||
-    progress.phase === "preparing" ||
-    progress.phase === "fts" ||
-    progress.processed === 0 ||
-    (progress.total > 0 && progress.processed >= progress.total) ||
-    progress.processed - state.lastProcessed >= JOB_PROGRESS_EVERY_N ||
-    now - state.lastWriteAt >= JOB_PROGRESS_MIN_INTERVAL_MS;
-
-  if (!shouldWrite) return;
+  if (!shouldPersistRebuildProgress(progress, state, force, now)) return;
 
   jobProgressThrottle.set(jobId, {
     lastWriteAt: now,
@@ -562,19 +545,6 @@ function refuseReindexIfNeeded(
   return null;
 }
 
-function embeddingWorkerEnv(): NodeJS.ProcessEnv {
-  const maxOldSpaceMb = resolveEmbeddingWorkerMaxOldSpaceMb();
-  return {
-    ...process.env,
-    EMBEDDING_WORKER_INLINE: "1",
-    EMBEDDING_WORKER_CHILD: "1",
-    EMBEDDING_WORKER_MAX_OLD_SPACE_MB: String(maxOldSpaceMb),
-    NODE_OPTIONS: mergeNodeOptionsMaxOldSpace(
-      process.env.NODE_OPTIONS,
-      maxOldSpaceMb,
-    ),
-  };
-}
 
 async function runEmbeddingJobInline(
   jobId: number,
@@ -686,132 +656,9 @@ function failJob(jobId: number, error: string) {
   logJobFailure(jobId, error);
 }
 
-function killActiveChild(signal: NodeJS.Signals = "SIGKILL") {
-  const state = runner();
-  const child = state.activeChild;
-  if (!child || child.killed || child.exitCode !== null) return;
-  try {
-    child.kill(signal);
-  } catch {
-    // already gone
-  }
-}
 
-/**
- * Kill the worker if the parent exits. Deliberately no SIGINT/SIGTERM handlers:
- * adding them would suppress Node's default termination for the dev server, and
- * the child shares our process group so Ctrl-C already reaches it.
- */
-function ensureShutdownHook() {
-  const state = runner();
-  if (state.shutdownHooked) return;
-  state.shutdownHooked = true;
-  process.on("exit", () => killActiveChild("SIGKILL"));
-}
 
-/** Escalate a cancel request to signals if the child ignores the cancel flag. */
-function scheduleChildTermination(jobId: number) {
-  const state = runner();
-  const child = state.activeChild;
-  if (!child || state.activeChildJobId !== jobId) return;
 
-  const term = setTimeout(() => {
-    if (state.activeChild !== child) return;
-    killActiveChild("SIGTERM");
-    const kill = setTimeout(() => {
-      if (state.activeChild !== child) return;
-      killActiveChild("SIGKILL");
-    }, CANCEL_SIGKILL_GRACE_MS);
-    kill.unref?.();
-  }, CANCEL_SIGTERM_GRACE_MS);
-  term.unref?.();
-}
-
-/**
- * Spawn one worker child. Never rejects: the caller classifies the exit.
- * At most one child may be alive per process.
- */
-function spawnEmbeddingWorker(jobId: number): Promise<WorkerExit> {
-  const state = runner();
-  const script = path.join(process.cwd(), "scripts", "embedding-worker.ts");
-  const tsxCli = path.join(
-    process.cwd(),
-    "node_modules",
-    "tsx",
-    "dist",
-    "cli.mjs",
-  );
-
-  if (state.activeChild) {
-    return Promise.resolve({
-      code: null,
-      signal: null,
-      elapsedMs: 0,
-      spawnFailed: true,
-      message: `Another embedding worker (job ${state.activeChildJobId ?? "?"}) is still running`,
-    });
-  }
-
-  ensureShutdownHook();
-
-  return new Promise((resolve) => {
-    const startedAt = Date.now();
-    let settled = false;
-    const useNice = process.platform === "linux";
-    const env = embeddingWorkerEnv();
-    const child = useNice
-      ? spawn(
-          "nice",
-          ["-n", "10", process.execPath, tsxCli, script, String(jobId)],
-          {
-            env,
-            stdio: ["ignore", "inherit", "inherit"],
-          },
-        )
-      : spawn(process.execPath, [tsxCli, script, String(jobId)], {
-          env,
-          stdio: ["ignore", "inherit", "inherit"],
-        });
-
-    state.activeChild = child;
-    state.activeChildJobId = jobId;
-
-    const finish = (exit: WorkerExit) => {
-      if (settled) return;
-      settled = true;
-      if (state.activeChild === child) {
-        state.activeChild = null;
-        state.activeChildJobId = null;
-      }
-      resolve(exit);
-    };
-
-    child.on("error", (error) => {
-      finish({
-        code: null,
-        signal: null,
-        elapsedMs: Date.now() - startedAt,
-        spawnFailed: true,
-        message: `Embedding worker could not start: ${error.message}`,
-      });
-    });
-
-    child.on("exit", (code, signal) => {
-      finish({
-        code,
-        signal,
-        elapsedMs: Date.now() - startedAt,
-        spawnFailed: false,
-        message:
-          code === 0
-            ? "Embedding worker finished"
-            : signal
-              ? `Embedding worker killed by ${signal}`
-              : `Embedding worker exited with code ${code ?? "unknown"}`,
-      });
-    });
-  });
-}
 
 /**
  * Run one job to completion (inline). Used by the child worker entry and by
@@ -923,7 +770,7 @@ async function runJobViaChild(jobId: number): Promise<boolean> {
     return false;
   }
 
-  const exit = await spawnEmbeddingWorker(jobId);
+  const exit = await spawnEmbeddingWorker(runner(), jobId);
   const cancelRequested = shouldCancel(jobId);
   const classification = classifyWorkerExit({ ...exit, cancelRequested });
   const after = getEmbeddingJob(jobId);
@@ -1261,7 +1108,7 @@ export function cancelReindexJob(jobId?: number): CancelReindexResult {
 
   state.cancelFlags.set(active.id, true);
   // Cooperative cancel first (clean partial state), signals if it hangs.
-  scheduleChildTermination(active.id);
+  scheduleEmbeddingChildTermination(runner(), active.id);
   publishJobEvent(SEARCH_STATUS_CHANNEL, true);
 
   const job = getEmbeddingJob(active.id);
