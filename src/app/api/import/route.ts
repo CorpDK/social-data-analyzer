@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { startImportJob } from "@/lib/import/jobs";
+import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -10,6 +11,9 @@ export const dynamic = "force-dynamic";
  * GET /api/import/jobs/stream.
  */
 export async function POST(request: Request) {
+  const rejected = rejectUnlessLocalMutating(request);
+  if (rejected) return rejected;
+
   try {
     const formData = await request.formData();
     const file = formData.get("file");

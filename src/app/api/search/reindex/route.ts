@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import {
   ensureJobRunner,
   getActiveEmbeddingJob,
@@ -46,6 +47,9 @@ export async function GET() {
  * `likes-openai` / … (likes).
  */
 export async function POST(request: Request) {
+  const rejected = rejectUnlessLocalMutating(request);
+  if (rejected) return rejected;
+
   try {
     let body: unknown;
     try {

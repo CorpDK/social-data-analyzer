@@ -8,6 +8,7 @@ import type {
   ProviderIndexStatusDto,
   SearchIndexStatusDto,
 } from "@/lib/search/status-dto";
+import { localMutatingHeaders } from "@/lib/local-mutating-headers";
 import { useJobSse } from "@/lib/use-job-sse";
 
 type PendingConfirm = {
@@ -299,7 +300,7 @@ export function IndexesStatusPanel() {
     try {
       const response = await fetch("/api/search/reindex", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: localMutatingHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({ provider }),
       });
       await readJsonResponse(response, "Failed to start reindex");
@@ -339,7 +340,7 @@ export function IndexesStatusPanel() {
     try {
       const response = await fetch("/api/search/reindex/cancel", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: localMutatingHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({}),
       });
       await readJsonResponse(response, "Failed to cancel");

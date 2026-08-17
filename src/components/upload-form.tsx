@@ -12,6 +12,7 @@ import type {
   ImportJobState,
   ImportJobsStatusDto,
 } from "@/lib/import/jobs-dto";
+import { localMutatingHeaders } from "@/lib/local-mutating-headers";
 import { useJobSse } from "@/lib/use-job-sse";
 
 type JobsPayload = ImportJobsStatusDto;
@@ -253,6 +254,7 @@ export function UploadForm() {
       body.append("file", file);
       const response = await fetch("/api/import", {
         method: "POST",
+        headers: localMutatingHeaders(),
         body,
       });
       await readJsonResponse(response, "Failed to start import");
@@ -271,7 +273,7 @@ export function UploadForm() {
     try {
       const response = await fetch("/api/import/jobs/cancel", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: localMutatingHeaders({ "content-type": "application/json" }),
         body: JSON.stringify(jobId != null ? { jobId } : {}),
       });
       await readJsonResponse(response, "Failed to cancel");

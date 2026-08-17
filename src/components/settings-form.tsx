@@ -1,6 +1,7 @@
 "use client";
 
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { localMutatingHeaders } from "@/lib/local-mutating-headers";
 import { baseUrlTrustHint } from "@/lib/settings/base-url-trust";
 
 type SecretStatus = {
@@ -126,7 +127,7 @@ export function SettingsForm() {
   ) {
     const response = await fetch("/api/settings/keys", {
       method: "PUT",
-      headers: { "content-type": "application/json" },
+      headers: localMutatingHeaders({ "content-type": "application/json" }),
       body: JSON.stringify(body),
     });
     const json = (await response.json()) as SettingsPayload & { error?: string };

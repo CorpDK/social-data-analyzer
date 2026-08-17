@@ -3,16 +3,29 @@
 Short ops guide for this **single-user, local-first** app. Prefer this over
 guessing env knobs mid-incident.
 
-## Threat model (base URLs)
+## Threat model (local-only)
 
-- The app is meant to run on **localhost** for one operator. There is no
-  multi-user auth and no internet-facing hardening.
+- The app is meant to run on **loopback (127.0.0.1)** for one operator. There is
+  no multi-user auth and no internet-facing hardening.
+- `pnpm dev` / `pnpm start` bind **127.0.0.1** so LAN peers cannot connect.
+  Open [http://127.0.0.1:3000](http://127.0.0.1:3000) (not a LAN hostname).
+- Mutating API routes (`POST` / `PUT` / `PATCH` / `DELETE`) reject:
+  - non-loopback `Host`
+  - cross-site `Origin`
+  - any `X-Forwarded-*` (not trusted; treated as spoof attempts)
+- Optional **local token**: set `INSTAGRAM_SAVES_LOCAL_TOKEN` to require
+  `Authorization: Bearer …` or `X-Instagram-Saves-Token` on mutations. Same-machine
+  hostile pages can still hit loopback without a token; use the token when that
+  matters. For the built-in UI, also set
+  `NEXT_PUBLIC_INSTAGRAM_SAVES_LOCAL_TOKEN` to the **same** value.
+- Soft C-H1 (LAN exposure) shrinks when scripts stay on loopback + Host/Origin
+  guard; token mode further covers same-machine CSRF-ish abuse.
 - OpenAI / Ollama **base URLs** in Settings are fetched by the **local Node
   process**. That is intentional for LAN Ollama and OpenAI-compatible proxies.
-- We do **not** enforce a hard allowlist (would break legitimate LAN Ollama).
-  Settings shows a soft hint when a URL is neither loopback nor the official
-  OpenAI API host. See `src/lib/settings/base-url-trust.ts` and
-  `docs/contracts.md`.
+- We do **not** enforce a hard allowlist on those provider URLs (would break
+  legitimate LAN Ollama). Settings shows a soft hint when a URL is neither
+  loopback nor the official OpenAI API host. See
+  `src/lib/settings/base-url-trust.ts` and `docs/contracts.md`.
 
 ## Import
 
@@ -67,6 +80,8 @@ On Linux, Indexes / `POST /api/search/reindex` use `/proc/meminfo` MemAvailable:
 |----------|------|
 | `INSTAGRAM_SAVES_DB` | SQLite path (default under `data/`) |
 | `INSTAGRAM_SAVES_KEYRING=memory` | Tests / headless (no OS keyring) |
+| `INSTAGRAM_SAVES_LOCAL_TOKEN` | Optional; when set, mutating API routes require this token |
+| `NEXT_PUBLIC_INSTAGRAM_SAVES_LOCAL_TOKEN` | Same value as above for the browser UI (only if token mode is on) |
 | `EMBEDDING_WORKER_INLINE=1` | Run rebuilds in-process (tests) |
 | `EMBEDDING_WORKER_MAX_OLD_SPACE_MB` | Child heap cap (default **2048**); replaces inherited `--max-old-space-size` |
 | `NODE_OPTIONS` | Parent may set a large heap; worker spawn overrides max-old-space-size |

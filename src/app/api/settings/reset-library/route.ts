@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import {
   RESET_LIBRARY_CONFIRMATION_PHRASE,
   resetLibrary,
@@ -9,8 +10,12 @@ export const runtime = "nodejs";
 /**
  * Local single-user app — there is no multi-user auth gate. The typed
  * confirmation phrase is required in the body as a deliberate safeguard.
+ * Mutating requests still pass the loopback Host/Origin (+ optional token) guard.
  */
 export async function POST(request: Request) {
+  const rejected = rejectUnlessLocalMutating(request);
+  if (rejected) return rejected;
+
   let body: { confirmation?: unknown };
   try {
     body = (await request.json()) as { confirmation?: unknown };

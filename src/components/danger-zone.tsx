@@ -9,6 +9,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
+import { localMutatingHeaders } from "@/lib/local-mutating-headers";
 import { RESET_LIBRARY_CONFIRMATION_PHRASE } from "@/lib/settings/reset-phrase";
 
 type Step = "closed" | "phrase" | "confirm";
@@ -85,7 +86,7 @@ export function DangerZone() {
     try {
       const response = await fetch("/api/settings/reset-library", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: localMutatingHeaders({ "content-type": "application/json" }),
         body: JSON.stringify({
           confirmation: RESET_LIBRARY_CONFIRMATION_PHRASE,
         }),

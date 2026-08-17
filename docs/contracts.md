@@ -110,10 +110,22 @@ local Node process. **No hard allowlist** (LAN Ollama must keep working). Soft
 Settings hint for non-loopback / non-official-OpenAI hosts — see
 `docs/runbook.md` and `src/lib/settings/base-url-trust.ts`.
 
+## Local-only mutating guard (Phase 1)
+
+- `pnpm dev` / `pnpm start` bind `127.0.0.1` (see `package.json` scripts).
+- Mutating route handlers call `rejectUnlessLocalMutating` from
+  `src/lib/local-request-guard.ts`: loopback `Host` allowlist, refuse
+  `X-Forwarded-*`, reject non-local `Origin`, optional
+  `INSTAGRAM_SAVES_LOCAL_TOKEN` (`Authorization: Bearer` or
+  `X-Instagram-Saves-Token`).
+- UI merges optional public token via `localMutatingHeaders` when
+  `NEXT_PUBLIC_INSTAGRAM_SAVES_LOCAL_TOKEN` is set.
+- GET / SSE read paths are unchanged (still loopback-bound by the server).
+
 ## Operator runbook
 
 Ops checklist (import, reindex, cancel/resume, MemAvailable, orphan workers,
-heap env): `docs/runbook.md`.
+heap env, local trust boundary): `docs/runbook.md`.
 
 Light synthetic bench (no real DB / no Voyage/Ollama): `pnpm bench:smoke`.
 

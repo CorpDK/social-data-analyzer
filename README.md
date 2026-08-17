@@ -26,10 +26,13 @@ pnpm install
 pnpm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000), then **Settings** to configure providers.
+`pnpm dev` / `pnpm start` bind **127.0.0.1** only (LAN closed). Open
+[http://127.0.0.1:3000](http://127.0.0.1:3000), then **Settings** to configure
+providers. Mutating APIs enforce loopback Host/Origin (optional local token —
+see [`docs/runbook.md`](docs/runbook.md)).
 
 Operator checklist (import / reindex / cancel / MemAvailable / orphan workers /
-heap env / base-URL trust): see [`docs/runbook.md`](docs/runbook.md).
+heap env / local trust): see [`docs/runbook.md`](docs/runbook.md).
 
 ### Testing
 

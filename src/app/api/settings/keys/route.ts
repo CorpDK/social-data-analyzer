@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import {
   getSettingsKeysStatus,
   updateSettingsKeys,
@@ -12,6 +13,9 @@ export async function GET() {
 }
 
 export async function PUT(request: Request) {
+  const rejected = rejectUnlessLocalMutating(request);
+  if (rejected) return rejected;
+
   let body: UpdateSettingsKeysInput;
   try {
     body = (await request.json()) as UpdateSettingsKeysInput;

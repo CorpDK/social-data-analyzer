@@ -1,11 +1,15 @@
 import { NextResponse } from "next/server";
 import { cancelImportJob } from "@/lib/import/jobs";
+import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 /** Cooperative cancel for a running or pending import job. */
 export async function POST(request: Request) {
+  const rejected = rejectUnlessLocalMutating(request);
+  if (rejected) return rejected;
+
   try {
     let jobId: number | undefined;
     try {

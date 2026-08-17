@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import { cancelReindexJob } from "@/lib/search/jobs";
 
 export const runtime = "nodejs";
@@ -6,6 +7,9 @@ export const dynamic = "force-dynamic";
 
 /** Cooperative cancel for the active (or specified) running job; pending stay queued. */
 export async function POST(request: Request) {
+  const rejected = rejectUnlessLocalMutating(request);
+  if (rejected) return rejected;
+
   try {
     let jobId: number | undefined;
     try {
