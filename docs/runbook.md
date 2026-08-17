@@ -27,6 +27,30 @@ guessing env knobs mid-incident.
   loopback nor the official OpenAI API host. See
   `src/lib/settings/base-url-trust.ts` and `docs/contracts.md`.
 
+## Shortcode / media_key identity (Phase 2)
+
+Instagram shortcodes are **case-sensitive**. `mediaKeyFromHref` preserves shortcode
+case from the href (usernames/hosts are still normalized where appropriate).
+
+**SCHEMA_VERSION 7** runs a one-time repair on open: recomputes `media_key` from
+`href` for `saved_items` / `liked_items` and refreshes matching FTS rows. It never
+deletes or merges rows. If two rows would collide on the corrected key (rare —
+usually means a prior case-fold already collapsed data), both are left unchanged;
+re-import the export to restore a missing case-variant.
+
+Liked comments no longer collapse to `comment:<post>:<author>` alone: prefer
+`fbid` / comment id from the URL, else `post + author + timestamp + content`.
+
+## Collection filter
+
+`listSaves` collection membership uses an `EXISTS` subquery (not a huge bound
+`IN (...)` list) so large collections do not hit SQLite variable limits.
+
+## Pagination
+
+`GET /api/saves` and `GET /api/likes` reject malformed `page` / `pageSize` with
+**400** (`src/lib/query-params.ts`).
+
 ## Import
 
 1. Open **Import**, upload a Meta JSON zip/json (max 2 GB).

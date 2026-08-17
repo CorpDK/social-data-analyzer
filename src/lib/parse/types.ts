@@ -53,6 +53,12 @@ export const IG_URL_RE =
 const STORY_URL_RE =
   /instagram\.com\/stories\/([A-Za-z0-9._]+)(?:\/([0-9]+))?/i;
 
+/** Comment permalink segments: /p/CODE/c/123/ or ?comment_id= / #comment- */
+const COMMENT_PATH_ID_RE =
+  /instagram\.com\/(?:p|reel|reels|tv)\/[^/?#]+\/c\/([A-Za-z0-9_-]+)/i;
+const COMMENT_QUERY_ID_RE = /[?&#](?:comment_id|commentid)=([A-Za-z0-9_-]+)/i;
+const COMMENT_HASH_ID_RE = /#comment-?([A-Za-z0-9_-]+)/i;
+
 export const GENERIC_LABEL_RE =
   /^(saved on|added time|saved post|saved|name|time|liked on|like)$/i;
 
@@ -89,9 +95,13 @@ export function extractStoryParts(
   };
 }
 
+/**
+ * Instagram shortcodes are case-sensitive identity keys. Preserve the case from
+ * the href; only normalize hostnames / story usernames.
+ */
 export function mediaKeyFromHref(href: string): string | null {
   const shortcode = extractShortcode(href);
-  if (shortcode) return shortcode.toLowerCase();
+  if (shortcode) return shortcode;
 
   const story = extractStoryParts(href);
   if (story) {
@@ -102,10 +112,58 @@ export function mediaKeyFromHref(href: string): string | null {
 
   try {
     const url = new URL(href);
-    const normalized = `${url.hostname}${url.pathname}`.replace(/\/+$/, "");
-    return normalized.toLowerCase() || null;
+    const host = url.hostname.toLowerCase();
+    const path = url.pathname.replace(/\/+$/, "");
+    const normalized = `${host}${path}`;
+    return normalized || null;
   } catch {
-    const cleaned = href.trim().toLowerCase().replace(/\/+$/, "");
+    const cleaned = href.trim().replace(/\/+$/, "");
     return cleaned || null;
   }
+}
+
+/** Prefer explicit comment id from permalink / query / hash when present. */
+export function extractCommentIdFromHref(href: string): string | null {
+  const pathMatch = href.match(COMMENT_PATH_ID_RE);
+  if (pathMatch?.[1]) return pathMatch[1];
+  const queryMatch = href.match(COMMENT_QUERY_ID_RE);
+  if (queryMatch?.[1]) return queryMatch[1];
+  const hashMatch = href.match(COMMENT_HASH_ID_RE);
+  if (hashMatch?.[1]) return hashMatch[1];
+  return null;
+}
+
+function commentContentSlug(content: string | null | undefined): string {
+  const trimmed = (content ?? "").trim();
+  if (!trimmed) return "empty";
+  // Keep identity stable and URL-safe without lowercasing (emoji/text matter).
+  return trimmed
+    .normalize("NFKC")
+    .slice(0, 64)
+    .replace(/\s+/g, "_")
+    .replace(/[^A-Za-z0-9._\-]/g, "");
+}
+
+/**
+ * Liked-comment identity: prefer fbid / comment id; else post + author +
+ * timestamp + content so distinct comments by the same author do not collapse.
+ */
+export function likedCommentMediaKey(input: {
+  baseKey: string;
+  authorUsername?: string | null;
+  likedAt?: Date | null;
+  fbid?: string | null;
+  commentId?: string | null;
+  content?: string | null;
+}): string {
+  const fbid = input.fbid?.trim();
+  if (fbid) return `comment:fbid:${fbid}`;
+
+  const commentId = input.commentId?.trim();
+  if (commentId) return `comment:id:${commentId}`;
+
+  const author = (input.authorUsername ?? "unknown").toLowerCase();
+  const ts = input.likedAt?.getTime() ?? 0;
+  const slug = commentContentSlug(input.content);
+  return `comment:${input.baseKey}:${author}:${ts}:${slug || "empty"}`;
 }

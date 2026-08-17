@@ -29,7 +29,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
   ]);
 
   const noUsername = labelEdges.items.find(
-    (i) => i.mediaKey === "edgenousername01",
+    (i) => i.mediaKey === "EdgeNoUsername01",
   );
   assert(
     noUsername?.authorUsername === "name.only.user" &&
@@ -39,7 +39,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
   );
 
   const valueOnly = labelEdges.items.find(
-    (i) => i.mediaKey === "edgeurlvalueonly01",
+    (i) => i.mediaKey === "EdgeUrlValueOnly01",
   );
   assert(
     valueOnly?.authorUsername === "value.only.author" &&
@@ -48,7 +48,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
   );
 
   const camelLabel = labelEdges.items.find(
-    (i) => i.mediaKey === "edgecamellabel01",
+    (i) => i.mediaKey === "EdgeCamelLabel01",
   );
   assert(
     camelLabel?.authorUsername === "camel.label.user" &&
@@ -69,21 +69,21 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
     },
   ]);
 
-  const sldTitle = sld.items.find((i) => i.mediaKey === "edgesldtitle01");
+  const sldTitle = sld.items.find((i) => i.mediaKey === "EdgeSldTitle01");
   assert(
     sldTitle?.authorUsername === "sld.title.author" &&
       sldTitle.mediaType === "reel",
     "string_list_data with generic 'Saved on' value should take author from title",
   );
 
-  const sldCamel = sld.items.find((i) => i.mediaKey === "edgesldcamel01");
+  const sldCamel = sld.items.find((i) => i.mediaKey === "EdgeSldCamel01");
   assert(
     sldCamel?.authorUsername === "sld.value.author" &&
       sldCamel.mediaType === "post",
     "camelCase stringListData should parse href + username value",
   );
 
-  const mapAuthor = sld.items.find((i) => i.mediaKey === "edgemapauthor01");
+  const mapAuthor = sld.items.find((i) => i.mediaKey === "EdgeMapAuthor01");
   assert(
     mapAuthor?.authorUsername === "map.name.author" &&
       mapAuthor.mediaType === "reel",
@@ -103,7 +103,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
     },
   ]);
 
-  const collItem = collOnly.items.find((i) => i.mediaKey === "edgecollonly01");
+  const collItem = collOnly.items.find((i) => i.mediaKey === "EdgeCollOnly01");
   assert(
     collItem?.authorUsername === "coll.edge.user" &&
       collItem.collections.includes("Edge Collection") &&
@@ -112,7 +112,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
   );
 
   const collHref = collOnly.items.find(
-    (i) => i.mediaKey === "edgecollhrefonly",
+    (i) => i.mediaKey === "EdgeCollHrefOnly",
   );
   assert(
     collHref?.collections.includes("Edge Collection") &&
@@ -160,7 +160,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
       ]),
     },
   ]);
-  const mergedReel = merged.items.find((i) => i.mediaKey === "edgenousername01");
+  const mergedReel = merged.items.find((i) => i.mediaKey === "EdgeNoUsername01");
   assert(
     mergedReel?.authorUsername === "name.only.user" &&
       mergedReel.collections.includes("Merged Tag"),
@@ -194,7 +194,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
       content: readEdge("liked-posts-string-list.json"),
     },
   ]);
-  const likedReel = likedSld.items.find((i) => i.mediaKey === "edgelikedsld01");
+  const likedReel = likedSld.items.find((i) => i.mediaKey === "EdgeLikedSld01");
   assert(
     likedReel?.authorUsername === "legacy.liked.user" &&
       likedReel.mediaType === "reel" &&
@@ -202,7 +202,7 @@ export async function runParseEdgesSuite(_ctx: TestContext) {
     "likes_media_likes string_list_data should parse title author",
   );
   const likedCamel = likedSld.items.find(
-    (i) => i.mediaKey === "edgelikedcamel01",
+    (i) => i.mediaKey === "EdgeLikedCamel01",
   );
   assert(
     likedCamel?.authorUsername === "legacy.value.author" &&

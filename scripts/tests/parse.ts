@@ -43,7 +43,7 @@ export async function runParseSuite(ctx: TestContext) {
     },
   ]);
   const newAuthor = newFormat.items.find(
-    (item) => item.mediaKey === "newfmtreel01",
+    (item) => item.mediaKey === "NewFmtReel01",
   );
   if (!newAuthor?.authorUsername || !newAuthor.savedAt) {
     throw new Error("New-format saved posts should parse author and savedAt");
@@ -59,7 +59,7 @@ export async function runParseSuite(ctx: TestContext) {
     },
   ]);
   const flatItem = flatCollections.items.find(
-    (item) => item.mediaKey === "flatcollreel1",
+    (item) => item.mediaKey === "FlatCollReel1",
   );
   if (
     !flatItem?.authorUsername ||
@@ -88,13 +88,13 @@ export async function runParseSuite(ctx: TestContext) {
     },
   ]);
   const labelReel = labelValuesParsed.items.find(
-    (item) => item.mediaKey === "labelfmtreel01",
+    (item) => item.mediaKey === "LabelFmtReel01",
   );
   const labelPost = labelValuesParsed.items.find(
-    (item) => item.mediaKey === "labelfmtpost01",
+    (item) => item.mediaKey === "LabelFmtPost01",
   );
   const labelCollOnly = labelValuesParsed.items.find(
-    (item) => item.mediaKey === "labelfmtcollonly",
+    (item) => item.mediaKey === "LabelFmtCollOnly",
   );
   if (
     !labelReel?.authorUsername ||
@@ -149,13 +149,28 @@ export async function runParseSuite(ctx: TestContext) {
     },
   ]);
   const likedReel = likedParsed.items.find(
-    (item) => item.mediaKey === "likedfmtreel01",
+    (item) => item.mediaKey === "LikedFmtReel01",
   );
   const likedStory = likedParsed.items.find((item) =>
     item.mediaKey.startsWith("story:story.author:"),
   );
-  const likedComment = likedParsed.items.find((item) =>
+  const likedComments = likedParsed.items.filter((item) =>
     item.mediaKey.startsWith("comment:"),
+  );
+  const likedCommentByFbid = likedComments.find((item) =>
+    item.mediaKey.startsWith("comment:fbid:"),
+  );
+  const likedCommentByPathId = likedComments.find((item) =>
+    item.mediaKey.startsWith("comment:id:18009998887776655"),
+  );
+  const likedCommentByQueryId = likedComments.find((item) =>
+    item.mediaKey.startsWith("comment:id:554433"),
+  );
+  const sameAuthorComments = likedComments.filter(
+    (item) =>
+      item.authorUsername === "comment.author" &&
+      !item.mediaKey.startsWith("comment:fbid:") &&
+      !item.mediaKey.startsWith("comment:id:"),
   );
   if (
     !likedReel?.authorUsername ||
@@ -173,15 +188,25 @@ export async function runParseSuite(ctx: TestContext) {
     throw new Error("story_likes should detect story type and author from URL/Owner");
   }
   if (
-    !likedComment ||
-    likedComment.mediaType !== "comment" ||
-    likedComment.authorUsername !== "comment.author"
+    likedComments.length < 5 ||
+    !likedComments.every((item) => item.mediaType === "comment")
   ) {
     throw new Error("liked_comments should parse comment likes with author title");
   }
-  if (likedParsed.items.length < 4) {
+  if (!likedCommentByFbid || likedCommentByFbid.mediaKey !== "comment:fbid:88001") {
+    throw new Error("liked_comments should prefer fbid identity when present");
+  }
+  if (!likedCommentByPathId || !likedCommentByQueryId) {
+    throw new Error("liked_comments should use comment id from path/query when present");
+  }
+  if (sameAuthorComments.length < 2) {
     throw new Error(
-      `Expected at least 4 liked items from fixtures, got ${likedParsed.items.length}`,
+      "liked_comments should keep distinct comments by the same author on one post",
+    );
+  }
+  if (likedParsed.items.length < 7) {
+    throw new Error(
+      `Expected at least 7 liked items from fixtures, got ${likedParsed.items.length}`,
     );
   }
 

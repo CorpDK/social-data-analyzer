@@ -5,6 +5,7 @@
  * Ownership map: docs/db-boundary.md.
  */
 import type Database from "better-sqlite3";
+import { repairCaseSensitiveMediaKeys } from "./repair-media-keys";
 
 /** Fixed sqlite-vec embedding width for all provider tables. */
 export const VEC_DIMENSIONS = 1024;
@@ -12,10 +13,16 @@ export const VEC_DIMENSIONS = 1024;
 /**
  * Bump whenever the idempotent schema below gains or changes a table/index.
  * Development re-applies it once per module evaluation for hot-reload safety.
+ *
+ * v7: case-sensitive shortcode media_key repair (recompute from href).
  */
-export const SCHEMA_VERSION = 6;
+export const SCHEMA_VERSION = 7;
 
 export function ensureDatabaseSchema(sqlite: Database.Database) {
+  const previousVersion = sqlite.pragma("user_version", {
+    simple: true,
+  }) as number;
+
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS imports (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -122,6 +129,13 @@ export function ensureDatabaseSchema(sqlite: Database.Database) {
   ensureEmbeddingJobsTable(sqlite);
   ensureImportJobsTable(sqlite);
   ensureSearchSchema(sqlite);
+
+  // One-time data repair when upgrading past v6: restore shortcode case in
+  // media_key from href without deleting/merging colliding rows.
+  if (previousVersion < 7) {
+    repairCaseSensitiveMediaKeys(sqlite);
+  }
+
   sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
 }
 

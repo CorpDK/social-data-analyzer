@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { listLikes, listLikesFilterOptions } from "@/lib/queries";
+import { parsePageParams } from "@/lib/query-params";
 
 export const runtime = "nodejs";
 
@@ -10,12 +11,17 @@ export async function GET(request: Request) {
     return NextResponse.json(listLikesFilterOptions());
   }
 
+  const pageParams = parsePageParams(searchParams);
+  if (!pageParams.ok) {
+    return NextResponse.json({ error: pageParams.error }, { status: 400 });
+  }
+
   const data = await listLikes({
     q: searchParams.get("q") ?? undefined,
     type: searchParams.get("type") ?? undefined,
     author: searchParams.get("author") ?? undefined,
-    page: Number(searchParams.get("page") ?? "1"),
-    pageSize: Number(searchParams.get("pageSize") ?? "25"),
+    page: pageParams.page,
+    pageSize: pageParams.pageSize,
     provider: searchParams.get("provider") ?? undefined,
   });
 

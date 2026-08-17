@@ -122,6 +122,14 @@ Settings hint for non-loopback / non-official-OpenAI hosts — see
   `NEXT_PUBLIC_INSTAGRAM_SAVES_LOCAL_TOKEN` is set.
 - GET / SSE read paths are unchanged (still loopback-bound by the server).
 
+## Identity / list query guards (Phase 2)
+
+- Shortcodes in `media_key` preserve Instagram case (`mediaKeyFromHref`);
+  `SCHEMA_VERSION` 7 repairs existing rows from `href` without silent merges.
+- Liked-comment keys prefer fbid / comment id, else post+author+timestamp+content.
+- Collection filter on saves uses `EXISTS` (no huge bound `IN` lists).
+- `page` / `pageSize` parsed via `parsePageParams` → **400** when malformed.
+
 ## Operator runbook
 
 Ops checklist (import, reindex, cancel/resume, MemAvailable, orphan workers,

@@ -11,8 +11,10 @@ export type {
 export {
   detectLikedMediaType,
   detectMediaType,
+  extractCommentIdFromHref,
   extractShortcode,
   extractStoryParts,
+  likedCommentMediaKey,
   mediaKeyFromHref,
 } from "./parse/types";
 

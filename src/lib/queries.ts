@@ -128,8 +128,14 @@ export type SavesQuery = {
 export async function listSaves(query: SavesQuery) {
   ensureSearchReady();
   const db = getDb();
-  const page = Math.max(1, query.page ?? 1);
-  const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 25));
+  const pageRaw = query.page ?? 1;
+  const pageSizeRaw = query.pageSize ?? 25;
+  const page =
+    Number.isFinite(pageRaw) && pageRaw >= 1 ? Math.floor(pageRaw) : 1;
+  const pageSize =
+    Number.isFinite(pageSizeRaw) && pageSizeRaw >= 1
+      ? Math.min(100, Math.floor(pageSizeRaw))
+      : 25;
   const offset = (page - 1) * pageSize;
 
   const conditions = [];
@@ -188,34 +194,15 @@ export async function listSaves(query: SavesQuery) {
     conditions.push(eq(savedItems.authorUsername, query.author));
   }
 
-  let itemIdsInCollection: number[] | null = null;
   if (query.collection) {
-    itemIdsInCollection = db
-      .select({ itemId: itemCollections.itemId })
-      .from(itemCollections)
-      .where(eq(itemCollections.collectionName, query.collection))
-      .all()
-      .map((row) => row.itemId);
-
-    if (itemIdsInCollection.length === 0) {
-      return {
-        items: [],
-        total: 0,
-        page,
-        pageSize,
-        totalPages: 0,
-        searchMode,
-        searchProvider,
-        providerFallback,
-        providerFallbackReason,
-      };
-    }
-
+    // Subquery / EXISTS avoids materializing huge bound IN() lists (SQLite
+    // variable limits) when a collection has tens of thousands of members.
     conditions.push(
-      sql`${savedItems.id} in (${sql.join(
-        itemIdsInCollection.map((id) => sql`${id}`),
-        sql`, `,
-      )})`,
+      sql`exists (
+        select 1 from ${itemCollections}
+        where ${itemCollections.itemId} = ${savedItems.id}
+          and ${itemCollections.collectionName} = ${query.collection}
+      )`,
     );
   }
 
@@ -378,8 +365,14 @@ function savedKeysForLikePage(
 export async function listLikes(query: LikesQuery) {
   ensureSearchReady();
   const db = getDb();
-  const page = Math.max(1, query.page ?? 1);
-  const pageSize = Math.min(100, Math.max(1, query.pageSize ?? 25));
+  const pageRaw = query.page ?? 1;
+  const pageSizeRaw = query.pageSize ?? 25;
+  const page =
+    Number.isFinite(pageRaw) && pageRaw >= 1 ? Math.floor(pageRaw) : 1;
+  const pageSize =
+    Number.isFinite(pageSizeRaw) && pageSizeRaw >= 1
+      ? Math.min(100, Math.floor(pageSizeRaw))
+      : 25;
   const offset = (page - 1) * pageSize;
 
   const conditions = [];

@@ -9,6 +9,47 @@
           "timestamp": 1740000100
         }
       ]
+    },
+    {
+      "title": "comment.author",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/reel/CommentLikedReel1/",
+          "value": "love this",
+          "timestamp": 1740000200
+        }
+      ]
+    },
+    {
+      "title": "comment.author",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/p/CommentLikedPost1/c/18009998887776655/",
+          "value": "with path id",
+          "timestamp": 1740000300
+        }
+      ]
+    },
+    {
+      "title": "other.commenter",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/p/CommentLikedPost2/?comment_id=554433",
+          "value": "query id",
+          "timestamp": 1740000400
+        }
+      ]
+    },
+    {
+      "title": "fbid.commenter",
+      "fbid": "88001",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/p/CommentLikedPost3/",
+          "value": "with fbid",
+          "timestamp": 1740000500
+        }
+      ]
     }
   ]
 }

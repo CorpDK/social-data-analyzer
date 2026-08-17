@@ -264,7 +264,7 @@ export async function runImportSafetySuite(ctx: TestContext) {
     .prepare(
       "UPDATE saved_items SET author_username = NULL, saved_at = NULL WHERE media_key = ?",
     )
-    .run("backfillreel1");
+    .run("BackfillReel1");
   const backfillAgain = await importExportJson(
     backfillContent,
     "backfill-saved.json",
@@ -309,7 +309,7 @@ export async function runImportSafetySuite(ctx: TestContext) {
     .prepare(
       "UPDATE saved_items SET author_username = NULL, saved_at = NULL WHERE media_key IN (?, ?)",
     )
-    .run("labelfmtreel01", "labelfmtpost01");
+    .run("LabelFmtReel01", "LabelFmtPost01");
   const labelAgain = await importExportJson(
     labelBackfill,
     "label-values-saved.json",
@@ -324,7 +324,7 @@ export async function runImportSafetySuite(ctx: TestContext) {
       .prepare(
         "SELECT count(*) AS count FROM saved_items WHERE media_key IN (?, ?) AND author_username IS NOT NULL AND saved_at IS NOT NULL",
       )
-      .get("labelfmtreel01", "labelfmtpost01") as { count: number }
+      .get("LabelFmtReel01", "LabelFmtPost01") as { count: number }
   ).count;
   if (restoredAuthors !== 2) {
     throw new Error("label_values re-import should restore author_username and saved_at");

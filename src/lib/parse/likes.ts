@@ -1,7 +1,9 @@
 import {
   detectLikedMediaType,
+  extractCommentIdFromHref,
   extractShortcode,
   extractStoryParts,
+  likedCommentMediaKey,
   mediaKeyFromHref,
   type LikedSource,
   type LikesParseResult,
@@ -16,6 +18,7 @@ import {
   readHrefFromLabelValues,
   readLabelValuesList,
   readOwnerUsernameFromLabelValues,
+  readString,
   readStringListData,
   readTimestamp,
 } from "./helpers";
@@ -56,6 +59,8 @@ function pushLikedItem(
     likedAt?: Date | null;
     source: LikedSource;
     mediaKeyOverride?: string | null;
+    fbid?: string | null;
+    content?: string | null;
   },
 ) {
   const baseKey = mediaKeyFromHref(partial.href);
@@ -63,10 +68,18 @@ function pushLikedItem(
 
   const mediaType = detectLikedMediaType(partial.href, partial.source);
   const shortcode = extractShortcode(partial.href);
+  const override = partial.mediaKeyOverride?.trim() || null;
   const mediaKey =
-    partial.mediaKeyOverride?.trim().toLowerCase() ||
+    override ||
     (partial.source === "liked_comments"
-      ? `comment:${baseKey}:${(partial.authorUsername ?? "unknown").toLowerCase()}`
+      ? likedCommentMediaKey({
+          baseKey: baseKey!,
+          authorUsername: partial.authorUsername,
+          likedAt: partial.likedAt,
+          fbid: partial.fbid,
+          commentId: extractCommentIdFromHref(partial.href),
+          content: partial.content,
+        })
       : baseKey!);
 
   const existing = items.get(mediaKey);
@@ -94,6 +107,10 @@ function pushLikedItem(
   });
 }
 
+function readEntryFbid(entry: Record<string, unknown>): string | null {
+  return readString(entry.fbid) ?? readString(entry.fbId);
+}
+
 function authorFromStoryHref(href: string): string | null {
   const story = extractStoryParts(href);
   return story?.username ?? null;
@@ -116,6 +133,10 @@ function parseLikedLabelValuesEntry(
   const authorUsername =
     readOwnerUsernameFromLabelValues(labelValues) ??
     (href ? authorFromStoryHref(href) : null);
+  const fbid = readEntryFbid(entry);
+  const content =
+    readString(findLabeledValue(labelValues, "Comment")?.value) ??
+    readString(findLabeledValue(labelValues, "Text")?.value);
 
   if (href) {
     pushLikedItem(items, {
@@ -123,6 +144,8 @@ function parseLikedLabelValuesEntry(
       authorUsername,
       likedAt,
       source,
+      fbid,
+      content,
     });
     return;
   }
@@ -134,6 +157,8 @@ function parseLikedLabelValuesEntry(
         authorUsername ?? authorFromStoryHref(found),
       likedAt,
       source,
+      fbid,
+      content,
     });
   }
 }
@@ -147,6 +172,7 @@ function parseLikedStringListEntry(
   const authorUsername =
     readAuthorUsername(entry, value) ??
     (href ? authorFromStoryHref(href) : null);
+  const fbid = readEntryFbid(entry);
 
   if (href) {
     pushLikedItem(items, {
@@ -154,6 +180,8 @@ function parseLikedStringListEntry(
       authorUsername,
       likedAt,
       source,
+      fbid,
+      content: value,
     });
     return;
   }
@@ -165,10 +193,11 @@ function parseLikedStringListEntry(
         authorUsername ?? authorFromStoryHref(found),
       likedAt,
       source,
+      fbid,
+      content: value,
     });
   }
 }
-
 function parseLikedMediaArray(
   entries: unknown[],
   items: Map<string, ParsedLikedItem>,
