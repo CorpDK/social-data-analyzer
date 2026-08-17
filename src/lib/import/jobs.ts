@@ -21,6 +21,12 @@ import {
 } from "./spool";
 import { IMPORT_JOBS_CHANNEL, publishJobEvent } from "../sse";
 import {
+  isJobCancelRequested,
+  reclaimOrphanedImportJobRows,
+  runnerOwnsWork,
+  withPumpGuard,
+} from "../job-queue";
+import {
   createProgressThrottleState,
   IMPORT_FORCE_PHASES,
   markProgressPublished,
@@ -172,54 +178,16 @@ const JOB_SELECT = `SELECT id, filename, content_hash, spool_path, kind, state, 
 /** Mark orphaned running rows: re-queue if spool exists, else fail. */
 function reclaimOrphanedJobs() {
   const state = runner();
-  if (state.activeJobId !== null || state.pumping) return;
+  if (runnerOwnsWork(state)) return;
   reclaimOrphanedJobRows();
 }
 
 /** Caller must have verified that no job is owned by this process. */
 function reclaimOrphanedJobRows() {
-  const sqlite = getSqlite();
-  const orphaned = sqlite
-    .prepare(`SELECT id, spool_path FROM import_jobs WHERE state = 'running'`)
-    .all() as Array<{ id: number; spool_path: string }>;
-
-  if (orphaned.length === 0) return;
-
-  for (const row of orphaned) {
-    const spoolExists =
-      typeof row.spool_path === "string" &&
-      row.spool_path.length > 0 &&
-      fs.existsSync(row.spool_path);
-
-    if (spoolExists) {
-      sqlite
-        .prepare(
-          `UPDATE import_jobs
-           SET state = 'pending',
-               phase = 'queued',
-               cancel_requested = 0,
-               message = 'Re-queued after server restart',
-               error = NULL,
-               finished_at = NULL,
-               updated_at = unixepoch()
-           WHERE id = ?`,
-        )
-        .run(row.id);
-    } else {
-      sqlite
-        .prepare(
-          `UPDATE import_jobs
-           SET state = 'failed',
-               error = 'Interrupted by server restart (upload spool missing)',
-               message = 'Job interrupted by server restart',
-               finished_at = unixepoch(),
-               updated_at = unixepoch()
-           WHERE id = ?`,
-        )
-        .run(row.id);
-    }
+  const result = reclaimOrphanedImportJobRows(getSqlite());
+  if (result.requeued > 0 || result.failed > 0) {
+    publishJobEvent(IMPORT_JOBS_CHANNEL, true);
   }
-  publishJobEvent(IMPORT_JOBS_CHANNEL, true);
 }
 
 export function getImportJob(id: number): ImportJobRecord | null {
@@ -397,12 +365,12 @@ async function applyProgress(jobId: number, progress: ImportProgress) {
 }
 
 function shouldCancel(jobId: number): boolean {
-  const state = runner();
-  if (state.cancelFlags.get(jobId)) return true;
-  const row = getSqlite()
-    .prepare(`SELECT cancel_requested AS c FROM import_jobs WHERE id = ?`)
-    .get(jobId) as { c: number } | undefined;
-  return Boolean(row?.c);
+  return isJobCancelRequested(
+    getSqlite(),
+    "import_jobs",
+    jobId,
+    runner().cancelFlags,
+  );
 }
 
 async function executeJob(jobId: number) {
@@ -542,9 +510,7 @@ async function executeJob(jobId: number) {
 
 function pumpQueue() {
   const state = runner();
-  if (state.pumping) return;
-  state.pumping = true;
-  try {
+  withPumpGuard(state, () => {
     if (state.activeJobId !== null) return;
 
     const dbActive = getActiveImportJob();
@@ -568,9 +534,7 @@ function pumpQueue() {
     });
 
     void executeJob(next.id);
-  } finally {
-    state.pumping = false;
-  }
+  });
 }
 
 /**
@@ -579,7 +543,7 @@ function pumpQueue() {
  */
 export function ensureImportJobRunner() {
   const state = runner();
-  if (state.activeJobId !== null || state.pumping) return;
+  if (runnerOwnsWork(state)) return;
   reclaimOrphanedJobs();
   pumpQueue();
 }

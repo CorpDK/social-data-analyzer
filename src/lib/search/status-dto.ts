@@ -98,22 +98,18 @@ export type LibraryIndexStatusDto = {
 export type HostMemoryStatusDto = {
   memAvailableMb: number | null;
   largeLibraryItemThreshold: number;
-  criticalMinAvailableMb?: number;
-  remoteLargeMinAvailableMb?: number;
+  criticalMinAvailableMb: number;
+  remoteLargeMinAvailableMb: number;
   ollamaLargeMinAvailableMb: number;
-  ollamaCriticalMinAvailableMb: number;
 };
 
 /** `/api/search/status` (and SSE snapshot) payload. */
 export type SearchIndexStatusDto = {
-  totalItems: number;
-  ftsCount: number;
-  providers: ProviderIndexStatusDto[];
-  libraries?: {
+  libraries: {
     saves: LibraryIndexStatusDto;
     likes: LibraryIndexStatusDto;
   };
-  host?: HostMemoryStatusDto;
+  host: HostMemoryStatusDto;
   job: EmbeddingJobDto | null;
   pendingJobs: EmbeddingJobDto[];
   recentJobs?: EmbeddingJobDto[];

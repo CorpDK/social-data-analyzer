@@ -64,8 +64,6 @@ export function searchStatusFingerprint(snapshot: SearchIndexStatusDto): string 
     jobFp(snapshot.job),
     jobsListFp(snapshot.pendingJobs),
     jobsListFp(snapshot.recentJobs),
-    snapshot.totalItems,
-    snapshot.ftsCount,
     libraryFp(libs?.saves),
     libraryFp(libs?.likes),
     snapshot.host?.memAvailableMb ?? "",

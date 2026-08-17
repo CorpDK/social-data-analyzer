@@ -96,16 +96,6 @@ export function upsertItemEmbedding(
     .run(id, embeddingToBuffer(embedding));
 }
 
-/** @deprecated Prefer upsertItemEmbedding("saves", …). Kept for call sites. */
-export function upsertSavesItemEmbedding(
-  index: VectorIndexName,
-  itemId: number,
-  embedding: Float32Array,
-  sqlite: Database.Database = getSqlite(),
-) {
-  upsertItemEmbedding("saves", index, itemId, embedding, sqlite);
-}
-
 export function vecCount(
   library: SearchLibrary,
   index: VectorIndexName,
@@ -119,13 +109,6 @@ export function vecCount(
       )
       .get() as { c: number }
   ).c;
-}
-
-export function vecCountSaves(
-  index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
-): number {
-  return vecCount("saves", index, sqlite);
 }
 
 export function vectorTableDimensions(

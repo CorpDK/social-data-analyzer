@@ -27,7 +27,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   } = await import("../../src/lib/search/jobs");
 
   const statusBefore = getSearchIndexStatus();
-  if (statusBefore.providers.length !== 4) {
+  if (statusBefore.libraries.saves.providers.length !== 4) {
     throw new Error("Status should include all four embedding providers");
   }
   if (
@@ -40,16 +40,20 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   if (!Array.isArray(statusBefore.pendingJobs) || !Array.isArray(statusBefore.recentJobs)) {
     throw new Error("Status should include pendingJobs and recentJobs arrays");
   }
-  const localStatus = statusBefore.providers.find((p) => p.provider === "local");
+  const localStatus = statusBefore.libraries.saves.providers.find(
+    (p) => p.provider === "local",
+  );
   if (!localStatus?.configured || localStatus.health === "unavailable") {
     throw new Error("Local provider should be enabled by default / for status test");
   }
-  const openaiStatus = statusBefore.providers.find((p) => p.provider === "openai");
+  const openaiStatus = statusBefore.libraries.saves.providers.find(
+    (p) => p.provider === "openai",
+  );
   if (!openaiStatus?.configured || !openaiStatus.enabled) {
     throw new Error("OpenAI should be enabled and credentialed for status test");
   }
   updateSettingsKeys({ openaiEnabled: false });
-  const disabledOpenAi = getSearchIndexStatus().providers.find(
+  const disabledOpenAi = getSearchIndexStatus().libraries.saves.providers.find(
     (p) => p.provider === "openai",
   );
   if (
@@ -89,7 +93,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   sqlite
     .prepare(`DELETE FROM embedding_index_profiles WHERE index_name = 'openai'`)
     .run();
-  const emptyOpenAi = getSearchIndexStatus().providers.find(
+  const emptyOpenAi = getSearchIndexStatus().libraries.saves.providers.find(
     (p) => p.provider === "openai",
   );
   if (emptyOpenAi?.health !== "empty" || emptyOpenAi.embeddedCount !== 0) {
@@ -122,12 +126,12 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
       `Queue should finish with a completed job (got ${finished?.state}: ${finished?.error})`,
     );
   }
-  const openaiAfter = getSearchIndexStatus().providers.find(
+  const openaiAfter = getSearchIndexStatus().libraries.saves.providers.find(
     (p) => p.provider === "openai",
   );
   if (
     openaiAfter?.health !== "ready" ||
-    openaiAfter.embeddedCount !== statusBefore.totalItems
+    openaiAfter.embeddedCount !== statusBefore.libraries.saves.totalItems
   ) {
     throw new Error("OpenAI reindex via job should restore full coverage");
   }

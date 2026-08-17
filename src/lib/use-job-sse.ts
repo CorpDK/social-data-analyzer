@@ -28,9 +28,12 @@ export function useJobSse({
   const onSnapshotRef = useRef(onSnapshot);
   const onIdleRef = useRef(onIdle);
   const onStreamErrorRef = useRef(onStreamError);
-  onSnapshotRef.current = onSnapshot;
-  onIdleRef.current = onIdle;
-  onStreamErrorRef.current = onStreamError;
+
+  useEffect(() => {
+    onSnapshotRef.current = onSnapshot;
+    onIdleRef.current = onIdle;
+    onStreamErrorRef.current = onStreamError;
+  }, [onSnapshot, onIdle, onStreamError]);
 
   useEffect(() => {
     if (!enabled) return;

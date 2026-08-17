@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm exec tsc --noEmit
+
+      - name: Parse / job suites
+        run: pnpm test:parse
+        env:
+          # Keep suites offline: memory keyring, no live reindex / Voyage / Ollama.
+          INSTAGRAM_SAVES_KEYRING: memory
+          EMBEDDING_WORKER_INLINE: "1"
+
+      # Lint is advisory for now (pre-existing debt). Fail CI on tsc + tests first.
+      - name: Lint (non-blocking)
+        continue-on-error: true
+        run: pnpm lint

@@ -12,6 +12,10 @@ pnpm exec tsc --noEmit
 pnpm test:parse
 ```
 
+CI (`.github/workflows/ci.yml`) runs the same: `tsc --noEmit` + `pnpm test:parse`
+with `INSTAGRAM_SAVES_KEYRING=memory` and `EMBEDDING_WORKER_INLINE=1` (no network,
+no live reindex). Lint runs with `continue-on-error` until remaining debt is cleared.
+
 Do **not** run `pnpm reindex`, Voyage, Ollama, or embedding jobs against a real
 user library DB while validating contracts.
 
@@ -79,3 +83,10 @@ hit SQLite bind-variable limits.
 Library × provider indexes only (local / openai / voyage / ollama × saves / likes).
 Legacy `all-configured` may still appear on old rows; new enqueues expand to
 concrete targets.
+
+## Settings key migration (Gate A / N3)
+
+Shared provider enable keys (`local_enabled`, `ollama_enabled`, `openai_enabled`,
+`voyage_enabled`) migrate once into per-library keys (`saves_*_enabled` /
+`likes_*_enabled`) via `migrateLegacyProviderEnableKeys`, then are deleted.
+Settings UI always reads/writes per-library keys. Env `*_ENABLED` fallbacks remain.

@@ -7,7 +7,6 @@ import {
   getEmbeddingTimeoutMs,
   getOllamaSettings,
   getOpenAiSettings,
-  getPreferredEmbeddingProvider,
   getVoyageSettings,
   isOllamaEnabled,
   isOpenAiEnabled,
@@ -190,24 +189,6 @@ export function embeddingConfigForProvider(
   };
 }
 
-/** @deprecated Prefer embeddingConfigForProvider or resolveSearchProvider */
-export function embeddingConfig(): EmbeddingConfig {
-  const preferred = getPreferredEmbeddingProvider();
-  if (preferred) {
-    return embeddingConfigForProvider(preferred);
-  }
-  if (isOpenAiEnabled() && getOpenAiApiKey()) {
-    return embeddingConfigForProvider("openai");
-  }
-  if (isVoyageEnabled() && getVoyageApiKey()) {
-    return embeddingConfigForProvider("voyage");
-  }
-  if (isOllamaEnabled()) {
-    return embeddingConfigForProvider("ollama");
-  }
-  return localEmbeddingConfig();
-}
-
 /** At least one neural index is explicitly enabled and credentialed. */
 export function isRemoteEmbeddingConfigured(): boolean {
   return Boolean(
@@ -312,7 +293,7 @@ async function embedTextsRemote(
  */
 export async function embedTexts(
   texts: string[],
-  config: EmbeddingConfig = embeddingConfig(),
+  config: EmbeddingConfig,
   inputType: EmbeddingInputType = "document",
 ): Promise<Float32Array[]> {
   const { profile } = config;
@@ -354,7 +335,7 @@ export async function embedTexts(
 /** Single-text embed (query search and one-off updates). */
 export async function embedText(
   text: string,
-  config: EmbeddingConfig = embeddingConfig(),
+  config: EmbeddingConfig,
   inputType: EmbeddingInputType = "document",
 ): Promise<Float32Array> {
   const [embedding] = await embedTexts([text], config, inputType);

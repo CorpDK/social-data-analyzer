@@ -11,6 +11,10 @@ import fs from "node:fs";
 import path from "node:path";
 import * as sqliteVec from "sqlite-vec";
 import {
+  reclaimOrphanedEmbeddingJobRows,
+  reclaimOrphanedImportJobRows,
+} from "../job-queue";
+import {
   SCHEMA_VERSION,
   VEC_DIMENSIONS,
   ensureDatabaseSchema,
@@ -62,82 +66,12 @@ function isJobWorkerProcess(): boolean {
 function reclaimJobsAfterProcessRestart(sqlite: Database.Database) {
   if (isJobWorkerProcess()) return;
 
-  // This is intentionally connection-startup work, not schema-ensure work:
-  // HMR may re-run schema ensure while a real in-process job is still active.
-  // Interrupted embedding jobs re-queue as pending so rebuild can resume
-  // (skip already-embedded ids) instead of failing and leaving a partial index.
-  sqlite
-    .prepare(
-      `UPDATE embedding_jobs
-       SET state = 'cancelled',
-           message = 'Cancelled (interrupted while cancel was requested)',
-           error = NULL,
-           finished_at = unixepoch(),
-           updated_at = unixepoch()
-       WHERE state = 'running' AND cancel_requested = 1`,
-    )
-    .run();
-
-  sqlite
-    .prepare(
-      `UPDATE embedding_jobs
-       SET state = 'pending',
-           phase = 'queued',
-           message = CASE
-             WHEN processed > 0 THEN 'Resuming after server restart…'
-             ELSE 'Re-queued after server restart'
-           END,
-           error = NULL,
-           finished_at = NULL,
-           updated_at = unixepoch()
-       WHERE state = 'running' AND cancel_requested = 0`,
-    )
-    .run();
-
-  // Import jobs: re-queue when the spool file is still on disk; otherwise fail.
-  // Full re-run from spool (idempotent merge) — not mid-phase resume.
-  const orphaned = sqlite
-    .prepare(
-      `SELECT id, spool_path FROM import_jobs WHERE state = 'running'`,
-    )
-    .all() as Array<{ id: number; spool_path: string }>;
-
-  for (const row of orphaned) {
-    const spoolExists =
-      typeof row.spool_path === "string" &&
-      row.spool_path.length > 0 &&
-      fs.existsSync(row.spool_path);
-
-    if (spoolExists) {
-      sqlite
-        .prepare(
-          `UPDATE import_jobs
-           SET state = 'pending',
-               phase = 'queued',
-               cancel_requested = 0,
-               message = 'Re-queued after server restart',
-               error = NULL,
-               finished_at = NULL,
-               updated_at = unixepoch()
-           WHERE id = ?`,
-        )
-        .run(row.id);
-    } else {
-      sqlite
-        .prepare(
-          `UPDATE import_jobs
-           SET state = 'failed',
-               error = 'Interrupted by server restart (upload spool missing)',
-               message = 'Job interrupted by server restart',
-               finished_at = unixepoch(),
-               updated_at = unixepoch()
-           WHERE id = ?`,
-        )
-        .run(row.id);
-    }
-  }
+  // Connection-startup reclaim (not schema-ensure): HMR may re-run schema
+  // ensure while an in-process job is still active. Shared helpers match the
+  // HMR reclaim paths in search/jobs + import/jobs.
+  reclaimOrphanedEmbeddingJobRows(sqlite);
+  reclaimOrphanedImportJobRows(sqlite);
 }
-
 function markSchemaApplied() {
   globalForDb.schemaVersion = SCHEMA_VERSION;
 }

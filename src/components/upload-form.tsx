@@ -9,13 +9,11 @@ import {
 } from "@/lib/import-limits";
 import type {
   ImportJobDetailsDto,
-  ImportJobDto,
   ImportJobState,
   ImportJobsStatusDto,
 } from "@/lib/import/jobs-dto";
 import { useJobSse } from "@/lib/use-job-sse";
 
-type ImportJob = ImportJobDto;
 type JobsPayload = ImportJobsStatusDto;
 
 function errorFromPayload(payload: unknown, fallback: string): string {

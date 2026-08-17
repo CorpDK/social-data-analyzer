@@ -29,6 +29,12 @@ import {
   type RebuildProgress,
 } from "./sync";
 import { configuredProviders, isProviderConfigured } from "./providers";
+import {
+  isJobCancelRequested,
+  reclaimOrphanedEmbeddingJobRows,
+  runnerOwnsWork,
+  withPumpGuard,
+} from "../job-queue";
 import { SEARCH_STATUS_CHANNEL, publishJobEvent } from "../sse";
 import {
   classifyWorkerExit,
@@ -179,43 +185,14 @@ function reclaimOrphanedJobs() {
   // Never re-queue a row this process still owns: the child worker's row is
   // `running` while it works, and re-queuing it here would let the queue spawn
   // a second worker for the same job.
-  if (state.activeJobId !== null || state.activeChild || state.pumping) return;
+  if (runnerOwnsWork(state)) return;
   reclaimOrphanedJobRows();
 }
 
 /** Caller must have verified that no job is owned by this process. */
 function reclaimOrphanedJobRows() {
-  const sqlite = getSqlite();
-
-  const cancelled = sqlite
-    .prepare(
-      `UPDATE embedding_jobs
-       SET state = 'cancelled',
-           message = 'Cancelled (interrupted while cancel was requested)',
-           error = NULL,
-           finished_at = unixepoch(),
-           updated_at = unixepoch()
-       WHERE state = 'running' AND cancel_requested = 1`,
-    )
-    .run();
-
-  const resumed = sqlite
-    .prepare(
-      `UPDATE embedding_jobs
-       SET state = 'pending',
-           phase = 'queued',
-           message = CASE
-             WHEN processed > 0 THEN 'Resuming after server restart…'
-             ELSE 'Re-queued after server restart'
-           END,
-           error = NULL,
-           finished_at = NULL,
-           updated_at = unixepoch()
-       WHERE state = 'running' AND cancel_requested = 0`,
-    )
-    .run();
-
-  if (cancelled.changes > 0 || resumed.changes > 0) {
+  const result = reclaimOrphanedEmbeddingJobRows(getSqlite());
+  if (result.cancelled > 0 || result.resumed > 0) {
     publishJobEvent(SEARCH_STATUS_CHANNEL, true);
   }
 }
@@ -481,12 +458,12 @@ function clearJobProgressThrottle(jobId: number) {
 }
 
 function shouldCancel(jobId: number): boolean {
-  const state = runner();
-  if (state.cancelFlags.get(jobId)) return true;
-  const row = getSqlite()
-    .prepare(`SELECT cancel_requested AS c FROM embedding_jobs WHERE id = ?`)
-    .get(jobId) as { c: number } | undefined;
-  return Boolean(row?.c);
+  return isJobCancelRequested(
+    getSqlite(),
+    "embedding_jobs",
+    jobId,
+    runner().cancelFlags,
+  );
 }
 
 function insertPendingJob(
@@ -890,9 +867,7 @@ function startJob(state: JobRunnerState, job: EmbeddingJobRecord) {
 /** Promote the oldest startable pending job to running when the runner is idle. */
 function pumpQueue() {
   const state = runner();
-  if (state.pumping) return;
-  state.pumping = true;
-  try {
+  withPumpGuard(state, () => {
     if (state.activeJobId !== null) return;
     // One worker child at a time, no matter how many callers pump the queue.
     if (state.activeChild) return;
@@ -910,9 +885,7 @@ function pumpQueue() {
     if (!next) return;
 
     startJob(state, next);
-  } finally {
-    state.pumping = false;
-  }
+  });
 }
 
 /**
@@ -921,7 +894,7 @@ function pumpQueue() {
  */
 export function ensureJobRunner() {
   const state = runner();
-  if (state.activeJobId !== null || state.activeChild || state.pumping) return;
+  if (runnerOwnsWork(state)) return;
   reclaimOrphanedJobs();
   pumpQueue();
 }

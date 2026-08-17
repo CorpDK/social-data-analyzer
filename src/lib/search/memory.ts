@@ -12,9 +12,6 @@ export const LARGE_LIBRARY_ITEM_THRESHOLD = 20_000;
  */
 export const CRITICAL_MIN_AVAILABLE_MB = 512;
 
-/** @deprecated Prefer CRITICAL_MIN_AVAILABLE_MB (same value; kept for status clients). */
-export const OLLAMA_CRITICAL_MIN_AVAILABLE_MB = CRITICAL_MIN_AVAILABLE_MB;
-
 /**
  * Refuse large Ollama rebuilds when MemAvailable is below this (GiB-scale
  * headroom for local model + Node chunk + SQLite). Tuned for

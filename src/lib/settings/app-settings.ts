@@ -74,6 +74,39 @@ const LIBRARY_ENABLED_KEYS: Record<
   },
 };
 
+/**
+ * One-shot: copy shared `*_enabled` keys into per-library keys, then drop the
+ * shared keys. Safe to call repeatedly. Keeps Settings UI / DB reads consistent
+ * without needing the legacy keys forever.
+ *
+ * Migration note: keys `local_enabled`, `ollama_enabled`, `openai_enabled`,
+ * `voyage_enabled` are quarantined — still in `AppSettingKey` for delete/migrate,
+ * but new writes always use `saves_*` / `likes_*` keys.
+ */
+const legacyEnableMigrated = new WeakSet<object>();
+
+export function migrateLegacyProviderEnableKeys(
+  sqlite: Database.Database = getSqlite(),
+) {
+  if (legacyEnableMigrated.has(sqlite)) return;
+  ensureAppSettingsTable(sqlite);
+  for (const provider of PROVIDER_VALUES) {
+    const legacyKey = LEGACY_ENABLED_KEYS[provider];
+    const legacyValue = getAppSetting(legacyKey, sqlite);
+    if (legacyValue !== "1" && legacyValue !== "0") continue;
+
+    for (const library of ["saves", "likes"] as const) {
+      const libraryKey = LIBRARY_ENABLED_KEYS[provider][library];
+      const existing = getAppSetting(libraryKey, sqlite);
+      if (existing !== "1" && existing !== "0") {
+        setAppSetting(libraryKey, legacyValue, sqlite);
+      }
+    }
+    setAppSetting(legacyKey, null, sqlite);
+  }
+  legacyEnableMigrated.add(sqlite);
+}
+
 export function ensureAppSettingsTable(
   sqlite: Database.Database = getSqlite(),
 ) {
@@ -199,17 +232,12 @@ export function isProviderIndexEnabled(
   library: SearchLibrarySetting,
   sqlite: Database.Database = getSqlite(),
 ): boolean {
+  migrateLegacyProviderEnableKeys(sqlite);
+
   const libraryKey = LIBRARY_ENABLED_KEYS[provider][library];
   const libraryValue = getAppSetting(libraryKey, sqlite);
   if (libraryValue === "1" || libraryValue === "0") {
     return libraryValue === "1";
-  }
-
-  const legacyKey = LEGACY_ENABLED_KEYS[provider];
-  const legacyValue = getAppSetting(legacyKey, sqlite);
-  if (legacyValue === "1" || legacyValue === "0") {
-    // Old shared flag on → both libraries; absent → defaults below.
-    return legacyValue === "1";
   }
 
   return parseEnabledFlag(

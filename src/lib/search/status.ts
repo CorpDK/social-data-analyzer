@@ -14,7 +14,6 @@ import {
   CRITICAL_MIN_AVAILABLE_MB,
   estimatedVectorMegabytes,
   LARGE_LIBRARY_ITEM_THRESHOLD,
-  OLLAMA_CRITICAL_MIN_AVAILABLE_MB,
   OLLAMA_LARGE_MIN_AVAILABLE_MB,
   REMOTE_LARGE_MIN_AVAILABLE_MB,
   readMemAvailableMb,
@@ -106,17 +105,9 @@ export type HostMemoryStatus = {
   remoteLargeMinAvailableMb: number;
   /** Large-library floor for Ollama (local model). */
   ollamaLargeMinAvailableMb: number;
-  /** @deprecated Same as criticalMinAvailableMb. */
-  ollamaCriticalMinAvailableMb: number;
 };
 
 export type SearchIndexStatus = {
-  /** @deprecated Prefer `libraries.saves` — kept for older clients. */
-  totalItems: number;
-  /** @deprecated Prefer `libraries.saves` — kept for older clients. */
-  ftsCount: number;
-  /** @deprecated Prefer `libraries.saves.providers` — kept for older clients. */
-  providers: ProviderIndexStatus[];
   libraries: {
     saves: LibraryIndexStatus;
     likes: LibraryIndexStatus;
@@ -293,9 +284,6 @@ export function getSearchIndexStatus(): SearchIndexStatus {
   const likes = getLibraryIndexStatus("likes", memAvailableMb);
 
   return {
-    totalItems: saves.totalItems,
-    ftsCount: saves.ftsCount,
-    providers: saves.providers,
     libraries: { saves, likes },
     host: {
       memAvailableMb,
@@ -303,7 +291,6 @@ export function getSearchIndexStatus(): SearchIndexStatus {
       criticalMinAvailableMb: CRITICAL_MIN_AVAILABLE_MB,
       remoteLargeMinAvailableMb: REMOTE_LARGE_MIN_AVAILABLE_MB,
       ollamaLargeMinAvailableMb: OLLAMA_LARGE_MIN_AVAILABLE_MB,
-      ollamaCriticalMinAvailableMb: OLLAMA_CRITICAL_MIN_AVAILABLE_MB,
     },
     job: getDisplayEmbeddingJob(),
     pendingJobs: getPendingEmbeddingJobs(),

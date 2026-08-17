@@ -100,12 +100,8 @@ export function IndexesProgressCard({
             <p className="mt-1 text-[11px] text-[var(--muted)]">
               MemAvailable ~{Math.round(host.memAvailableMb)} MB
               {(() => {
-                const critical =
-                  host.criticalMinAvailableMb ??
-                  host.ollamaCriticalMinAvailableMb;
-                const remote =
-                  host.remoteLargeMinAvailableMb ??
-                  host.ollamaLargeMinAvailableMb;
+                const critical = host.criticalMinAvailableMb;
+                const remote = host.remoteLargeMinAvailableMb;
                 if (host.memAvailableMb < critical) {
                   return ` · reindex blocked below ${critical} MB`;
                 }

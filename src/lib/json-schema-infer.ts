@@ -5,8 +5,6 @@
 
 /** Pathological-depth guard only (JSON cannot cycle). Practical nesting is uncapped. */
 export const SCHEMA_SAFETY_MAX_DEPTH = 256;
-/** @deprecated Prefer full-file reads; kept as Infinity so callers never truncate. */
-export const SCHEMA_SAMPLE_BYTES = Number.POSITIVE_INFINITY;
 /**
  * Max array elements to sample when inferring element schema.
  * Strategy: first ~7, last ~7, and ~6 random from the middle (≤20 total).

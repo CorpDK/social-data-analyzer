@@ -59,12 +59,13 @@ function isStatusPayload(payload: unknown): payload is SearchIndexStatusDto {
   return Boolean(
     payload &&
       typeof payload === "object" &&
-      "totalItems" in payload &&
-      typeof payload.totalItems === "number" &&
-      "ftsCount" in payload &&
-      typeof payload.ftsCount === "number" &&
-      "providers" in payload &&
-      Array.isArray(payload.providers),
+      "libraries" in payload &&
+      payload.libraries &&
+      typeof payload.libraries === "object" &&
+      "saves" in payload.libraries &&
+      "likes" in payload.libraries &&
+      "pendingJobs" in payload &&
+      Array.isArray(payload.pendingJobs),
   );
 }
 
@@ -180,14 +181,14 @@ export function IndexesStatusPanel() {
   // Indexes UI only lists providers enabled for that library (Settings toggles).
   // Disabled rows (e.g. credentials saved but toggled off) stay off this page.
   const libraries: LibraryIndexStatusDto[] = [
-    data?.libraries?.saves ?? {
+    data?.libraries.saves ?? {
       library: "saves" as const,
       libraryLabel: "Saves",
-      totalItems: data?.totalItems ?? 0,
-      ftsCount: data?.ftsCount ?? 0,
-      providers: data?.providers ?? [],
+      totalItems: 0,
+      ftsCount: 0,
+      providers: [],
     },
-    data?.libraries?.likes ?? {
+    data?.libraries.likes ?? {
       library: "likes" as const,
       libraryLabel: "Likes",
       totalItems: 0,
