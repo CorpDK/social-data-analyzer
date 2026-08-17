@@ -1,0 +1,2 @@
+# Place optional Playwright fixtures here (zips, screenshots helpers).
+# Prefer reusing scripts/fixtures/ when the same data works for e2e.

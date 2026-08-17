@@ -31,6 +31,16 @@ Open [http://localhost:3000](http://localhost:3000), then **Settings** to config
 Operator checklist (import / reindex / cancel / MemAvailable / orphan workers /
 heap env / base-URL trust): see [`docs/runbook.md`](docs/runbook.md).
 
+### Testing
+
+```bash
+pnpm test:unit    # Vitest (unit + RTL + MSW)
+pnpm test:parse   # legacy tsx integration suites
+pnpm test:e2e     # Playwright smoke (needs browsers; starts or reuses pnpm dev)
+```
+
+Conventions and mocking policy: [`docs/testing.md`](docs/testing.md).
+
 ### Search index
 
 **FTS5 keyword search always stays on.** Vector indexes are separate and only

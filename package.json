@@ -7,7 +7,12 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
+    "test": "vitest run",
+    "test:unit": "vitest run",
+    "test:watch": "vitest",
+    "test:e2e": "playwright test",
     "test:parse": "pnpm exec tsx scripts/test-parse.ts",
+    "test:all": "pnpm test:unit && pnpm test:parse",
     "bench:smoke": "pnpm exec tsx scripts/bench-smoke.ts",
     "reindex": "pnpm exec tsx scripts/reindex-search.ts",
     "embedding-worker": "node --max-old-space-size=2048 ./node_modules/tsx/dist/cli.mjs scripts/embedding-worker.ts"
@@ -25,19 +30,27 @@
     "yauzl": "^3.4.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.4",
     "@types/adm-zip": "^0.5.8",
     "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^20",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "@types/yauzl": "^3.4.0",
+    "@vitejs/plugin-react": "^6.0.5",
     "drizzle-kit": "^0.31.10",
     "eslint": "^9",
     "eslint-config-next": "16.2.12",
+    "jsdom": "^30.0.1",
+    "msw": "^2.15.0",
     "tailwindcss": "^4",
     "tsx": "^4.23.1",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^4.1.10"
   },
   "packageManager": "pnpm@10.13.1"
 }
