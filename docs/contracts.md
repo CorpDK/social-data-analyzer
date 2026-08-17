@@ -30,7 +30,18 @@ Clients: `use-job-sse.ts` — backoff + `maxFailures`; close on `idle` when conf
 **Idle policy (intentional asymmetry):**
 - Import stream: emits `idle` when the queue drains (upload form closes EventSource).
 - Search status stream: does **not** emit `idle` — Indexes UI keeps watching
-  coverage/health while idle. Cheapening fingerprints / idle vec COUNTs is Gate A.
+  coverage/health while idle.
+
+**Fingerprints & idle cache (Gate A):**
+- Change detection uses selected job/progress/coverage fields
+  (`src/lib/sse-fingerprint.ts`), not `JSON.stringify` of the full snapshot.
+- Search stream still sends the full snapshot payload on change; only the
+  equality check is cheap.
+- `getSearchIndexStatusForStream` caches expensive vec COUNTs for ~5s while
+  **idle or active**, merging cheap job-queue fields between refreshes.
+  Activity start/stop forces a full refresh so coverage updates promptly.
+- Import progress DB writes are throttled (~1 Hz / every 50 items) like
+  embedding jobs (`src/lib/progress-throttle.ts`).
 
 ## Import jobs (`import_jobs` / `ImportJobRecord`)
 

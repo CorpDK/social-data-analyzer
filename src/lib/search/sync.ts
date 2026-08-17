@@ -22,6 +22,10 @@ import {
   vectorTableName,
 } from "./library";
 import {
+  createProgressThrottleEmitter,
+  REBUILD_FORCE_PHASES,
+} from "../progress-throttle";
+import {
   ftsCount,
   upsertItemFts,
   upsertLikedItemFtsDoc,
@@ -91,10 +95,6 @@ export const EMBEDDING_SYNC_CHUNK_SIZE = 128;
 async function yieldToEventLoop() {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
-
-/** Progress ticks from rebuild loops: every N items or ~1 Hz. */
-const REBUILD_PROGRESS_EVERY_N = 50;
-const REBUILD_PROGRESS_MIN_MS = 1_000;
 
 export type RebuildProgress = {
   phase: "preparing" | "fts" | "embedding" | "storing" | "done";
@@ -578,23 +578,9 @@ function throwIfCancelled(shouldCancel?: () => boolean) {
 function createRebuildProgressEmitter(
   onProgress: RebuildProgressCallback | undefined,
 ): RebuildProgressCallback {
-  let lastEmitAt = 0;
-  let lastProcessed = -1;
-  return async (progress) => {
-    const now = Date.now();
-    const force =
-      progress.phase === "done" ||
-      progress.phase === "preparing" ||
-      progress.phase === "fts" ||
-      progress.processed === 0 ||
-      (progress.total > 0 && progress.processed >= progress.total) ||
-      progress.processed - lastProcessed >= REBUILD_PROGRESS_EVERY_N ||
-      now - lastEmitAt >= REBUILD_PROGRESS_MIN_MS;
-    if (!force) return;
-    lastEmitAt = now;
-    lastProcessed = progress.processed;
-    await emitProgress(onProgress, progress);
-  };
+  return createProgressThrottleEmitter(onProgress, {
+    forcePhases: REBUILD_FORCE_PHASES,
+  });
 }
 
 /**

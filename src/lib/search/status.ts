@@ -316,6 +316,8 @@ const STREAM_FULL_REFRESH_MS = 5_000;
 
 type StreamStatusCache = {
   at: number;
+  /** Whether an embedding job was active when the expensive snapshot was taken. */
+  hadActive: boolean;
   status: SearchIndexStatus;
 };
 
@@ -324,19 +326,31 @@ const globalForStatus = globalThis as unknown as {
 };
 
 /**
- * SSE-friendly status: while a job is running, refresh expensive vec COUNTs
- * at most every ~5s and otherwise merge cheap job queue fields into the
- * last full snapshot (progress ticks use job.processed/total).
+ * SSE-friendly status: refresh expensive vec COUNTs at most every ~5s
+ * (active *and* idle). Between full refreshes, merge cheap job queue fields
+ * into the last snapshot (progress ticks use job.processed/total).
+ * Force a full refresh when activity flips (job start/stop) so coverage
+ * catches up promptly after a rebuild finishes.
  */
 export function getSearchIndexStatusForStream(): SearchIndexStatus {
   ensureJobRunner();
   const active = getActiveEmbeddingJob();
   const now = Date.now();
   const cache = globalForStatus.__searchStatusStreamCache ?? null;
+  const isActive = Boolean(active);
+  const activityFlipped = Boolean(cache && cache.hadActive !== isActive);
 
-  if (!active || !cache || now - cache.at >= STREAM_FULL_REFRESH_MS) {
+  if (
+    !cache ||
+    activityFlipped ||
+    now - cache.at >= STREAM_FULL_REFRESH_MS
+  ) {
     const status = getSearchIndexStatus();
-    globalForStatus.__searchStatusStreamCache = { at: now, status };
+    globalForStatus.__searchStatusStreamCache = {
+      at: now,
+      hadActive: isActive,
+      status,
+    };
     return status;
   }
 

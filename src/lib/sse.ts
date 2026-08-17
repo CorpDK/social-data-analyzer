@@ -97,6 +97,11 @@ export type SseStreamOptions<T> = {
    * Does not close the stream (EventSource would reconnect); the client closes.
    */
   isIdle?: (snapshot: T) => boolean;
+  /**
+   * Cheap change detection for poll/pubsub. Prefer selected fields over
+   * `JSON.stringify(snapshot)`. Default remains stringify for safety.
+   */
+  fingerprint?: (snapshot: T) => string;
   heartbeatMs?: number;
   /** Lightweight DB poll inside the handler as a safety net. */
   pollMs?: number;
@@ -170,6 +175,7 @@ export function createJobSseResponse<T>(
 
       const fingerprint = (snapshot: T): string => {
         try {
+          if (options.fingerprint) return options.fingerprint(snapshot);
           return JSON.stringify(snapshot);
         } catch {
           return String(Date.now());

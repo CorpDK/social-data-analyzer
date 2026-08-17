@@ -20,6 +20,13 @@ import {
   spoolUploadedFile,
 } from "./spool";
 import { IMPORT_JOBS_CHANNEL, publishJobEvent } from "../sse";
+import {
+  createProgressThrottleState,
+  IMPORT_FORCE_PHASES,
+  markProgressPublished,
+  shouldPublishProgress,
+  type ProgressThrottleState,
+} from "../progress-throttle";
 import type {
   ImportJobKind as ImportJobKindDto,
   ImportJobState as ImportJobStateDto,
@@ -62,6 +69,13 @@ type JobRunnerState = {
 const globalForImportJobs = globalThis as unknown as {
   importJobRunner?: JobRunnerState;
 };
+
+/** Per-job progress write throttle (~1 Hz / every N items). */
+const importProgressThrottle = new Map<number, ProgressThrottleState>();
+
+function clearImportProgressThrottle(jobId: number) {
+  importProgressThrottle.delete(jobId);
+}
 
 function runner(): JobRunnerState {
   const state = globalForImportJobs.importJobRunner;
@@ -359,6 +373,19 @@ function updateJob(
 }
 
 async function applyProgress(jobId: number, progress: ImportProgress) {
+  const state = importProgressThrottle.get(jobId) ?? createProgressThrottleState();
+  const now = Date.now();
+  if (
+    !shouldPublishProgress(progress, state, {
+      forcePhases: IMPORT_FORCE_PHASES,
+      now,
+    })
+  ) {
+    return;
+  }
+  markProgressPublished(state, progress, now);
+  importProgressThrottle.set(jobId, state);
+
   updateJob(jobId, {
     phase: progress.phase,
     processed: progress.processed,
@@ -384,6 +411,7 @@ async function executeJob(jobId: number) {
   if (!job) {
     state.cancelFlags.delete(jobId);
     if (state.activeJobId === jobId) state.activeJobId = null;
+    clearImportProgressThrottle(jobId);
     pumpQueue();
     return;
   }
@@ -507,6 +535,7 @@ async function executeJob(jobId: number) {
 
     state.cancelFlags.delete(jobId);
     if (state.activeJobId === jobId) state.activeJobId = null;
+    clearImportProgressThrottle(jobId);
     pumpQueue();
   }
 }

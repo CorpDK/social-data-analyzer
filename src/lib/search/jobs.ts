@@ -14,6 +14,7 @@ import {
   logReindexMemoryWarning,
 } from "./memory";
 import {
+  markProgressPublished,
   shouldPersistRebuildProgress,
   type JobProgressThrottle,
 } from "./jobs-progress";
@@ -463,10 +464,8 @@ async function applyProgress(
   const now = Date.now();
   if (!shouldPersistRebuildProgress(progress, state, force, now)) return;
 
-  jobProgressThrottle.set(jobId, {
-    lastWriteAt: now,
-    lastProcessed: progress.processed,
-  });
+  markProgressPublished(state, progress, now);
+  jobProgressThrottle.set(jobId, state);
 
   updateJob(jobId, {
     phase: progressToPhase(progress.phase),

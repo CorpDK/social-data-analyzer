@@ -1,5 +1,6 @@
 import { getSearchIndexStatusForStream } from "@/lib/search/status";
 import { SEARCH_STATUS_CHANNEL, createJobSseResponse } from "@/lib/sse";
+import { searchStatusFingerprint } from "@/lib/sse-fingerprint";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,13 +13,16 @@ export const dynamic = "force-dynamic";
  *
  * Idle policy (intentional, unlike import): no `idle` event — the Indexes UI
  * keeps watching coverage/health when the queue is empty. Import streams emit
- * `idle` so the upload form can close EventSource. Fingerprint cheapening is
- * Gate A (D5), not A−.
+ * `idle` so the upload form can close EventSource.
+ *
+ * Fingerprints use selected job/coverage fields (not full JSON.stringify).
+ * Idle clients also reuse the ~5s status cache so vec COUNTs are not every poll.
  */
 export async function GET(request: Request) {
   return createJobSseResponse({
     channel: SEARCH_STATUS_CHANNEL,
     getSnapshot: () => getSearchIndexStatusForStream(),
+    fingerprint: searchStatusFingerprint,
     // Pub/sub covers progress; slower poll is a safety net (status snapshot is heavier).
     pollMs: 2_500,
     signal: request.signal,
