@@ -16,6 +16,7 @@
  */
 import { loadEnvConfig } from "@next/env";
 import { closeSqlite, getSqlite } from "../src/lib/db";
+import { jobLog } from "../src/lib/job-log";
 import {
   EMBEDDING_WORKER_PERMANENT_EXIT_CODE,
   isPermanentEmbeddingJobError,
@@ -40,7 +41,10 @@ process.env.NODE_OPTIONS = mergeNodeOptionsMaxOldSpace(
 async function main() {
   const jobId = Number(process.argv[2]);
   if (!Number.isInteger(jobId) || jobId <= 0) {
-    console.error("[embedding-worker] usage: pnpm embedding-worker <jobId>");
+    jobLog("embedding-worker", {
+      message: "usage: pnpm embedding-worker <jobId>",
+      level: "error",
+    });
     process.exit(2);
   }
 
@@ -49,9 +53,15 @@ async function main() {
   process.env.EMBEDDING_WORKER_INLINE = "1";
   process.env.EMBEDDING_WORKER_CHILD = "1";
 
+  jobLog("embedding-worker", {
+    jobId,
+    message: `start heapMb=${heapMb}`,
+  });
+
   getSqlite();
   try {
     await runEmbeddingJobById(jobId);
+    jobLog("embedding-worker", { jobId, phase: "done", message: "exit=0" });
   } finally {
     closeSqlite();
   }
@@ -70,10 +80,14 @@ main()
     if (isPermanentEmbeddingJobError(error)) {
       // Single line, no stack: this is a configuration/state problem, and the
       // parent must not retry it.
-      console.error(`[embedding-worker] aborting: ${message}`);
+      jobLog("embedding-worker", {
+        message: `aborting: ${message}`,
+        level: "error",
+      });
       closeSqlite();
       process.exit(EMBEDDING_WORKER_PERMANENT_EXIT_CODE);
     }
+    jobLog("embedding-worker", { message, level: "error" });
     console.error("[embedding-worker]", error);
     closeSqlite();
     process.exit(1);

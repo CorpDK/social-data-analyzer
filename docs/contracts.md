@@ -90,3 +90,29 @@ Shared provider enable keys (`local_enabled`, `ollama_enabled`, `openai_enabled`
 `voyage_enabled`) migrate once into per-library keys (`saves_*_enabled` /
 `likes_*_enabled`) via `migrateLegacyProviderEnableKeys`, then are deleted.
 Settings UI always reads/writes per-library keys. Env `*_ENABLED` fallbacks remain.
+
+## Structured job logs (Gate A+)
+
+One-line operator logs (throttled with progress publishes — not per item):
+
+| Prefix | Source |
+|--------|--------|
+| `[import]` | Import runner (`src/lib/import/jobs.ts`) |
+| `[search]` | Embedding job runner + memory refuse (`src/lib/search/jobs.ts`) |
+| `[embedding-worker]` | Child worker entry (`scripts/embedding-worker.ts`) |
+
+Fields when useful: `job=…`, `phase=…`, `processed/total`, short message.
+
+## Base-URL trust (Gate A+ / D6)
+
+Local-first, single-user, localhost. OpenAI/Ollama base URLs are fetched by the
+local Node process. **No hard allowlist** (LAN Ollama must keep working). Soft
+Settings hint for non-loopback / non-official-OpenAI hosts — see
+`docs/runbook.md` and `src/lib/settings/base-url-trust.ts`.
+
+## Operator runbook
+
+Ops checklist (import, reindex, cancel/resume, MemAvailable, orphan workers,
+heap env): `docs/runbook.md`.
+
+Light synthetic bench (no real DB / no Voyage/Ollama): `pnpm bench:smoke`.

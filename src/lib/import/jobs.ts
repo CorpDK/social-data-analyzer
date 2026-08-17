@@ -26,6 +26,7 @@ import {
   runnerOwnsWork,
   withPumpGuard,
 } from "../job-queue";
+import { jobLog } from "../job-log";
 import {
   createProgressThrottleState,
   IMPORT_FORCE_PHASES,
@@ -186,6 +187,10 @@ function reclaimOrphanedJobs() {
 function reclaimOrphanedJobRows() {
   const result = reclaimOrphanedImportJobRows(getSqlite());
   if (result.requeued > 0 || result.failed > 0) {
+    jobLog("import", {
+      message: `reclaim requeued=${result.requeued} failed=${result.failed}`,
+      level: "warn",
+    });
     publishJobEvent(IMPORT_JOBS_CHANNEL, true);
   }
 }
@@ -354,6 +359,14 @@ async function applyProgress(jobId: number, progress: ImportProgress) {
   markProgressPublished(state, progress, now);
   importProgressThrottle.set(jobId, state);
 
+  jobLog("import", {
+    jobId,
+    phase: progress.phase,
+    processed: progress.processed,
+    total: progress.total,
+    message: progress.message,
+  });
+
   updateJob(jobId, {
     phase: progress.phase,
     processed: progress.processed,
@@ -392,6 +405,11 @@ async function executeJob(jobId: number) {
     updateJob(jobId, {
       phase: "received",
       message: `Reading ${job.filename}…`,
+    });
+    jobLog("import", {
+      jobId,
+      phase: "received",
+      message: `start kind=${job.kind} file=${job.filename}`,
     });
 
     const onProgress = (progress: ImportProgress) =>
@@ -438,6 +456,12 @@ async function executeJob(jobId: number) {
         importId: result.importId,
         finished: true,
       });
+      jobLog("import", {
+        jobId,
+        phase: "failed",
+        message: "cancelled",
+        level: "warn",
+      });
     } else if (result.status === "failed") {
       updateJob(jobId, {
         state: "failed",
@@ -447,6 +471,12 @@ async function executeJob(jobId: number) {
         result,
         importId: result.importId,
         finished: true,
+      });
+      jobLog("import", {
+        jobId,
+        phase: "failed",
+        message: result.message,
+        level: "error",
       });
     } else {
       updateJob(jobId, {
@@ -471,6 +501,13 @@ async function executeJob(jobId: number) {
         },
         finished: true,
       });
+      jobLog("import", {
+        jobId,
+        phase: "completed",
+        processed: result.itemsFound + result.likesFound,
+        total: Math.max(1, result.itemsFound + result.likesFound),
+        message: result.message,
+      });
     }
   } catch (error) {
     if (error instanceof ImportCancelledError || shouldCancel(jobId)) {
@@ -481,13 +518,26 @@ async function executeJob(jobId: number) {
         error: null,
         finished: true,
       });
+      jobLog("import", {
+        jobId,
+        phase: "failed",
+        message: "cancelled",
+        level: "warn",
+      });
     } else {
+      const errMsg = error instanceof Error ? error.message : "unknown error";
       updateJob(jobId, {
         state: "failed",
         phase: "failed",
         message: "Import failed",
-        error: error instanceof Error ? error.message : "unknown error",
+        error: errMsg,
         finished: true,
+      });
+      jobLog("import", {
+        jobId,
+        phase: "failed",
+        message: errMsg,
+        level: "error",
       });
     }
   } finally {

@@ -1,6 +1,7 @@
 "use client";
 
 import { type FormEvent, useCallback, useEffect, useState } from "react";
+import { baseUrlTrustHint } from "@/lib/settings/base-url-trust";
 
 type SecretStatus = {
   configured: boolean;
@@ -265,6 +266,9 @@ export function SettingsForm() {
     setEnabled({ ...current, [library]: checked });
   }
 
+  const openaiUrlHint = baseUrlTrustHint(openaiBaseUrl, "openai");
+  const ollamaUrlHint = baseUrlTrustHint(ollamaBaseUrl, "ollama");
+
   return (
     <form onSubmit={saveSettings} className="space-y-4">
       {data?.keyring.message ? (
@@ -481,10 +485,20 @@ export function SettingsForm() {
           <label className={labelClass}>
             <span className="text-[var(--muted)]">OpenAI base URL</span>
             <input type="url" name="openaiBaseUrl" value={openaiBaseUrl} onChange={(event) => setOpenaiBaseUrl(event.target.value)} className={monoFieldClass} />
+            {openaiUrlHint ? (
+              <p className="mt-1 text-xs text-[var(--muted)]" role="note">
+                {openaiUrlHint}
+              </p>
+            ) : null}
           </label>
           <label className={labelClass}>
             <span className="text-[var(--muted)]">Ollama base URL</span>
             <input type="url" name="ollamaBaseUrl" value={ollamaBaseUrl} onChange={(event) => setOllamaBaseUrl(event.target.value)} className={monoFieldClass} />
+            {ollamaUrlHint ? (
+              <p className="mt-1 text-xs text-[var(--muted)]" role="note">
+                {ollamaUrlHint}
+              </p>
+            ) : null}
           </label>
         </section>
       </div>

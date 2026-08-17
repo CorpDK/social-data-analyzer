@@ -35,6 +35,7 @@ import {
   runnerOwnsWork,
   withPumpGuard,
 } from "../job-queue";
+import { jobLog } from "../job-log";
 import { SEARCH_STATUS_CHANNEL, publishJobEvent } from "../sse";
 import {
   classifyWorkerExit,
@@ -193,6 +194,10 @@ function reclaimOrphanedJobs() {
 function reclaimOrphanedJobRows() {
   const result = reclaimOrphanedEmbeddingJobRows(getSqlite());
   if (result.cancelled > 0 || result.resumed > 0) {
+    jobLog("search", {
+      message: `reclaim cancelled=${result.cancelled} resumed=${result.resumed}`,
+      level: "warn",
+    });
     publishJobEvent(SEARCH_STATUS_CHANNEL, true);
   }
 }
@@ -444,6 +449,14 @@ async function applyProgress(
   markProgressPublished(state, progress, now);
   jobProgressThrottle.set(jobId, state);
 
+  jobLog("search", {
+    jobId,
+    phase: progress.phase,
+    processed: progress.processed,
+    total: progress.total,
+    message: progress.message ?? progress.currentProvider ?? undefined,
+  });
+
   updateJob(jobId, {
     phase: progressToPhase(progress.phase),
     processed: progress.processed,
@@ -612,14 +625,16 @@ function logJobFailure(jobId: number, message: string) {
   if (seen && seen.message === message) {
     seen.count += 1;
     if (seen.count % 10 === 0) {
-      console.error(
-        `[embedding-jobs] job ${jobId}: ${message} (repeated ${seen.count}x)`,
-      );
+      jobLog("search", {
+        jobId,
+        message: `${message} (repeated ${seen.count}x)`,
+        level: "error",
+      });
     }
     return;
   }
   state.loggedFailures.set(jobId, { message, count: 1 });
-  console.error(`[embedding-jobs] job ${jobId}: ${message}`);
+  jobLog("search", { jobId, message, level: "error" });
 }
 
 function failJob(jobId: number, error: string) {
@@ -673,6 +688,16 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
 
   try {
     await runEmbeddingJobInline(jobId, job.target);
+    const after = getEmbeddingJob(jobId);
+    if (after && after.state === "completed") {
+      jobLog("search", {
+        jobId,
+        phase: "done",
+        processed: after.processed,
+        total: after.total,
+        message: `completed target=${job.target}`,
+      });
+    }
   } catch (error) {
     clearJobProgressThrottle(jobId);
     if (error instanceof RebuildCancelledError || shouldCancel(jobId)) {
@@ -682,6 +707,12 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
         message: "Reindex cancelled",
         error: null,
         finished: true,
+      });
+      jobLog("search", {
+        jobId,
+        phase: "done",
+        message: `cancelled target=${job.target}`,
+        level: "warn",
       });
     } else {
       updateJob(jobId, {
@@ -859,6 +890,16 @@ function startJob(state: JobRunnerState, job: EmbeddingJobRecord) {
       job.processed > 0
         ? `Resuming rebuild for ${job.target} (${job.processed}/${job.total})`
         : `Starting rebuild for ${job.target}`,
+  });
+  jobLog("search", {
+    jobId: job.id,
+    phase: "queued",
+    processed: job.processed,
+    total: job.total,
+    message:
+      job.processed > 0
+        ? `resume target=${job.target}`
+        : `start target=${job.target}`,
   });
 
   void executeJob(job.id, job.target);

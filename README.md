@@ -28,6 +28,9 @@ pnpm run dev
 
 Open [http://localhost:3000](http://localhost:3000), then **Settings** to configure providers.
 
+Operator checklist (import / reindex / cancel / MemAvailable / orphan workers /
+heap env / base-URL trust): see [`docs/runbook.md`](docs/runbook.md).
+
 ### Search index
 
 **FTS5 keyword search always stays on.** Vector indexes are separate and only

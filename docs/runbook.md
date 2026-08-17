@@ -1,0 +1,95 @@
+# Operator runbook
+
+Short ops guide for this **single-user, local-first** app. Prefer this over
+guessing env knobs mid-incident.
+
+## Threat model (base URLs)
+
+- The app is meant to run on **localhost** for one operator. There is no
+  multi-user auth and no internet-facing hardening.
+- OpenAI / Ollama **base URLs** in Settings are fetched by the **local Node
+  process**. That is intentional for LAN Ollama and OpenAI-compatible proxies.
+- We do **not** enforce a hard allowlist (would break legitimate LAN Ollama).
+  Settings shows a soft hint when a URL is neither loopback nor the official
+  OpenAI API host. See `src/lib/settings/base-url-trust.ts` and
+  `docs/contracts.md`.
+
+## Import
+
+1. Open **Import**, upload a Meta JSON zip/json (max 2 GB).
+2. Job spools under `data/imports/`, row in `import_jobs`, returns 202.
+3. Progress: SSE `GET /api/import/jobs/stream` (phases
+   `extracting` → … → `writing` → `indexing`).
+4. Cancel: `POST /api/import/jobs/cancel` (cooperative).
+5. Logs: look for `[import] job=… phase=… processed/total`.
+
+## Reindex
+
+1. **Indexes** UI, or `pnpm run reindex` (rebuilds FTS + every enabled provider).
+2. Jobs live in `embedding_jobs`; one runs at a time (others stay `pending`).
+3. Cancel stops the **active** job only.
+4. Logs: `[search] job=…` in the Next process; `[embedding-worker] job=…` in
+   the child when workers are enabled.
+
+## Cancel & resume
+
+| Event | Behavior |
+|-------|----------|
+| Cancel import/reindex | Cooperative between items; row → `cancelled` |
+| Server restart mid-import | Orphan `running` → `pending` if spool exists; else `failed` |
+| Server restart mid-reindex | Orphan `running` → `pending` (keeps `processed`); next run skips already-embedded ids when profile matches |
+| New Reindex/Rebuild | Recreates that provider’s vec table |
+| Cancel mid-reindex | Leaves partial table; next *new* job wipes and rebuilds |
+
+## MemAvailable refuse
+
+On Linux, Indexes / `POST /api/search/reindex` use `/proc/meminfo` MemAvailable:
+
+- **All providers refused** below ~512 MB free.
+- **Large libraries** refused below ~1024 MB (Voyage/OpenAI/local) or
+  ~1536 MB (Ollama).
+- Soft warnings still appear when tight-but-allowed.
+- HTTP refuse → **503** with the reason. Logs: `[search] …`.
+
+## Orphan workers after Next restart
+
+- Embedding rebuilds normally run in a **child** (`pnpm embedding-worker <id>`).
+- Restarting Next does **not** always kill an already-spawned child. Check
+  `ps` for leftover `embedding-worker` / `tsx … embedding-worker`.
+- On next open of Indexes / status, orphaned `running` rows are **reclaimed**
+  (re-queued or cancelled). A stray child may still hold the DB briefly —
+  stop it if WAL stays locked.
+- Import jobs are in-process: restart drops the runner; reclaim uses the spool.
+
+## Env knobs (infra only)
+
+| Variable | Role |
+|----------|------|
+| `INSTAGRAM_SAVES_DB` | SQLite path (default under `data/`) |
+| `INSTAGRAM_SAVES_KEYRING=memory` | Tests / headless (no OS keyring) |
+| `EMBEDDING_WORKER_INLINE=1` | Run rebuilds in-process (tests) |
+| `EMBEDDING_WORKER_MAX_OLD_SPACE_MB` | Child heap cap (default **2048**); replaces inherited `--max-old-space-size` |
+| `NODE_OPTIONS` | Parent may set a large heap; worker spawn overrides max-old-space-size |
+| `__NEXT_DISABLE_MEMORY_WATCHER=1` | Next.js escape hatch if the framework memory watcher interferes with long imports/rebuilds (set only if you hit that) |
+
+## Files & backup
+
+| Path | Contents |
+|------|----------|
+| `data/instagram-saves.db` (+ `-wal`/`-shm`) | Library, jobs, settings, FTS/vec |
+| `data/imports/` | Upload spools (deleted when import finishes) |
+
+Backup: stop the app, copy the `.db` and any `-wal`/`-shm`. Restore the same
+way. **Reset library** (Settings danger zone) wipes content/indexes but keeps
+`app_settings` and keyring secrets.
+
+## Smoke / bench (no live reindex)
+
+```bash
+pnpm exec tsc --noEmit
+pnpm test:parse
+pnpm bench:smoke   # synthetic parse / IN() chunk / zip-cap timings — no real DB, no Voyage/Ollama
+```
+
+Do **not** run `pnpm reindex` or live embedding against a real user DB while
+validating quality gates.
