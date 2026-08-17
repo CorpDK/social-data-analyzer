@@ -1,0 +1,46 @@
+{
+  "saved_saved_media": [
+    {
+      "title": "sld.title.author",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/reel/EdgeSldTitle01/",
+          "value": "Saved on",
+          "timestamp": 1704000000
+        }
+      ]
+    },
+    {
+      "title": "",
+      "stringListData": [
+        {
+          "href": "https://www.instagram.com/p/EdgeSldCamel01/",
+          "value": "sld.value.author",
+          "timestamp": 1705000000
+        }
+      ]
+    },
+    {
+      "title": "map.name.author",
+      "string_map_data": {
+        "Saved on": {
+          "href": "https://www.instagram.com/reel/EdgeMapAuthor01/",
+          "timestamp": 1706000000
+        },
+        "Author": {
+          "value": "should.be.ignored.for.map"
+        }
+      }
+    },
+    null,
+    {
+      "title": "orphan.no.href",
+      "string_list_data": [
+        {
+          "value": "just-a-note",
+          "timestamp": 1707000000
+        }
+      ]
+    }
+  ]
+}

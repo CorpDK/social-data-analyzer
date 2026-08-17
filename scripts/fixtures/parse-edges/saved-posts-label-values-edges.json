@@ -1,0 +1,145 @@
+[
+  null,
+  "skip-me",
+  {
+    "timestamp": 1701000000,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/reel/EdgeNoUsername01/",
+        "href": "https://www.instagram.com/reel/EdgeNoUsername01/"
+      },
+      {
+        "label": "Caption",
+        "value": ""
+      },
+      {
+        "label": "Title",
+        "value": ""
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "Name",
+                "value": "food"
+              },
+              {
+                "label": "Name",
+                "value": "recipe"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Hashtags"
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "URL",
+                "value": ""
+              },
+              {
+                "label": "Name",
+                "value": "name.only.user"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "Username",
+                "value": "brand.partner.co"
+              },
+              {
+                "label": "Name",
+                "value": "Brand Partner Co"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Brand partner"
+      }
+    ],
+    "fbid": "e1001"
+  },
+  {
+    "no_labels": true,
+    "timestamp": 1
+  },
+  {
+    "timestamp": 1702000000,
+    "media": [],
+    "label_values": [
+      {
+        "label": "URL",
+        "value": "https://www.instagram.com/p/EdgeUrlValueOnly01/"
+      },
+      {
+        "label": "Caption",
+        "value": "Has caption but empty hashtags/brand."
+      },
+      {
+        "dict": [],
+        "title": "Hashtags"
+      },
+      {
+        "dict": [],
+        "title": "Brand partner"
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "Username",
+                "value": "value.only.author"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      }
+    ],
+    "fbid": "e1002"
+  },
+  {
+    "timestamp": "1703000000",
+    "media": [],
+    "labelValues": [
+      {
+        "label": "URL",
+        "href": "https://www.instagram.com/tv/EdgeCamelLabel01/",
+        "value": "https://www.instagram.com/tv/EdgeCamelLabel01/"
+      },
+      {
+        "dict": [
+          {
+            "dict": [
+              {
+                "label": "Username",
+                "value": "camel.label.user"
+              }
+            ],
+            "title": ""
+          }
+        ],
+        "title": "Owner"
+      }
+    ],
+    "fbid": "e1003"
+  }
+]

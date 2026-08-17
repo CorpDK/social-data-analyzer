@@ -93,3 +93,6 @@ pnpm bench:smoke   # synthetic parse / IN() chunk / zip-cap timings — no real 
 
 Do **not** run `pnpm reindex` or live embedding against a real user DB while
 validating quality gates.
+
+Beyond-A+ ideas (optional): fuller 50k RSS bench, fault-injection resume
+tests, property-based parser mutations — see `docs/contracts.md`.

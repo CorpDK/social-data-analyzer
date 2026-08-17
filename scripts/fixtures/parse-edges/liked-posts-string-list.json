@@ -1,0 +1,34 @@
+{
+  "likes_media_likes": [
+    {
+      "title": "legacy.liked.user",
+      "string_list_data": [
+        {
+          "href": "https://www.instagram.com/reel/EdgeLikedSld01/",
+          "value": "👍",
+          "timestamp": 1712000000
+        }
+      ]
+    },
+    {
+      "title": "",
+      "stringListData": [
+        {
+          "href": "https://www.instagram.com/p/EdgeLikedCamel01/",
+          "value": "legacy.value.author",
+          "timestamp": 1713000000
+        }
+      ]
+    },
+    null,
+    {
+      "title": "no.href.skip",
+      "string_list_data": [
+        {
+          "value": "noise",
+          "timestamp": 1714000000
+        }
+      ]
+    }
+  ]
+}

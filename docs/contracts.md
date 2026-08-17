@@ -116,3 +116,15 @@ Ops checklist (import, reindex, cancel/resume, MemAvailable, orphan workers,
 heap env): `docs/runbook.md`.
 
 Light synthetic bench (no real DB / no Voyage/Ollama): `pnpm bench:smoke`.
+
+Parser edge fixtures (label_values / string_list quirks, collection-only,
+malformed-recoverable): `scripts/fixtures/parse-edges/` via `pnpm test:parse`.
+
+## Beyond A+ (optional backlog)
+
+Not required for the A+ grade — track elsewhere if pursued:
+
+- Fuller 50k+ import RSS / wall-time baseline (beyond `bench:smoke`)
+- Fault injection (SIGKILL mid-embed / mid-import-write) + integrity_check
+- Property-based parser mutations (fast-check)
+- CI peak-RSS regression gate on the streaming-extract path

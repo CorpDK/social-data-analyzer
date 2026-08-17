@@ -5,6 +5,7 @@
  */
 import { setupTestContext } from "./tests/harness";
 import { runParseSuite } from "./tests/parse";
+import { runParseEdgesSuite } from "./tests/parse-edges";
 import {
   runJobsPolicyQueueSuite,
   runJobsPolicyWorkerSuite,
@@ -20,6 +21,7 @@ async function main() {
   const ctx = await setupTestContext();
   try {
     await runParseSuite(ctx);
+    await runParseEdgesSuite(ctx);
     await runJobsPolicyQueueSuite(ctx);
     await runMemoryGatesSuite(ctx);
     await runSyncUpsertResumeSuite(ctx);

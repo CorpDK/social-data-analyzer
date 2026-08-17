@@ -1,0 +1,78 @@
+[
+  {
+    "timestamp": 1711000000,
+    "media": [],
+    "label_values": [
+      {
+        "label": "Name",
+        "value": "Edge Collection"
+      },
+      {
+        "label": "Type",
+        "value": "Custom"
+      },
+      {
+        "title": "Media",
+        "dict": [
+          {
+            "title": "",
+            "dict": [
+              {
+                "label": "URL",
+                "value": "https://www.instagram.com/p/EdgeCollOnly01/",
+                "href": "https://www.instagram.com/p/EdgeCollOnly01/"
+              },
+              {
+                "label": "Caption",
+                "value": ""
+              },
+              {
+                "dict": [
+                  {
+                    "dict": [
+                      {
+                        "label": "Name",
+                        "value": "coll.edge.user"
+                      }
+                    ],
+                    "title": ""
+                  }
+                ],
+                "title": "Owner"
+              },
+              {
+                "dict": [],
+                "title": "Brand partner"
+              },
+              {
+                "dict": [
+                  {
+                    "dict": [
+                      {
+                        "label": "Name",
+                        "value": "#tagged"
+                      }
+                    ],
+                    "title": ""
+                  }
+                ],
+                "title": "Hashtags"
+              }
+            ]
+          },
+          null,
+          {
+            "title": "",
+            "dict": [
+              {
+                "label": "URL",
+                "href": "https://www.instagram.com/reel/EdgeCollHrefOnly/"
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "fbid": "e2001"
+  }
+]
