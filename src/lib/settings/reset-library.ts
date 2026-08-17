@@ -1,8 +1,13 @@
 import { getSqlite, recreateEmptySearchIndexes } from "../db";
 import { clearImportSpool } from "../import/spool";
+import {
+  assertLibraryIdleForReset,
+  LibraryBusyError,
+} from "./library-busy";
 import { RESET_LIBRARY_CONFIRMATION_PHRASE } from "./reset-phrase";
 
-export { RESET_LIBRARY_CONFIRMATION_PHRASE };
+export { RESET_LIBRARY_CONFIRMATION_PHRASE, LibraryBusyError };
+export type { LibraryBusyState } from "./library-busy";
 
 export type ResetLibraryResult = {
   ok: true;
@@ -40,6 +45,9 @@ function countRows(table: string): number {
  * Irreversibly wipe Instagram/import/search content while keeping app settings
  * and system keyring secrets. Local single-user app — still requires the typed
  * confirmation phrase in the request body.
+ *
+ * Refuses (LibraryBusyError / HTTP 409) while import or embedding jobs are
+ * pending/running so we never DELETE under active writers.
  */
 export function resetLibrary(confirmation: string): ResetLibraryResult {
   if (confirmation !== RESET_LIBRARY_CONFIRMATION_PHRASE) {
@@ -49,6 +57,7 @@ export function resetLibrary(confirmation: string): ResetLibraryResult {
   }
 
   const sqlite = getSqlite();
+  assertLibraryIdleForReset(sqlite);
 
   const before = {
     imports: countRows("imports"),

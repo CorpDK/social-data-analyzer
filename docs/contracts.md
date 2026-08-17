@@ -130,6 +130,15 @@ Settings hint for non-loopback / non-official-OpenAI hosts — see
 - Collection filter on saves uses `EXISTS` (no huge bound `IN` lists).
 - `page` / `pageSize` parsed via `parsePageParams` → **400** when malformed.
 
+## Job lifecycle / reset (Phase 3)
+
+- `POST /api/settings/reset-library` → **409** while import or embedding jobs
+  are `pending`/`running` (`LibraryBusyError`).
+- Embedding reclaim stores `worker_pid`; kill owned stale children before
+  re-queue; defer reclaim if a live owned worker cannot be stopped.
+- Failed/cancelled imports report persisted row counts; partial writes may
+  remain until re-import or idle reset (see runbook).
+
 ## Operator runbook
 
 Ops checklist (import, reindex, cancel/resume, MemAvailable, orphan workers,

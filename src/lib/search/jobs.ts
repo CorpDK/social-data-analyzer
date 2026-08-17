@@ -193,9 +193,14 @@ function reclaimOrphanedJobs() {
 /** Caller must have verified that no job is owned by this process. */
 function reclaimOrphanedJobRows() {
   const result = reclaimOrphanedEmbeddingJobRows(getSqlite());
-  if (result.cancelled > 0 || result.resumed > 0) {
+  if (
+    result.cancelled > 0 ||
+    result.resumed > 0 ||
+    result.killed > 0 ||
+    result.deferred > 0
+  ) {
     jobLog("search", {
-      message: `reclaim cancelled=${result.cancelled} resumed=${result.resumed}`,
+      message: `reclaim cancelled=${result.cancelled} resumed=${result.resumed} killed=${result.killed} deferred=${result.deferred}`,
       level: "warn",
     });
     publishJobEvent(SEARCH_STATUS_CHANNEL, true);
@@ -378,6 +383,7 @@ function updateJob(
     error?: string | null;
     message?: string | null;
     finished?: boolean;
+    workerPid?: number | null;
   },
 ) {
   const sets: string[] = ["updated_at = unixepoch()"];
@@ -411,8 +417,16 @@ function updateJob(
     sets.push("message = ?");
     values.push(patch.message);
   }
+  if (patch.workerPid !== undefined) {
+    sets.push("worker_pid = ?");
+    values.push(patch.workerPid);
+  }
   if (patch.finished) {
     sets.push("finished_at = unixepoch()");
+    // Terminal rows must not keep a stale PID for the next reclaim pass.
+    if (patch.workerPid === undefined) {
+      sets.push("worker_pid = NULL");
+    }
   }
 
   values.push(id);
@@ -424,6 +438,10 @@ function updateJob(
     patch.state !== undefined || patch.finished === true,
   );
   publishJobEvent(SEARCH_STATUS_CHANNEL, immediate);
+}
+
+function setEmbeddingJobWorkerPid(jobId: number, pid: number | null) {
+  updateJob(jobId, { workerPid: pid });
 }
 
 function progressToPhase(phase: RebuildProgress["phase"]): EmbeddingJobPhase {
@@ -749,6 +767,7 @@ function scheduleWorkerRetry(
     state: "pending",
     phase: "queued",
     error: null,
+    workerPid: null,
     message: `${reason} — retrying in ${Math.round(delayMs / 1000)}s (attempt ${attempt + 1}/${MAX_EMBEDDING_WORKER_ATTEMPTS})`,
   });
   logJobFailure(jobId, `${reason} (attempt ${attempt}/${MAX_EMBEDDING_WORKER_ATTEMPTS})`);
@@ -777,7 +796,9 @@ async function runJobViaChild(jobId: number): Promise<boolean> {
     return false;
   }
 
-  const exit = await spawnEmbeddingWorker(runner(), jobId);
+  const exit = await spawnEmbeddingWorker(runner(), jobId, {
+    onSpawned: (pid) => setEmbeddingJobWorkerPid(jobId, pid),
+  });
   const cancelRequested = shouldCancel(jobId);
   const classification = classifyWorkerExit({ ...exit, cancelRequested });
   const after = getEmbeddingJob(jobId);
@@ -829,6 +850,8 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
     if (preferChildEmbeddingWorker()) {
       retryScheduled = await runJobViaChild(jobId);
     } else {
+      // Inline / test worker: record this process so a foreign reclaim can see ownership.
+      setEmbeddingJobWorkerPid(jobId, process.pid);
       try {
         await runEmbeddingJobInline(jobId, target);
       } catch (error) {

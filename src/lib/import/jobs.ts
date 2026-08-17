@@ -511,10 +511,14 @@ async function executeJob(jobId: number) {
     }
   } catch (error) {
     if (error instanceof ImportCancelledError || shouldCancel(jobId)) {
+      const cancelMessage =
+        error instanceof ImportCancelledError
+          ? error.message
+          : "Import cancelled";
       updateJob(jobId, {
         state: "cancelled",
         phase: "failed",
-        message: "Import cancelled",
+        message: cancelMessage,
         error: null,
         finished: true,
       });
@@ -529,7 +533,7 @@ async function executeJob(jobId: number) {
       updateJob(jobId, {
         state: "failed",
         phase: "failed",
-        message: "Import failed",
+        message: errMsg,
         error: errMsg,
         finished: true,
       });

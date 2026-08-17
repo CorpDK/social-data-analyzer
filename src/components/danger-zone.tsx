@@ -144,7 +144,9 @@ export function DangerZone() {
           history, and search index. This cannot be undone. Your Settings
           (models, URLs, preferred provider) and system keyring API keys are
           kept. This is a local single-user app — the typed confirmation phrase
-          is the safeguard, not multi-user auth.
+          is the safeguard, not multi-user auth. Reset is blocked (HTTP 409)
+          while an import or reindex job is pending or running — cancel those
+          first.
         </p>
       </div>
 

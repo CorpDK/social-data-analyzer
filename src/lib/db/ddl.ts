@@ -15,8 +15,9 @@ export const VEC_DIMENSIONS = 1024;
  * Development re-applies it once per module evaluation for hot-reload safety.
  *
  * v7: case-sensitive shortcode media_key repair (recompute from href).
+ * v8: embedding_jobs.worker_pid for restart reclaim (kill stale child before requeue).
  */
-export const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 8;
 
 export function ensureDatabaseSchema(sqlite: Database.Database) {
   const previousVersion = sqlite.pragma("user_version", {
@@ -151,6 +152,7 @@ const EMBEDDING_JOBS_SCHEMA = `
     error TEXT,
     message TEXT,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
+    worker_pid INTEGER,
     started_at INTEGER NOT NULL DEFAULT (unixepoch()),
     finished_at INTEGER,
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -162,8 +164,23 @@ const EMBEDDING_JOBS_SCHEMA = `
     ON embedding_jobs (started_at DESC);
 `;
 
+function tableHasColumn(
+  sqlite: Database.Database,
+  table: string,
+  column: string,
+): boolean {
+  const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{
+    name: string;
+  }>;
+  return cols.some((c) => c.name === column);
+}
+
 function ensureEmbeddingJobsTable(sqlite: Database.Database) {
   sqlite.exec(EMBEDDING_JOBS_SCHEMA);
+  // CREATE TABLE IF NOT EXISTS does not add columns on existing DBs.
+  if (!tableHasColumn(sqlite, "embedding_jobs", "worker_pid")) {
+    sqlite.exec(`ALTER TABLE embedding_jobs ADD COLUMN worker_pid INTEGER`);
+  }
 }
 
 const IMPORT_JOBS_SCHEMA = `

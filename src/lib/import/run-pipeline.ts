@@ -25,6 +25,10 @@ import {
   parseLikedExportJsonFilesWithProgress,
   syncEmbeddingsAfterImport,
 } from "./run-helpers";
+import {
+  countPersistedImportRows,
+  formatPartialImportMessage,
+} from "./partial-accounting";
 import { emitProgress, throwIfCancelled } from "./progress";
 import {
   processZipExportStreaming,
@@ -170,32 +174,51 @@ async function finishSuccessfulImport(args: {
       log: completedLog,
     };
   } catch (error) {
-    if (error instanceof ImportCancelledError) {
-      db.update(imports)
-        .set({ status: "failed", error: "Import cancelled" })
-        .where(eq(imports.id, draftId))
-        .run();
-      throw error;
-    }
+    // Batches commit as they go — count what actually landed, never report zeroes.
+    const persisted = countPersistedImportRows(draftId);
+    const baseMessage =
+      error instanceof ImportCancelledError
+        ? "Import cancelled"
+        : error instanceof Error
+          ? error.message
+          : "Import failed unexpectedly";
+    const message = formatPartialImportMessage(baseMessage, persisted);
 
-    const message =
-      error instanceof Error ? error.message : "Import failed unexpectedly";
     db.update(imports)
-      .set({ status: "failed", error: message })
+      .set({
+        status: "failed",
+        error: message,
+        itemsAdded: persisted.itemsAdded,
+        itemsUpdated: persisted.itemsUpdated,
+        itemsSkipped: 0,
+      })
       .where(eq(imports.id, draftId))
       .run();
 
     await emitProgress(options?.onProgress, {
       phase: "failed",
-      processed: 0,
+      processed:
+        persisted.itemsAdded +
+        persisted.itemsUpdated +
+        persisted.likesAdded +
+        persisted.likesUpdated,
       total: Math.max(1, items.length + liked.length),
       message,
       details: {
         importId: draftId,
         itemsParsed: items.length,
         likesParsed: liked.length,
+        itemsAdded: persisted.itemsAdded,
+        itemsUpdated: persisted.itemsUpdated,
+        likesAdded: persisted.likesAdded,
+        likesUpdated: persisted.likesUpdated,
       },
     });
+
+    if (error instanceof ImportCancelledError) {
+      // Preserve cancel semantics for the job runner while still recording counts.
+      throw new ImportCancelledError(message);
+    }
 
     return {
       importId: draftId,
@@ -203,12 +226,12 @@ async function finishSuccessfulImport(args: {
       filename,
       contentHash,
       itemsFound: items.length,
-      itemsAdded: 0,
-      itemsUpdated: 0,
+      itemsAdded: persisted.itemsAdded,
+      itemsUpdated: persisted.itemsUpdated,
       itemsSkipped: 0,
       likesFound: liked.length,
-      likesAdded: 0,
-      likesUpdated: 0,
+      likesAdded: persisted.likesAdded,
+      likesUpdated: persisted.likesUpdated,
       likesSkipped: 0,
       message,
     };

@@ -88,6 +88,10 @@ export function scheduleEmbeddingChildTermination(
 export function spawnEmbeddingWorker(
   state: EmbeddingWorkerChildState,
   jobId: number,
+  options?: {
+    /** Called as soon as the OS assigns a PID (persist for restart reclaim). */
+    onSpawned?: (pid: number) => void;
+  },
 ): Promise<WorkerExit> {
   const script = path.join(process.cwd(), "scripts", "embedding-worker.ts");
   const tsxCli = path.join(
@@ -131,6 +135,14 @@ export function spawnEmbeddingWorker(
 
     state.activeChild = child;
     state.activeChildJobId = jobId;
+
+    const reportPid = () => {
+      if (typeof child.pid === "number" && child.pid > 0) {
+        options?.onSpawned?.(child.pid);
+      }
+    };
+    reportPid();
+    child.on("spawn", reportPid);
 
     const finish = (exit: WorkerExit) => {
       if (settled) return;

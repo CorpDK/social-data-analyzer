@@ -51,6 +51,21 @@ Liked comments no longer collapse to `comment:<post>:<author>` alone: prefer
 `GET /api/saves` and `GET /api/likes` reject malformed `page` / `pageSize` with
 **400** (`src/lib/query-params.ts`).
 
+## Reset library vs active jobs (Phase 3)
+
+**Reset library** (Settings → Danger zone) refuses with **HTTP 409** while any
+`import_jobs` or `embedding_jobs` row is `pending` or `running`. Cancel or wait
+for those jobs first — never wipe the DB under active writers.
+
+## Partial import recovery
+
+Import writes commit in batches. A failed or cancelled import may still leave
+durable `saved_items` / `liked_items` rows. Failed jobs report truthful
+persisted add/update counts and a message that partial rows may remain.
+
+**Recovery:** re-import the same export (upserts reconcile), or cancel all jobs
+then use Reset library when idle. Do not assume failed = zero writes.
+
 ## Import
 
 1. Open **Import**, upload a Meta JSON zip/json (max 2 GB).
@@ -91,11 +106,15 @@ On Linux, Indexes / `POST /api/search/reindex` use `/proc/meminfo` MemAvailable:
 ## Orphan workers after Next restart
 
 - Embedding rebuilds normally run in a **child** (`pnpm embedding-worker <id>`).
-- Restarting Next does **not** always kill an already-spawned child. Check
-  `ps` for leftover `embedding-worker` / `tsx … embedding-worker`.
-- On next open of Indexes / status, orphaned `running` rows are **reclaimed**
-  (re-queued or cancelled). A stray child may still hold the DB briefly —
-  stop it if WAL stays locked.
+- The job row stores `worker_pid` when the child (or inline worker) starts.
+- Restarting Next does **not** always kill an already-spawned child.
+- On next open of Indexes / status, orphaned `running` rows are **reclaimed**:
+  if `worker_pid` is alive and looks like `embedding-worker`, reclaim signals
+  it (SIGTERM then SIGKILL) before re-queuing; if a live owned worker cannot be
+  stopped, reclaim **defers** (leaves `running`) so a duplicate child is not
+  spawned. Dead / missing PID → re-queue or cancel as before.
+- Check `ps` for leftover `embedding-worker` / `tsx … embedding-worker` if WAL
+  stays locked.
 - Import jobs are in-process: restart drops the runner; reclaim uses the spool.
 
 ## Env knobs (infra only)
