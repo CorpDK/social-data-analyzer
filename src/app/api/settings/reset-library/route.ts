@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import {
   LibraryBusyError,
@@ -22,18 +23,17 @@ export async function POST(request: Request) {
   try {
     body = (await request.json()) as { confirmation?: unknown };
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");
   }
 
   const confirmation =
     typeof body.confirmation === "string" ? body.confirmation : "";
 
   if (confirmation !== RESET_LIBRARY_CONFIRMATION_PHRASE) {
-    return NextResponse.json(
-      {
-        error: `Confirmation phrase must be exactly "${RESET_LIBRARY_CONFIRMATION_PHRASE}"`,
-      },
-      { status: 400 },
+    return jsonPublicError(
+      400,
+      "CONFIRMATION_REQUIRED",
+      `Confirmation phrase must be exactly "${RESET_LIBRARY_CONFIRMATION_PHRASE}"`,
     );
   }
 
@@ -42,10 +42,11 @@ export async function POST(request: Request) {
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof LibraryBusyError) {
-      return NextResponse.json({ error: error.message }, { status: 409 });
+      return jsonPublicError(409, "LIBRARY_BUSY", error.message);
     }
-    const message =
-      error instanceof Error ? error.message : "Failed to reset library";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return jsonInternalError("Failed to reset library", error, {
+      code: "RESET_LIBRARY_FAILED",
+      message: "Failed to reset library",
+    });
   }
 }

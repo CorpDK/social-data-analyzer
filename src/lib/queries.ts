@@ -1,6 +1,7 @@
 import { and, count, desc, eq, sql } from "drizzle-orm";
 import { getDb, getSqlite, schema } from "./db";
 import {
+  BROWSE_HYBRID_SEARCH_LIMIT,
   hybridSearchIds,
   hybridSearchLikedIds,
   type SearchMode,
@@ -9,6 +10,8 @@ import type { EmbeddingProvider } from "./search/embeddings";
 import { parseProviderParam } from "./search/providers";
 
 const { imports, savedItems, itemCollections, likedItems } = schema;
+
+export { BROWSE_HYBRID_SEARCH_LIMIT };
 
 /**
  * Browse / stats / list are read-only. Search index gaps are healed via
@@ -139,6 +142,7 @@ export async function listSaves(query: SavesQuery) {
   let providerFallback = false;
   let providerFallbackReason: string | undefined;
   let rankedIds: number[] | null = null;
+  let totalCapped = false;
 
   if (query.q?.trim()) {
     const requestedProvider = parseProviderParam(query.provider);
@@ -148,10 +152,16 @@ export async function listSaves(query: SavesQuery) {
       provider,
       providerFallback: fallback,
       providerFallbackReason: fallbackReason,
-    } = await hybridSearchIds(query.q.trim(), 500, requestedProvider);
+      truncated,
+    } = await hybridSearchIds(
+      query.q.trim(),
+      BROWSE_HYBRID_SEARCH_LIMIT,
+      requestedProvider,
+    );
     searchProvider = provider;
     providerFallback = fallback;
     providerFallbackReason = fallbackReason;
+    totalCapped = Boolean(truncated);
     if (hits.length > 0) {
       rankedIds = hits.map((hit) => hit.id);
       searchMode = mode;
@@ -165,6 +175,7 @@ export async function listSaves(query: SavesQuery) {
       // Fallback LIKE if FTS/vec miss (e.g. partial media keys).
       const term = `%${query.q.trim()}%`;
       searchMode = "like";
+      totalCapped = false;
       conditions.push(
         sql`(
           ${savedItems.authorUsername} like ${term}
@@ -269,6 +280,8 @@ export async function listSaves(query: SavesQuery) {
     searchProvider,
     providerFallback,
     providerFallbackReason,
+    totalCapped,
+    searchCap: query.q?.trim() ? BROWSE_HYBRID_SEARCH_LIMIT : undefined,
   };
 }
 
@@ -372,6 +385,7 @@ export async function listLikes(query: LikesQuery) {
   let providerFallback = false;
   let providerFallbackReason: string | undefined;
   let rankedIds: number[] | null = null;
+  let totalCapped = false;
 
   if (query.q?.trim()) {
     const requestedProvider = parseProviderParam(query.provider);
@@ -381,10 +395,16 @@ export async function listLikes(query: LikesQuery) {
       provider,
       providerFallback: fallback,
       providerFallbackReason: fallbackReason,
-    } = await hybridSearchLikedIds(query.q.trim(), 500, requestedProvider);
+      truncated,
+    } = await hybridSearchLikedIds(
+      query.q.trim(),
+      BROWSE_HYBRID_SEARCH_LIMIT,
+      requestedProvider,
+    );
     searchProvider = provider;
     providerFallback = fallback;
     providerFallbackReason = fallbackReason;
+    totalCapped = Boolean(truncated);
     if (hits.length > 0) {
       rankedIds = hits.map((hit) => hit.id);
       searchMode = mode;
@@ -397,6 +417,7 @@ export async function listLikes(query: LikesQuery) {
     } else {
       const term = `%${query.q.trim()}%`;
       searchMode = "like";
+      totalCapped = false;
       conditions.push(
         sql`(
           ${likedItems.authorUsername} like ${term}
@@ -478,6 +499,8 @@ export async function listLikes(query: LikesQuery) {
     searchProvider,
     providerFallback,
     providerFallbackReason,
+    totalCapped,
+    searchCap: query.q?.trim() ? BROWSE_HYBRID_SEARCH_LIMIT : undefined,
   };
 }
 

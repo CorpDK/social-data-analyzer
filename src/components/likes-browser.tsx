@@ -38,6 +38,8 @@ type LikesResponse = {
   searchProvider?: EmbeddingProvider | null;
   providerFallback?: boolean;
   providerFallbackReason?: string;
+  totalCapped?: boolean;
+  searchCap?: number;
 };
 
 type FilterOptions = {
@@ -363,8 +365,11 @@ export function LikesBrowser() {
         <div className="flex flex-col gap-1 border-b border-[var(--line)] px-4 py-3 text-sm text-[var(--muted)] sm:flex-row sm:items-center sm:justify-between">
           <span>
             {data
-              ? `${data.total} item${data.total === 1 ? "" : "s"}`
+              ? `${data.total.toLocaleString()}${data.totalCapped ? "+" : ""} item${data.total === 1 && !data.totalCapped ? "" : "s"}`
               : "Loading…"}
+            {data?.totalCapped && data.searchCap
+              ? ` · top ${data.searchCap.toLocaleString()} matches`
+              : ""}
             {data?.searchMode &&
             data.searchMode !== "none" &&
             q.trim() !== ""

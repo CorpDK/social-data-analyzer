@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonInternalError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import { scheduleSearchBackfillJobsIfNeeded } from "@/lib/search/readiness";
 
@@ -24,13 +25,9 @@ export async function POST(request: Request) {
       { status: result.enqueued.length > 0 ? 202 : 200 },
     );
   } catch (error) {
-    console.error("Failed to heal search gaps", error);
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to heal search gaps",
-      },
-      { status: 500 },
-    );
+    return jsonInternalError("Failed to heal search gaps", error, {
+      code: "HEAL_GAPS_FAILED",
+      message: "Failed to heal search gaps",
+    });
   }
 }

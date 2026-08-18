@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import {
   discardImportInserts,
   ImportDiscardBusyError,
@@ -24,12 +25,12 @@ export async function DELETE(
     const { id: rawId } = await context.params;
     const id = Number(rawId);
     if (!Number.isFinite(id) || id <= 0) {
-      return NextResponse.json({ error: "Invalid import id" }, { status: 400 });
+      return jsonPublicError(400, "INVALID_IMPORT_ID", "Invalid import id");
     }
 
     const row = getImportById(id);
     if (!row) {
-      return NextResponse.json({ error: "Import not found" }, { status: 404 });
+      return jsonPublicError(404, "IMPORT_NOT_FOUND", "Import not found");
     }
 
     const result = discardImportInserts(id);
@@ -45,10 +46,11 @@ export async function DELETE(
     });
   } catch (error) {
     if (error instanceof ImportDiscardBusyError) {
-      return NextResponse.json({ error: error.message }, { status: 409 });
+      return jsonPublicError(409, "IMPORT_DISCARD_BUSY", error.message);
     }
-    const message =
-      error instanceof Error ? error.message : "Failed to discard import rows";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return jsonInternalError("Failed to discard import rows", error, {
+      code: "IMPORT_DISCARD_FAILED",
+      message: "Failed to discard import rows",
+    });
   }
 }

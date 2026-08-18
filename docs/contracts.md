@@ -134,6 +134,13 @@ Settings hint for non-loopback / non-official-OpenAI hosts — see
 - Liked-comment keys prefer fbid / comment id, else post+author+timestamp+content.
 - Collection filter on saves uses `EXISTS` (no huge bound `IN` lists).
 - `page` / `pageSize` parsed via `parsePageParams` → **400** when malformed.
+- Browse `q` / `author` / `collection` / `type` / `provider` bounded via
+  `parseBrowseFilterParams` → **400** when oversized or not an allowlisted type.
+- Hybrid browse search uses `BROWSE_HYBRID_SEARCH_LIMIT` (10 000); responses set
+  `totalCapped` + `searchCap` when the ranked candidate set hits that ceiling.
+- Unexpected API failures return stable `code` + generic `error` (raw exception
+  text stays in server logs). Domain errors (busy, multipart, validation) keep
+  intentional client messages.
 
 ## Job lifecycle / reset (Phase 3)
 

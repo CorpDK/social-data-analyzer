@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import {
   getSettingsKeysStatus,
@@ -20,16 +21,22 @@ export async function PUT(request: Request) {
   try {
     body = (await request.json()) as UpdateSettingsKeysInput;
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");
   }
 
   try {
     const status = updateSettingsKeys(body);
     return NextResponse.json(status);
   } catch (error) {
-    const message =
-      error instanceof Error ? error.message : "Failed to update settings";
-    return NextResponse.json({ error: message }, { status: 503 });
+    // validateSettingsKeysInput / keyring throws intentional client messages.
+    if (error instanceof Error) {
+      return jsonPublicError(503, "SETTINGS_UPDATE_FAILED", error.message);
+    }
+    return jsonInternalError("Failed to update settings", error, {
+      code: "SETTINGS_UPDATE_FAILED",
+      message: "Failed to update settings",
+      status: 503,
+    });
   }
 }
 

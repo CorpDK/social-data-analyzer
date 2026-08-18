@@ -188,12 +188,11 @@ export function createJobSseResponse<T>(
         try {
           snapshot = options.getSnapshot();
         } catch (error) {
+          console.error("SSE snapshot failed", error);
           sendRaw(
             encodeSseEvent("error", {
-              error:
-                error instanceof Error
-                  ? error.message
-                  : "Failed to read job status",
+              error: "Failed to read job status",
+              code: "SSE_SNAPSHOT_FAILED",
             }),
           );
           return;

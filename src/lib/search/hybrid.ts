@@ -30,6 +30,16 @@ export type RankedHit = {
   source: "fts" | "vec" | "both";
 };
 
+/**
+ * Max ranked IDs for browse list/search. Keeps totals honest for typical
+ * local corpora while bounding IN() / memory; callers expose totalCapped
+ * when the candidate set hits this ceiling.
+ */
+export const BROWSE_HYBRID_SEARCH_LIMIT = 10_000;
+
+/** sqlite-vec `k` ceiling when fetching hybrid vector candidates. */
+export const HYBRID_VEC_FETCH_K_MAX = 10_000;
+
 const RRF_K = 60;
 
 /** Injected logger for tests; defaults to jobLog. */
@@ -158,7 +168,7 @@ async function searchVectorIndex(
   }
 
   const table = vectorTableName(library, index);
-  const fetchK = Math.min(Math.max(limit * 2, 32), 500);
+  const fetchK = Math.min(Math.max(limit * 2, 32), HYBRID_VEC_FETCH_K_MAX);
   try {
     const embedding = await embedText(query, config, "query");
     const rows = sqlite
@@ -199,6 +209,11 @@ export type HybridSearchResult = {
   ftsDegraded?: boolean;
   /** True when primary vec path failed (may still have local fallback hits). */
   vecDegraded?: boolean;
+  /**
+   * True when the ranked candidate set was cut at `limit` (more matches may
+   * exist). Browse totals should surface this so UX is not silently capped.
+   */
+  truncated?: boolean;
 };
 
 async function hybridSearchIdsForLibrary(
@@ -262,10 +277,16 @@ async function hybridSearchIdsForLibrary(
           : undefined),
       ftsDegraded,
       vecDegraded,
+      truncated: false,
     };
   }
 
-  const hits = rrfMerge(ftsHits, vecResult.hits).slice(0, limit);
+  const merged = rrfMerge(ftsHits, vecResult.hits);
+  const truncated =
+    merged.length > limit ||
+    ftsHits.length >= limit ||
+    vecResult.hits.length >= limit;
+  const hits = merged.slice(0, limit);
   if (vecResult.hits.length === 0) {
     return {
       hits,
@@ -275,6 +296,7 @@ async function hybridSearchIdsForLibrary(
       providerFallbackReason: resolved.reason,
       ftsDegraded,
       vecDegraded,
+      truncated,
     };
   }
   if (usedFallback || resolved.fallback) {
@@ -291,6 +313,7 @@ async function hybridSearchIdsForLibrary(
         `${resolved.provider} semantic search unavailable; using local vectors.`,
       ftsDegraded,
       vecDegraded,
+      truncated,
     };
   }
   return {
@@ -300,6 +323,7 @@ async function hybridSearchIdsForLibrary(
     providerFallback: false,
     ftsDegraded,
     vecDegraded,
+    truncated,
   };
 }
 

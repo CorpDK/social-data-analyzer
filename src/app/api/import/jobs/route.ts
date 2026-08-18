@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonInternalError } from "@/lib/api-error";
 import { getImportJobsStatus } from "@/lib/import/jobs";
 
 export const runtime = "nodejs";
@@ -9,15 +10,9 @@ export async function GET() {
   try {
     return NextResponse.json(getImportJobsStatus());
   } catch (error) {
-    console.error("Failed to load import job status", error);
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error
-            ? error.message
-            : "Failed to load import job status",
-      },
-      { status: 500 },
-    );
+    return jsonInternalError("Failed to load import job status", error, {
+      code: "IMPORT_JOBS_STATUS_FAILED",
+      message: "Failed to load import job status",
+    });
   }
 }

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { startImportJobFromSpool } from "@/lib/import/jobs";
 import {
   IMPORT_MAX_FILE_BYTES,
@@ -37,9 +38,10 @@ export async function POST(request: Request) {
         Math.max(IMPORT_MAX_FILE_BYTES, IMPORT_MAX_JSON_FILE_BYTES) +
         MULTIPART_OVERHEAD_BYTES;
       if (Number.isFinite(contentLength) && contentLength > maxAccepted) {
-        return NextResponse.json(
-          { error: importFileTooLargeMessage("zip") },
-          { status: 413 },
+        return jsonPublicError(
+          413,
+          "IMPORT_TOO_LARGE",
+          importFileTooLargeMessage("zip"),
         );
       }
     }
@@ -60,7 +62,7 @@ export async function POST(request: Request) {
     });
     if (!result.ok) {
       return NextResponse.json(
-        { error: result.error },
+        { error: result.error, code: "IMPORT_REJECTED" },
         { status: result.status },
       );
     }
@@ -71,13 +73,15 @@ export async function POST(request: Request) {
     );
   } catch (error) {
     if (error instanceof MultipartUploadError) {
-      return NextResponse.json(
-        { error: error.message },
-        { status: error.status },
+      return jsonPublicError(
+        error.status,
+        "MULTIPART_UPLOAD_ERROR",
+        error.message,
       );
     }
-    const message =
-      error instanceof Error ? error.message : "Unexpected import error";
-    return NextResponse.json({ error: message }, { status: 500 });
+    return jsonInternalError("Unexpected import error", error, {
+      code: "IMPORT_FAILED",
+      message: "Unexpected import error",
+    });
   }
 }

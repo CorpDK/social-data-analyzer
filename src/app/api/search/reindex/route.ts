@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import {
   ensureJobRunner,
@@ -23,14 +24,10 @@ export async function GET() {
       cancelSupported: true,
     });
   } catch (error) {
-    console.error("Failed to load reindex status", error);
-    return NextResponse.json(
-      {
-        error:
-          error instanceof Error ? error.message : "Failed to load reindex status",
-      },
-      { status: 500 },
-    );
+    return jsonInternalError("Failed to load reindex status", error, {
+      code: "REINDEX_STATUS_FAILED",
+      message: "Failed to load reindex status",
+    });
   }
 }
 
@@ -55,7 +52,7 @@ export async function POST(request: Request) {
     try {
       body = await request.json();
     } catch {
-      return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+      return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");
     }
 
     const provider =
@@ -65,12 +62,10 @@ export async function POST(request: Request) {
 
     const target = parseReindexTarget(provider);
     if (!target) {
-      return NextResponse.json(
-        {
-          error:
-            "provider must be one of: local, ollama, openai, voyage, likes-local, likes-ollama, likes-openai, likes-voyage, all-configured",
-        },
-        { status: 400 },
+      return jsonPublicError(
+        400,
+        "INVALID_REINDEX_TARGET",
+        "provider must be one of: local, ollama, openai, voyage, likes-local, likes-ollama, likes-openai, likes-voyage, all-configured",
       );
     }
 
@@ -79,6 +74,7 @@ export async function POST(request: Request) {
       return NextResponse.json(
         {
           error: result.error,
+          code: "REINDEX_REJECTED",
           job: result.job ?? null,
           jobs: result.jobs ?? null,
         },
@@ -91,12 +87,9 @@ export async function POST(request: Request) {
       { status: 202 },
     );
   } catch (error) {
-    console.error("Failed to start reindex", error);
-    return NextResponse.json(
-      {
-        error: error instanceof Error ? error.message : "Failed to start reindex",
-      },
-      { status: 500 },
-    );
+    return jsonInternalError("Failed to start reindex", error, {
+      code: "REINDEX_START_FAILED",
+      message: "Failed to start reindex",
+    });
   }
 }
