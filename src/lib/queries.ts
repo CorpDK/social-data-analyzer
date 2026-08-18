@@ -7,20 +7,16 @@ import {
 } from "./search/hybrid";
 import type { EmbeddingProvider } from "./search/embeddings";
 import { parseProviderParam } from "./search/providers";
-import { ensureSearchIndexBackfill } from "./search/sync";
 
 const { imports, savedItems, itemCollections, likedItems } = schema;
 
-let didBackfill = false;
-
-function ensureSearchReady() {
-  if (didBackfill) return;
-  ensureSearchIndexBackfill();
-  didBackfill = true;
-}
+/**
+ * Browse / stats / list are read-only. Search index gaps are healed via
+ * embedding jobs scheduled from Indexes status (see search/readiness.ts),
+ * not by synchronous ensureSearchIndexBackfill on GET.
+ */
 
 export function getStats() {
-  ensureSearchReady();
   const db = getDb();
 
   const totals = db
@@ -126,7 +122,6 @@ export type SavesQuery = {
 };
 
 export async function listSaves(query: SavesQuery) {
-  ensureSearchReady();
   const db = getDb();
   const pageRaw = query.page ?? 1;
   const pageSizeRaw = query.pageSize ?? 25;
@@ -278,19 +273,16 @@ export async function listSaves(query: SavesQuery) {
 }
 
 export function listImports() {
-  ensureSearchReady();
   const db = getDb();
   return db.select().from(imports).orderBy(desc(imports.importedAt)).all();
 }
 
 export function getImportById(id: number) {
-  ensureSearchReady();
   const db = getDb();
   return db.select().from(imports).where(eq(imports.id, id)).get();
 }
 
 export function listFilterOptions() {
-  ensureSearchReady();
   const db = getDb();
 
   const authors = db
@@ -363,7 +355,6 @@ function savedKeysForLikePage(
 }
 
 export async function listLikes(query: LikesQuery) {
-  ensureSearchReady();
   const db = getDb();
   const pageRaw = query.page ?? 1;
   const pageSizeRaw = query.pageSize ?? 25;
@@ -491,7 +482,6 @@ export async function listLikes(query: LikesQuery) {
 }
 
 export function listLikesFilterOptions() {
-  ensureSearchReady();
   const db = getDb();
 
   const authors = db

@@ -205,7 +205,7 @@ before paint to avoid a flash.
 2. Export your Instagram profile to device
 3. Choose saved/activity data (or all information)
 4. Set format to **JSON**
-5. Download the zip when Meta emails you, then upload it on the **Import** page (max **2GB** — enough for full Meta exports that include media). You can leave or refresh the page; the job keeps running and the progress panel catches up.
+5. Download the zip when Meta emails you, then upload it on the **Import** page (max **512MB** zip via multipart — formData buffers in memory before spool; standalone `.json` also max **512MB** for Node string limits). You can leave or refresh the page; the job keeps running and the progress panel catches up.
 
 ## Deduplication
 

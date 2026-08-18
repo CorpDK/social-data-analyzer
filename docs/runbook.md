@@ -68,12 +68,29 @@ then use Reset library when idle. Do not assume failed = zero writes.
 
 ## Import
 
-1. Open **Import**, upload a Meta JSON zip/json (max 2 GB).
+1. Open **Import**, upload a Meta JSON zip (max **512 MB**) or standalone
+   `.json` (max **512 MB** — Node string-size bound).
 2. Job spools under `data/imports/`, row in `import_jobs`, returns 202.
 3. Progress: SSE `GET /api/import/jobs/stream` (phases
    `extracting` → … → `writing` → `indexing`).
 4. Cancel: `POST /api/import/jobs/cancel` (cooperative).
 5. Logs: look for `[import] job=… phase=… processed/total`.
+
+### Upload size honesty
+
+`POST /api/import` uses `request.formData()`, which **buffers the multipart body
+in memory** before spooling. Documented/enforced caps are **512 MB** to match
+that path (not a theoretical multi‑GiB disk spool). True streaming multipart is
+**deferred**. After formData, the server still streams from `File.stream()` into
+`data/imports/` so the spool write does not hold a second full Buffer copy.
+
+Standalone `.json` imports are capped separately (same 512 MB today) because
+parse loads the file as a UTF-8 string. Prefer a `.zip` for large exports —
+JSON entries inside a zip are streamed from the spool.
+
+`next.config.ts` `experimental.proxyClientMaxBodySize` /
+`serverActions.bodySizeLimit` stay aligned via `IMPORT_MAX_FILE_SIZE_LIMIT`
+(`512mb`).
 
 ## Reindex
 
@@ -82,6 +99,15 @@ then use Reset library when idle. Do not assume failed = zero writes.
 3. Cancel stops the **active** job only.
 4. Logs: `[search] job=…` in the Next process; `[embedding-worker] job=…` in
    the child when workers are enabled.
+
+### Search readiness (no sync backfill on browse)
+
+`getStats` / browse / list GETs are **read-only** — they do **not** call
+`ensureSearchIndexBackfill` (which previously could rebuild FTS + local vectors
+on first page load). Coverage gaps show as degraded on **Indexes**; opening
+status may enqueue a keyword (`fts`) and/or `local` / `likes-local` job once
+per process. Heavy rebuild remains job-scoped with SSE progress, or
+`pnpm run reindex` at the CLI.
 
 ## Cancel & resume
 

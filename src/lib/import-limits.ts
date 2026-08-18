@@ -1,14 +1,38 @@
-/** Upper bound for Instagram export uploads (full Meta zips with media). */
-export const IMPORT_MAX_FILE_BYTES = 2 * 1024 * 1024 * 1024; // 2 GiB
+/**
+ * Upload / zip-extract safety caps.
+ *
+ * Honesty note (Phase 4): `POST /api/import` uses `request.formData()`, which
+ * buffers the multipart body in memory before we can spool. True streaming
+ * multipart (busboy / undici) is deferred. Caps below match what that path can
+ * safely hold — not a theoretical 2 GiB disk spool. After formData, we still
+ * stream from `File.stream()` into `data/imports/` so we do not hold a second
+ * full copy while writing the spool.
+ */
 
-/** Human-readable label for UI / API error messages. */
-export const IMPORT_MAX_FILE_LABEL = "2GB";
+/**
+ * Max size for `.zip` uploads via multipart formData (in-memory bound).
+ * Also used as the Next experimental bodySizeLimit string source.
+ */
+export const IMPORT_MAX_FILE_BYTES = 512 * 1024 * 1024; // 512 MiB
+
+/** Human-readable label for zip / general upload UI + errors. */
+export const IMPORT_MAX_FILE_LABEL = "512MB";
 
 /**
  * Next.js `SizeLimit` string for `experimental.proxyClientMaxBodySize` /
  * `experimental.serverActions.bodySizeLimit` (see next.config.ts).
  */
-export const IMPORT_MAX_FILE_SIZE_LIMIT = "2gb";
+export const IMPORT_MAX_FILE_SIZE_LIMIT = "512mb";
+
+/**
+ * Standalone `.json` import cap. JSON is read into a UTF-8 string for parse;
+ * Node / V8 string size limits make multi‑GiB JSON unsafe even if disk spool
+ * succeeded. Kept at 512 MiB with a dedicated error message.
+ */
+export const IMPORT_MAX_JSON_FILE_BYTES = 512 * 1024 * 1024; // 512 MiB
+
+/** Human-readable label for standalone JSON upload errors. */
+export const IMPORT_MAX_JSON_FILE_LABEL = "512MB";
 
 /**
  * Per-entry uncompressed size cap for JSON files inside an export zip.
@@ -52,8 +76,40 @@ export const DEFAULT_IMPORT_ZIP_SAFETY_LIMITS: ImportZipSafetyLimits = {
   maxTotalExtractedJsonBytes: IMPORT_MAX_EXTRACTED_JSON_BYTES,
 };
 
-export function importFileTooLargeMessage(): string {
-  return `File is too large (max ${IMPORT_MAX_FILE_LABEL}).`;
+export type ImportUploadKind = "zip" | "json";
+
+/** Byte cap for a given upload kind (zip multipart vs standalone JSON). */
+export function importMaxBytesForKind(kind: ImportUploadKind): number {
+  return kind === "json"
+    ? IMPORT_MAX_JSON_FILE_BYTES
+    : IMPORT_MAX_FILE_BYTES;
+}
+
+export function importMaxLabelForKind(kind: ImportUploadKind): string {
+  return kind === "json"
+    ? IMPORT_MAX_JSON_FILE_LABEL
+    : IMPORT_MAX_FILE_LABEL;
+}
+
+/** Infer kind from a filename; null if neither .zip nor .json. */
+export function importKindFromFilename(filename: string): ImportUploadKind | null {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith(".zip")) return "zip";
+  if (lower.endsWith(".json")) return "json";
+  return null;
+}
+
+export function importFileTooLargeMessage(kind: ImportUploadKind = "zip"): string {
+  if (kind === "json") return importJsonFileTooLargeMessage();
+  return `File is too large (max ${IMPORT_MAX_FILE_LABEL}). Multipart uploads are buffered in memory before spooling; true streaming upload is deferred.`;
+}
+
+export function importJsonFileTooLargeMessage(): string {
+  return (
+    `JSON export is too large (max ${IMPORT_MAX_JSON_FILE_LABEL}). ` +
+    `Standalone .json imports are loaded as a string for parsing; larger files hit Node/V8 string limits. ` +
+    `Prefer a .zip export (JSON entries are streamed from the spool).`
+  );
 }
 
 export function importZipEntryTooLargeMessage(

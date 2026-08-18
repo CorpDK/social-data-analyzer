@@ -40,6 +40,7 @@ import {
   getRecentEmbeddingJobs,
   type EmbeddingJobRecord,
 } from "./jobs";
+import { scheduleSearchBackfillJobsIfNeeded } from "./readiness";
 
 export type {
   EmbeddingJobDto,
@@ -278,6 +279,9 @@ function getLibraryIndexStatus(
 
 export function getSearchIndexStatus(): SearchIndexStatus {
   ensureJobRunner();
+  // Schedule FTS/local backfill jobs when coverage lags — never sync-rebuild
+  // on browse/list. Idempotent; open jobs are not duplicated.
+  scheduleSearchBackfillJobsIfNeeded();
 
   const memAvailableMb = readMemAvailableMb();
   const saves = getLibraryIndexStatus("saves", memAvailableMb);

@@ -62,10 +62,15 @@ dropped before the next (parse-and-drop). Per-entry / total JSON caps still
 fail closed (`ImportZipSafetyError`). Import writes batch ~500 rows per
 transaction (`IMPORT_WRITE_BATCH_SIZE`).
 
+Upload HTTP path: multipart is accepted via `request.formData()` (in-memory
+bound **512 MB** for zip and standalone JSON). True streaming multipart is
+deferred; spool write still streams from `File.stream()`.
+
 ## Embedding jobs (`embedding_jobs`)
 
 API may accept expanded targets; persisted rows use concrete targets such as
 `saves-local`, `likes-openai`, etc. (see `EmbeddingJobTarget` / `formatJobTarget`).
+Keyword backfill may use target `fts` (FTS only, no vectors).
 
 States: `pending` | `running` | `completed` | `failed` | `cancelled`  
 Phases follow rebuild progress (`preparing` | `fts` | `embedding` | `storing` | `done`).
@@ -138,6 +143,16 @@ Settings hint for non-loopback / non-official-OpenAI hosts — see
   re-queue; defer reclaim if a live owned worker cannot be stopped.
 - Failed/cancelled imports report persisted row counts; partial writes may
   remain until re-import or idle reset (see runbook).
+
+## Resource paths (Phase 4)
+
+- Upload caps: zip multipart and standalone JSON are **512 MB**
+  (`IMPORT_MAX_FILE_*` / `IMPORT_MAX_JSON_FILE_*`). `request.formData()`
+  buffers before spool; true streaming multipart is deferred. Spool still
+  uses `File.stream()`. Content-Length over the cap → **413**.
+- Browse / stats / list GETs do not synchronously rebuild FTS or local
+  vectors. `GET /api/search/status` may enqueue `fts` / `local` /
+  `likes-local` jobs when coverage lags (once per process).
 
 ## Operator runbook
 

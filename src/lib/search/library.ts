@@ -49,11 +49,13 @@ export type ConcreteJobTarget = string;
 
 export type ParsedJobTarget =
   | { kind: "all-configured" }
+  | { kind: "fts" }
   | { kind: "provider"; library: SearchLibrary; provider: EmbeddingProvider };
 
 export function parseLibraryJobTarget(value: string): ParsedJobTarget | null {
   const trimmed = value.trim().toLowerCase();
   if (trimmed === "all-configured") return { kind: "all-configured" };
+  if (trimmed === "fts") return { kind: "fts" };
 
   if (isEmbeddingProvider(trimmed)) {
     return { kind: "provider", library: "saves", provider: trimmed };

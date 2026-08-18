@@ -31,15 +31,23 @@ export type SpoolWriteResult = {
 
 /**
  * Stream a browser File to a unique spool path while hashing and enforcing
- * the max upload size. Does not keep the full payload in a single Buffer.
+ * the max upload size. Does not keep the full payload in a second Buffer after
+ * formData — streams from `File.stream()` to disk.
  */
 export async function spoolUploadedFile(
   file: File,
   jobToken: string,
+  options?: {
+    maxBytes?: number;
+    tooLargeMessage?: string;
+  },
 ): Promise<SpoolWriteResult> {
   const dir = ensureImportSpoolDir();
   const safeName = (file.name || "export.bin").replace(/[^\w.\-]+/g, "_");
   const spoolPath = path.join(dir, `${jobToken}-${safeName}`);
+  const maxBytes = options?.maxBytes ?? IMPORT_MAX_FILE_BYTES;
+  const tooLargeMessage =
+    options?.tooLargeMessage ?? importFileTooLargeMessage("zip");
 
   const hash = createHash("sha256");
   let byteLength = 0;
@@ -48,8 +56,8 @@ export async function spoolUploadedFile(
     transform(chunk, _enc, callback) {
       const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
       byteLength += buf.byteLength;
-      if (byteLength > IMPORT_MAX_FILE_BYTES) {
-        callback(new Error(importFileTooLargeMessage()));
+      if (byteLength > maxBytes) {
+        callback(new Error(tooLargeMessage));
         return;
       }
       hash.update(buf);

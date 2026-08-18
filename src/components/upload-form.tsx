@@ -3,9 +3,11 @@
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  IMPORT_MAX_FILE_BYTES,
   IMPORT_MAX_FILE_LABEL,
+  IMPORT_MAX_JSON_FILE_LABEL,
   importFileTooLargeMessage,
+  importKindFromFilename,
+  importMaxBytesForKind,
 } from "@/lib/import-limits";
 import type {
   ImportJobDetailsDto,
@@ -77,6 +79,22 @@ function jobStateStyles(state: ImportJobState): string {
     case "cancelled":
       return "bg-[var(--chip)] text-[var(--muted)]";
   }
+}
+
+function uploadOverLimit(file: File): boolean {
+  const kind = importKindFromFilename(file.name || "");
+  if (!kind) return false;
+  return file.size > importMaxBytesForKind(kind);
+}
+
+function uploadLimitMessage(file: File): string {
+  const kind = importKindFromFilename(file.name || "") ?? "zip";
+  return importFileTooLargeMessage(kind);
+}
+
+function uploadLimitLabel(file: File): string {
+  const kind = importKindFromFilename(file.name || "");
+  return kind === "json" ? IMPORT_MAX_JSON_FILE_LABEL : IMPORT_MAX_FILE_LABEL;
 }
 
 function phaseLabel(phase: string): string {
@@ -241,8 +259,8 @@ export function UploadForm() {
       return;
     }
 
-    if (file.size > IMPORT_MAX_FILE_BYTES) {
-      setError(importFileTooLargeMessage());
+    if (uploadOverLimit(file)) {
+      setError(uploadLimitMessage(file));
       return;
     }
 
@@ -303,10 +321,12 @@ export function UploadForm() {
             Load an export
           </h2>
           <p className="max-w-2xl text-[var(--muted)]">
-            Upload Instagram&apos;s official data download as JSON (.zip or a
-            saved_*.json file). Full Meta exports with media are supported up to{" "}
-            {IMPORT_MAX_FILE_LABEL}. Import runs in the background — you can
-            leave this page; progress is saved and resumes after refresh.
+            Upload Instagram&apos;s official data download as JSON (.zip up to{" "}
+            {IMPORT_MAX_FILE_LABEL}, or a standalone saved_*.json up to{" "}
+            {IMPORT_MAX_JSON_FILE_LABEL}). Multipart uploads are buffered in
+            memory before spooling (true streaming deferred). Import runs in the
+            background — you can leave this page; progress is saved and resumes
+            after refresh.
           </p>
         </div>
 
@@ -321,8 +341,8 @@ export function UploadForm() {
             onChange={(event) => {
               const next = event.target.files?.[0] ?? null;
               setFile(next);
-              if (next && next.size > IMPORT_MAX_FILE_BYTES) {
-                setError(importFileTooLargeMessage());
+              if (next && uploadOverLimit(next)) {
+                setError(uploadLimitMessage(next));
               } else {
                 setError(null);
               }
@@ -331,8 +351,8 @@ export function UploadForm() {
           {file ? (
             <span className="font-[family-name:var(--font-ibm)] text-xs text-[var(--muted)]">
               {file.name} · {(file.size / (1024 * 1024)).toFixed(2)} MB
-              {file.size > IMPORT_MAX_FILE_BYTES
-                ? ` (over ${IMPORT_MAX_FILE_LABEL} limit)`
+              {uploadOverLimit(file)
+                ? ` (over ${uploadLimitLabel(file)} limit)`
                 : ""}
             </span>
           ) : null}
@@ -344,7 +364,7 @@ export function UploadForm() {
             disabled={
               uploading ||
               !file ||
-              (file != null && file.size > IMPORT_MAX_FILE_BYTES)
+              (file != null && uploadOverLimit(file))
             }
             className="rounded-full bg-[var(--accent)] px-5 py-2.5 text-sm font-medium text-white transition enabled:hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >

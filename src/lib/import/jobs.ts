@@ -11,8 +11,9 @@ import {
   type ImportResult,
 } from "../import-export";
 import {
-  IMPORT_MAX_FILE_BYTES,
   importFileTooLargeMessage,
+  importKindFromFilename,
+  importMaxBytesForKind,
 } from "../import-limits";
 import {
   deleteSpoolFile,
@@ -422,8 +423,9 @@ async function executeJob(jobId: number) {
       if (buffer.byteLength === 0) {
         throw new Error("File is empty.");
       }
-      if (buffer.byteLength > IMPORT_MAX_FILE_BYTES) {
-        throw new Error(importFileTooLargeMessage());
+      const jsonMax = importMaxBytesForKind("json");
+      if (buffer.byteLength > jsonMax) {
+        throw new Error(importFileTooLargeMessage("json"));
       }
       result = await importExportJson(buffer.toString("utf8"), job.filename, {
         onProgress,
@@ -435,8 +437,9 @@ async function executeJob(jobId: number) {
       if (stat.size === 0) {
         throw new Error("File is empty.");
       }
-      if (stat.size > IMPORT_MAX_FILE_BYTES) {
-        throw new Error(importFileTooLargeMessage());
+      const zipMax = importMaxBytesForKind("zip");
+      if (stat.size > zipMax) {
+        throw new Error(importFileTooLargeMessage("zip"));
       }
       // Stream from spool path — do not readFileSync the whole zip into RAM.
       result = await importExportArchive(job.spoolPath, job.filename, {
@@ -610,12 +613,8 @@ export async function startImportJob(file: File): Promise<StartImportResult> {
   ensureImportJobRunner();
 
   const filename = file.name || "export.zip";
-  const lower = filename.toLowerCase();
-
-  let kind: ImportJobKind;
-  if (lower.endsWith(".zip")) kind = "zip";
-  else if (lower.endsWith(".json")) kind = "json";
-  else {
+  const kind = importKindFromFilename(filename);
+  if (!kind) {
     return {
       ok: false,
       error: "Only .zip and .json exports are supported.",
@@ -623,15 +622,19 @@ export async function startImportJob(file: File): Promise<StartImportResult> {
     };
   }
 
-  if (typeof file.size === "number" && file.size > IMPORT_MAX_FILE_BYTES) {
-    return { ok: false, error: importFileTooLargeMessage(), status: 400 };
+  const maxBytes = importMaxBytesForKind(kind);
+  if (typeof file.size === "number" && file.size > maxBytes) {
+    return { ok: false, error: importFileTooLargeMessage(kind), status: 400 };
   }
 
   const token = `${Date.now()}-${randomBytes(6).toString("hex")}`;
 
   let spool;
   try {
-    spool = await spoolUploadedFile(file, token);
+    spool = await spoolUploadedFile(file, token, {
+      maxBytes,
+      tooLargeMessage: importFileTooLargeMessage(kind),
+    });
   } catch (error) {
     return {
       ok: false,

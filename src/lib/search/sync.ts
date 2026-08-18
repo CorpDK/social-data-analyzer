@@ -777,6 +777,63 @@ export async function rebuildSearchIndex(options?: {
   return rebuildConfiguredIndexes(options);
 }
 
+/**
+ * Rebuild keyword (FTS) indexes for saves + likes when coverage lags item
+ * counts. Incremental: only runs when `ftsCount < itemCount`. Used by the
+ * `fts` embedding job and by `ensureSearchIndexBackfill` (CLI / explicit).
+ * Never call from browse/list/stats read paths.
+ */
+export async function rebuildKeywordIndexes(options?: {
+  onProgress?: RebuildProgressCallback;
+  shouldCancel?: () => boolean;
+}): Promise<{ saves: number; likes: number; rebuilt: boolean }> {
+  const sqlite = getSqlite();
+  const savesRows = allSavesSearchRows(sqlite);
+  const likesRows = allLikesSearchRows(sqlite);
+  const savesGap = savesRows.length > 0 && ftsCount("saves", sqlite) < savesRows.length;
+  const likesGap = likesRows.length > 0 && ftsCount("likes", sqlite) < likesRows.length;
+  const total = savesRows.length + likesRows.length;
+
+  await emitProgress(options?.onProgress, {
+    phase: "fts",
+    processed: 0,
+    total: Math.max(1, total),
+    message: savesGap || likesGap
+      ? "Rebuilding keyword (FTS) indexes…"
+      : "Keyword indexes already current",
+  });
+  throwIfCancelled(options?.shouldCancel);
+
+  if (!savesGap && !likesGap) {
+    await emitProgress(options?.onProgress, {
+      phase: "done",
+      processed: total,
+      total: Math.max(1, total),
+      message: "Keyword indexes already current",
+    });
+    return { saves: savesRows.length, likes: likesRows.length, rebuilt: false };
+  }
+
+  sqlite.transaction(() => {
+    if (savesGap) {
+      for (const row of savesRows) upsertItemFts(row.id, row, sqlite);
+    }
+    if (likesGap) {
+      for (const row of likesRows) upsertLikedItemFtsDoc(row.id, row, sqlite);
+    }
+  })();
+
+  throwIfCancelled(options?.shouldCancel);
+  await emitProgress(options?.onProgress, {
+    phase: "done",
+    processed: total,
+    total: Math.max(1, total),
+    message: `Keyword indexes updated (saves ${savesRows.length}, likes ${likesRows.length})`,
+  });
+
+  return { saves: savesRows.length, likes: likesRows.length, rebuilt: true };
+}
+
 /** Backfill keyword index; local vectors only when the local index is enabled. */
 export function ensureSearchIndexBackfill() {
   const sqlite = getSqlite();

@@ -25,6 +25,7 @@ import {
 import {
   RebuildCancelledError,
   rebuildConfiguredIndexes,
+  rebuildKeywordIndexes,
   rebuildProviderIndex,
   type RebuildProgress,
 } from "./sync";
@@ -260,6 +261,7 @@ export function parseReindexTarget(
   const parsed = parseLibraryJobTarget(value);
   if (!parsed) return null;
   if (parsed.kind === "all-configured") return "all-configured";
+  if (parsed.kind === "fts") return "fts";
   return formatJobTarget(parsed.library, parsed.provider);
 }
 
@@ -524,6 +526,53 @@ function insertPendingJob(
   return job;
 }
 
+function insertPendingFtsJob(): EmbeddingJobRecord {
+  const sqlite = getSqlite();
+  const saves = (
+    sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
+      c: number;
+    }
+  ).c;
+  const likes = (
+    sqlite.prepare(`SELECT count(*) AS c FROM liked_items`).get() as {
+      c: number;
+    }
+  ).c;
+  const totalItems = saves + likes;
+
+  const info = sqlite
+    .prepare(
+      `INSERT INTO embedding_jobs(
+        target, state, phase, processed, total, current_provider, message
+      ) VALUES ('fts', 'pending', 'queued', 0, ?, NULL, ?)`,
+    )
+    .run(totalItems, "Queued keyword (FTS) index backfill");
+
+  const job = getEmbeddingJob(Number(info.lastInsertRowid));
+  if (!job) throw new Error("Failed to create FTS embedding job");
+  publishJobEvent(SEARCH_STATUS_CHANNEL, true);
+  return job;
+}
+
+/** Whether a pending/running job already covers this concrete target. */
+export function hasOpenEmbeddingJobForTarget(
+  target: EmbeddingJobTarget,
+): boolean {
+  return getOpenJobForTarget(target) != null;
+}
+
+/**
+ * Enqueue a keyword-index backfill job when none is already open.
+ * Used by readiness scheduling — not by browse/list GETs.
+ */
+export function enqueueFtsBackfillJob(): EmbeddingJobRecord | null {
+  ensureJobRunner();
+  if (getOpenJobForTarget("fts")) return null;
+  const job = insertPendingFtsJob();
+  pumpQueue();
+  return getEmbeddingJob(job.id) ?? job;
+}
+
 function libraryItemCount(library: SearchLibrary): number {
   const table = library === "saves" ? "saved_items" : "liked_items";
   return (
@@ -581,6 +630,24 @@ async function runEmbeddingJobInline(
       message: `Rebuilt ${result.providers.join(", ")} for saves + likes (${result.items} items)`,
       finished: true,
     });
+  } else if (parsed.kind === "fts") {
+    const result = await rebuildKeywordIndexes({
+      onProgress,
+      shouldCancel: cancel,
+    });
+    const total = result.saves + result.likes;
+    clearJobProgressThrottle(jobId);
+    updateJob(jobId, {
+      state: "completed",
+      phase: "done",
+      processed: total,
+      total,
+      currentProvider: null,
+      message: result.rebuilt
+        ? `Rebuilt keyword indexes (saves ${result.saves}, likes ${result.likes})`
+        : `Keyword indexes already current (saves ${result.saves}, likes ${result.likes})`,
+      finished: true,
+    });
   } else {
     const result = await rebuildProviderIndex(
       parsed.library,
@@ -615,6 +682,7 @@ function jobTargetBlockReason(target: EmbeddingJobTarget): string | null {
       ? null
       : "No providers are enabled (and credentialed where required)";
   }
+  if (parsed.kind === "fts") return null;
   if (!isProviderConfigured(parsed.provider, parsed.library)) {
     return `${parsed.provider} is not enabled for ${parsed.library} — turn it on in Settings (and add credentials if needed) before reindexing`;
   }
