@@ -79,6 +79,9 @@ export type ProviderIndexStatusDto = {
   stored: EmbeddingProfileDto | null;
   expected: EmbeddingProfileDto | null;
   tableDimensions: number | null;
+  /** False when orphan / width / profile drift checks fail. */
+  integrityOk?: boolean;
+  integrityIssues?: string[];
   reindexWarning?: string | null;
   reindexStrongWarning?: string | null;
   reindexRefused?: boolean;

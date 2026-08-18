@@ -141,6 +141,9 @@ Settings hint for non-loopback / non-official-OpenAI hosts — see
 - Unexpected API failures return stable `code` + generic `error` (raw exception
   text stays in server logs). Domain errors (busy, multipart, validation) keep
   intentional client messages.
+- Browse filter dropdowns: `GET /api/saves?filters=1` and `GET /api/likes?filters=1`
+  return only `{ authors[, collections] }` (no full import history payload).
+  `GET /api/imports` still nests the same saves filters for the imports page.
 
 ## Job lifecycle / reset (Phase 3)
 
@@ -175,7 +178,16 @@ malformed-recoverable): `scripts/fixtures/parse-edges/` via `pnpm test:parse`.
 
 Not required for the A+ grade — track elsewhere if pursued:
 
-- Fuller 50k+ import RSS / wall-time baseline (beyond `bench:smoke`)
-- Fault injection (SIGKILL mid-embed / mid-import-write) + integrity_check
-- Property-based parser mutations (fast-check)
-- CI peak-RSS regression gate on the streaming-extract path
+- Fuller 50k+ import RSS / wall-time baseline (beyond `bench:smoke`) — **R3**
+- Property-based parser mutations (fast-check) — **R3**
+- Soak benchmark (250k-likes synthetic) — **R3**
+
+### R2 durability evidence (landed)
+
+Soak / chaos plan: `docs/runbook.md` § “Soak / chaos plan (R2 durability)”.
+
+- Fault injection: Vitest reclaim after simulated SIGKILL mid-embed / mid-import
+  + `PRAGMA integrity_check` (`src/lib/fault-inject.test.ts`)
+- Vec integrity beyond counts: orphan / width / profile checks on Indexes status
+  (`src/lib/search/vec-integrity.ts`, `integrityOk` on provider status)
+- CI peak-RSS gate: `pnpm bench:smoke` budgets streaming zip-extract RSS delta

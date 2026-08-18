@@ -295,7 +295,8 @@ export function getImportById(id: number) {
   return db.select().from(imports).where(eq(imports.id, id)).get();
 }
 
-export function listFilterOptions() {
+/** Distinct authors/collections for Saves browse filter dropdowns. */
+export function listSavesFilterOptions() {
   const db = getDb();
 
   const authors = db
@@ -316,6 +317,9 @@ export function listFilterOptions() {
 
   return { authors, collections };
 }
+
+/** Alias used by `GET /api/imports` (nested `filters` next to import history). */
+export const listFilterOptions = listSavesFilterOptions;
 
 export type LikesQuery = {
   q?: string;

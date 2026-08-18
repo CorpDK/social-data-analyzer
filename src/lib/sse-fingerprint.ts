@@ -45,6 +45,7 @@ function providerFp(p: ProviderIndexStatusDto): string {
     p.coveragePercent,
     p.indexPresent ? 1 : 0,
     p.reindexRefused ? 1 : 0,
+    p.integrityOk === false ? 0 : 1,
   ].join(":");
 }
 

@@ -175,5 +175,36 @@ pnpm bench:smoke   # synthetic parse / IN() chunk / zip-cap timings — no real 
 Do **not** run `pnpm reindex` or live embedding against a real user DB while
 validating quality gates.
 
-Beyond-A+ ideas (optional): fuller 50k RSS bench, fault-injection resume
-tests, property-based parser mutations — see `docs/contracts.md`.
+## Soak / chaos plan (R2 durability)
+
+Acceptance for crash-safety claims (Beyond A+ / Phase 6). Run these offline —
+no Voyage/Ollama, no real user DB.
+
+### Documented scenarios
+
+| Scenario | How to exercise | Pass criteria |
+|----------|-----------------|---------------|
+| SIGKILL mid-embed | Vitest `src/lib/fault-inject.test.ts` — leave `embedding_jobs` `running` with `processed < total`, reclaim as after restart | Job → `pending` with **processed preserved**; `PRAGMA integrity_check` = `ok` |
+| SIGKILL mid-import write | Same suite — committed batch rows + `import_jobs` `running`; reclaim with/without spool | Spool present → `pending`; missing spool → `failed`; integrity_check = `ok`; committed rows remain |
+| Vec integrity beyond counts | Vitest `src/lib/search/vec-integrity.test.ts` + Indexes status | Orphan vec rows / width drift demote health; `integrityOk` on provider status |
+| Streaming-extract RSS | `pnpm bench:smoke` (CI gate) | Peak RSS delta on synthetic zip extract stays under budget |
+
+### Operator manual checks
+
+```bash
+pnpm test:unit -- src/lib/fault-inject.test.ts src/lib/search/vec-integrity.test.ts
+pnpm bench:smoke
+# optional on a copy of the library DB (stop the app first):
+sqlite3 data/instagram-saves.db 'PRAGMA integrity_check;'
+```
+
+### Explicitly deferred to R3
+
+- Fuller **50k+** import RSS / wall-time baseline (`rss-50k`)
+- **250k** synthetic soak import + reindex (`soak-250k`)
+- Property-based parser mutations (`property-parse`)
+
+Long multi-hour soak harnesses are out of scope for R2; the table above is the
+first evidence slice that CI can keep green.
+
+Beyond-A+ scale work: see `docs/contracts.md` and remaining-work tracker R3.

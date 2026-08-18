@@ -27,6 +27,7 @@ import {
   vectorTableDimensions,
   type VectorIndexName,
 } from "./sync";
+import { assessVectorIntegrity } from "./vec-integrity";
 import {
   isProviderConfigured,
   isProviderEnabled,
@@ -79,6 +80,9 @@ export type ProviderIndexStatus = {
   stored: (EmbeddingProfile & { updatedAt: number | null }) | null;
   expected: EmbeddingProfile | null;
   tableDimensions: number | null;
+  /** False when orphan vec rows / width / profile drift detected. */
+  integrityOk: boolean;
+  integrityIssues: string[];
   /** Soft / strong reindex warnings for this library+provider (UI confirm). */
   reindexWarning: string | null;
   reindexStrongWarning: string | null;
@@ -205,12 +209,32 @@ export function getProviderIndexStatus(
     health = "ready";
   }
 
+  const integrity =
+    health === "unavailable" || health === "empty"
+      ? {
+          ok: true,
+          issues: [] as string[],
+        }
+      : assessVectorIntegrity(library, index, sqlite);
+  if (
+    !integrity.ok &&
+    (health === "ready" || health === "partial")
+  ) {
+    health = "stale";
+  }
+
   const memory: ReindexMemoryAssessment = assessReindexMemory(
     library,
     provider,
     total,
     memAvailableMb ?? readMemAvailableMb(),
   );
+
+  const hintBase = providerHint(provider, enabled, hasCredentials, health);
+  const hint =
+    !integrity.ok && integrity.issues[0]
+      ? `Vector integrity: ${integrity.issues[0]} — Rebuild recommended`
+      : hintBase;
 
   return {
     library,
@@ -225,7 +249,7 @@ export function getProviderIndexStatus(
     embeddedCount,
     coveragePercent: coveragePercent(embeddedCount, total),
     health,
-    hint: providerHint(provider, enabled, hasCredentials, health),
+    hint,
     stored: storedProfile
       ? {
           ...storedProfile,
@@ -234,6 +258,8 @@ export function getProviderIndexStatus(
       : null,
     expected,
     tableDimensions,
+    integrityOk: integrity.ok,
+    integrityIssues: integrity.issues,
     reindexWarning: memory.warning,
     reindexStrongWarning: memory.strongWarning,
     reindexRefused: memory.refuse,

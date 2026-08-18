@@ -1,6 +1,7 @@
 /**
- * Light Gate A+ bench: synthetic parse / IN() chunk / zip-cap paths.
- * Does NOT open the real library DB or call Voyage/Ollama.
+ * Light Gate A+ / R2 bench: synthetic parse / IN() chunk / zip-cap paths +
+ * streaming-extract peak-RSS gate. Does NOT open the real library DB or call
+ * Voyage/Ollama.
  *
  * Usage: pnpm bench:smoke
  */
@@ -20,8 +21,21 @@ import { ImportZipSafetyError } from "../src/lib/import/types";
 
 type BenchRow = { name: string; ms: number; detail: string };
 
+/** Absolute peak RSS during streaming extract must stay under this (CI gate). */
+export const ZIP_EXTRACT_PEAK_RSS_BUDGET_BYTES = 512 * 1024 * 1024;
+
+/**
+ * Delta above baseline RSS during extract — catches regressions that still
+ * fit under the absolute ceiling on large CI runners.
+ */
+export const ZIP_EXTRACT_RSS_DELTA_BUDGET_BYTES = 96 * 1024 * 1024;
+
 function msSince(start: number): number {
   return Math.round((performance.now() - start) * 10) / 10;
+}
+
+function formatMiB(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
 function syntheticSavedPostsJson(count: number): string {
@@ -108,6 +122,7 @@ async function main() {
   try {
     const okZipPath = path.join(tmpDir, "ok.zip");
     const bombZipPath = path.join(tmpDir, "bomb.zip");
+    const rssZipPath = path.join(tmpDir, "rss.zip");
     const okZip = new AdmZip();
     okZip.addFile(
       "your_instagram_activity/saved/saved_posts.json",
@@ -121,6 +136,16 @@ async function main() {
       Buffer.alloc(64 * 1024, 0x61), // 64 KiB
     );
     bombZip.writeZip(bombZipPath);
+
+    // ~2–4 MiB JSON payload — large enough that a non-streaming load would
+    // show up in the RSS delta budget, small enough for CI.
+    const RSS_EXTRACT_N = 8_000;
+    const rssZip = new AdmZip();
+    rssZip.addFile(
+      "your_instagram_activity/saved/saved_posts.json",
+      Buffer.from(syntheticSavedPostsJson(RSS_EXTRACT_N), "utf8"),
+    );
+    rssZip.writeZip(rssZipPath);
 
     t0 = performance.now();
     const extracted = await extractJsonFilesFromZip(okZipPath, {
@@ -157,6 +182,45 @@ async function main() {
       ms: msSince(t0),
       detail: "ImportZipSafetyError on over-cap entry (fail-closed)",
     });
+
+    // --- Peak RSS gate on streaming extract (R2 ci-rss) ---
+    if (typeof global.gc === "function") {
+      global.gc();
+    }
+    const baselineRss = process.memoryUsage().rss;
+    let peakRss = baselineRss;
+    const sample = setInterval(() => {
+      peakRss = Math.max(peakRss, process.memoryUsage().rss);
+    }, 5);
+    t0 = performance.now();
+    try {
+      await extractJsonFilesFromZip(rssZipPath, {
+        zipSafetyLimits: {
+          maxEntryUncompressedBytes: 32 * 1024 * 1024,
+          maxTotalExtractedJsonBytes: 64 * 1024 * 1024,
+        },
+      });
+    } finally {
+      clearInterval(sample);
+      peakRss = Math.max(peakRss, process.memoryUsage().rss);
+    }
+    const rssMs = msSince(t0);
+    const delta = Math.max(0, peakRss - baselineRss);
+    rows.push({
+      name: "zip_extract_rss",
+      ms: rssMs,
+      detail: `peak ${formatMiB(peakRss)} (Δ ${formatMiB(delta)}; budget Δ ${formatMiB(ZIP_EXTRACT_RSS_DELTA_BUDGET_BYTES)}, peak ${formatMiB(ZIP_EXTRACT_PEAK_RSS_BUDGET_BYTES)})`,
+    });
+    if (peakRss > ZIP_EXTRACT_PEAK_RSS_BUDGET_BYTES) {
+      throw new Error(
+        `zip_extract_rss: peak RSS ${formatMiB(peakRss)} exceeds absolute budget ${formatMiB(ZIP_EXTRACT_PEAK_RSS_BUDGET_BYTES)}`,
+      );
+    }
+    if (delta > ZIP_EXTRACT_RSS_DELTA_BUDGET_BYTES) {
+      throw new Error(
+        `zip_extract_rss: RSS delta ${formatMiB(delta)} exceeds budget ${formatMiB(ZIP_EXTRACT_RSS_DELTA_BUDGET_BYTES)} (streaming-extract regression?)`,
+      );
+    }
   } finally {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }

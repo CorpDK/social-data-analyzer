@@ -37,6 +37,9 @@ jobs:
           INSTAGRAM_SAVES_KEYRING: memory
           EMBEDDING_WORKER_INLINE: "1"
 
+      - name: Bench smoke (RSS gate)
+        run: pnpm bench:smoke
+
       - name: Build
         run: pnpm build
         env:

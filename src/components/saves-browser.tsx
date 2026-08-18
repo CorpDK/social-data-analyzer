@@ -169,11 +169,11 @@ export function SavesBrowser() {
 
     async function loadFilters() {
       try {
-        const res = await fetch("/api/imports");
+        const res = await fetch("/api/saves?filters=1");
         if (!res.ok) return;
-        const json = (await res.json()) as { filters?: FilterOptions };
+        const json = (await res.json()) as FilterOptions;
         if (!cancelled) {
-          setFilters(json.filters ?? { authors: [], collections: [] });
+          setFilters(json ?? { authors: [], collections: [] });
         }
       } catch {
         // Filter options are optional for rendering.
