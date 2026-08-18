@@ -23,8 +23,12 @@ import {
 import { IMPORT_JOBS_CHANNEL, publishJobEvent } from "../sse";
 import {
   isJobCancelRequested,
+  jobProgressPercent,
   reclaimOrphanedImportJobRows,
   runnerOwnsWork,
+  createJobSqlSet,
+  setJobColumn,
+  setJobFinishedAt,
   withPumpGuard,
 } from "../job-queue";
 import { jobLog } from "../job-log";
@@ -142,12 +146,11 @@ function mapJobRow(row: {
 }): ImportJobRecord {
   const total = row.total;
   const processed = row.processed;
-  const percent =
-    total <= 0
-      ? row.state === "completed"
-        ? 100
-        : 0
-      : Math.min(100, Math.round((processed / total) * 1000) / 10);
+  const percent = jobProgressPercent(
+    processed,
+    total,
+    row.state === "completed",
+  );
 
   return {
     id: row.id,
@@ -288,57 +291,38 @@ function updateJob(
     finished?: boolean;
   },
 ) {
-  const sets: string[] = ["updated_at = unixepoch()"];
-  const values: unknown[] = [];
+  const sql = createJobSqlSet();
 
-  if (patch.state !== undefined) {
-    sets.push("state = ?");
-    values.push(patch.state);
-  }
-  if (patch.phase !== undefined) {
-    sets.push("phase = ?");
-    values.push(patch.phase);
-  }
-  if (patch.processed !== undefined) {
-    sets.push("processed = ?");
-    values.push(patch.processed);
-  }
-  if (patch.total !== undefined) {
-    sets.push("total = ?");
-    values.push(patch.total);
-  }
-  if (patch.message !== undefined) {
-    sets.push("message = ?");
-    values.push(patch.message);
-  }
-  if (patch.error !== undefined) {
-    sets.push("error = ?");
-    values.push(patch.error);
-  }
+  setJobColumn(sql, "state", patch.state);
+  setJobColumn(sql, "phase", patch.phase);
+  setJobColumn(sql, "processed", patch.processed);
+  setJobColumn(sql, "total", patch.total);
+  setJobColumn(sql, "message", patch.message);
+  setJobColumn(sql, "error", patch.error);
   if (patch.details !== undefined) {
-    sets.push("details = ?");
-    values.push(patch.details ? JSON.stringify(patch.details) : null);
+    setJobColumn(
+      sql,
+      "details",
+      patch.details ? JSON.stringify(patch.details) : null,
+    );
   }
   if (patch.result !== undefined) {
-    sets.push("result = ?");
-    values.push(patch.result ? JSON.stringify(patch.result) : null);
+    setJobColumn(
+      sql,
+      "result",
+      patch.result ? JSON.stringify(patch.result) : null,
+    );
   }
-  if (patch.importId !== undefined) {
-    sets.push("import_id = ?");
-    values.push(patch.importId);
-  }
-  if (patch.contentHash !== undefined) {
-    sets.push("content_hash = ?");
-    values.push(patch.contentHash);
-  }
+  setJobColumn(sql, "import_id", patch.importId);
+  setJobColumn(sql, "content_hash", patch.contentHash);
   if (patch.finished) {
-    sets.push("finished_at = unixepoch()");
+    setJobFinishedAt(sql);
   }
 
-  values.push(id);
+  sql.values.push(id);
   getSqlite()
-    .prepare(`UPDATE import_jobs SET ${sets.join(", ")} WHERE id = ?`)
-    .run(...values);
+    .prepare(`UPDATE import_jobs SET ${sql.sets.join(", ")} WHERE id = ?`)
+    .run(...sql.values);
 
   const immediate = Boolean(
     patch.state !== undefined || patch.finished === true,

@@ -7,6 +7,7 @@ import {
   getVoyageSettings,
   setAppSetting,
   setProviderLibraryEnabled,
+  type AppSettingKey,
   type LibraryEnables,
   type PreferredProvider,
 } from "./app-settings";
@@ -144,33 +145,6 @@ export type UpdateSettingsKeysInput = {
   timeoutMs?: number | null;
 };
 
-function applySecretUpdate(account: KeyringAccount, value: string | null | undefined) {
-  if (value === undefined) return;
-  if (value === null || value.trim() === "") {
-    deleteKeyringSecret(account);
-    return;
-  }
-  setKeyringSecret(account, value);
-}
-
-function applyLibraryEnabledUpdate(
-  provider: PreferredProvider,
-  value: LibraryEnableUpdate,
-) {
-  if (value === undefined || value === null) return;
-  if (typeof value === "boolean") {
-    setProviderLibraryEnabled(provider, "saves", value);
-    setProviderLibraryEnabled(provider, "likes", value);
-    return;
-  }
-  if (typeof value.saves === "boolean") {
-    setProviderLibraryEnabled(provider, "saves", value.saves);
-  }
-  if (typeof value.likes === "boolean") {
-    setProviderLibraryEnabled(provider, "likes", value.likes);
-  }
-}
-
 const PROVIDERS = new Set<PreferredProvider>([
   "local",
   "ollama",
@@ -178,7 +152,76 @@ const PROVIDERS = new Set<PreferredProvider>([
   "voyage",
 ]);
 
-export function updateSettingsKeys(input: UpdateSettingsKeysInput): SettingsKeysResponse {
+type SecretCommit = { account: KeyringAccount; value: string | null };
+type SettingCommit = { key: AppSettingKey; value: string | null };
+type LibraryEnableCommit = {
+  provider: PreferredProvider;
+  saves?: boolean;
+  likes?: boolean;
+};
+
+/** Fully validated commit plan — applied atomically after validation. */
+export type SettingsKeysCommitPlan = {
+  secrets: SecretCommit[];
+  settings: SettingCommit[];
+  libraryEnables: LibraryEnableCommit[];
+};
+
+function parseLibraryEnableUpdate(
+  field: string,
+  value: LibraryEnableUpdate,
+): LibraryEnableCommit | null {
+  if (value === undefined || value === null) return null;
+  if (typeof value === "boolean") {
+    return {
+      provider: field as PreferredProvider,
+      saves: value,
+      likes: value,
+    };
+  }
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(
+      `${field} must be a boolean or { saves?: boolean, likes?: boolean }`,
+    );
+  }
+  const out: LibraryEnableCommit = {
+    provider: field as PreferredProvider,
+  };
+  if (value.saves !== undefined) {
+    if (typeof value.saves !== "boolean") {
+      throw new Error(`${field}.saves must be a boolean`);
+    }
+    out.saves = value.saves;
+  }
+  if (value.likes !== undefined) {
+    if (typeof value.likes !== "boolean") {
+      throw new Error(`${field}.likes must be a boolean`);
+    }
+    out.likes = value.likes;
+  }
+  if (out.saves === undefined && out.likes === undefined) return null;
+  return out;
+}
+
+function normalizeOptionalString(
+  value: string | null | undefined,
+): string | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "string") {
+    throw new Error("Expected a string or null");
+  }
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+/**
+ * Parse and validate the full settings+keys payload without writing.
+ * Throws on any invalid field so callers never partial-apply.
+ */
+export function validateSettingsKeysInput(
+  input: UpdateSettingsKeysInput,
+): SettingsKeysCommitPlan {
   const keyring = getKeyringStatus();
   const wantsSecret =
     input.openaiApiKey !== undefined ||
@@ -191,46 +234,65 @@ export function updateSettingsKeys(input: UpdateSettingsKeysInput): SettingsKeys
     );
   }
 
-  // Secrets never flip enable flags — credentials ≠ available index.
-  applySecretUpdate("openai", input.openaiApiKey);
-  applySecretUpdate("voyage", input.voyageApiKey);
-  applySecretUpdate("ollama", input.ollamaApiKey);
+  const secrets: SecretCommit[] = [];
+  if (input.openaiApiKey !== undefined) {
+    secrets.push({
+      account: "openai",
+      value: normalizeOptionalString(input.openaiApiKey) ?? null,
+    });
+  }
+  if (input.voyageApiKey !== undefined) {
+    secrets.push({
+      account: "voyage",
+      value: normalizeOptionalString(input.voyageApiKey) ?? null,
+    });
+  }
+  if (input.ollamaApiKey !== undefined) {
+    secrets.push({
+      account: "ollama",
+      value: normalizeOptionalString(input.ollamaApiKey) ?? null,
+    });
+  }
+
+  const settings: SettingCommit[] = [];
 
   if (input.ollamaBaseUrl !== undefined) {
-    const url = input.ollamaBaseUrl?.trim() || null;
-    setAppSetting("ollama_base_url", url);
+    settings.push({
+      key: "ollama_base_url",
+      value: normalizeOptionalString(input.ollamaBaseUrl) ?? null,
+    });
   }
   if (input.ollamaModel !== undefined) {
-    setAppSetting(
-      "ollama_embedding_model",
-      input.ollamaModel?.trim() || null,
-    );
+    settings.push({
+      key: "ollama_embedding_model",
+      value: normalizeOptionalString(input.ollamaModel) ?? null,
+    });
   }
-
-  applyLibraryEnabledUpdate("local", input.localEnabled);
-  applyLibraryEnabledUpdate("ollama", input.ollamaEnabled);
-  applyLibraryEnabledUpdate("openai", input.openaiEnabled);
-  applyLibraryEnabledUpdate("voyage", input.voyageEnabled);
-
   if (input.openaiBaseUrl !== undefined) {
-    setAppSetting("openai_base_url", input.openaiBaseUrl?.trim() || null);
+    settings.push({
+      key: "openai_base_url",
+      value: normalizeOptionalString(input.openaiBaseUrl) ?? null,
+    });
   }
   if (input.openaiModel !== undefined) {
-    setAppSetting(
-      "openai_embedding_model",
-      input.openaiModel?.trim() || null,
-    );
+    settings.push({
+      key: "openai_embedding_model",
+      value: normalizeOptionalString(input.openaiModel) ?? null,
+    });
   }
   if (input.voyageModel !== undefined) {
-    setAppSetting("voyage_model", input.voyageModel?.trim() || null);
+    settings.push({
+      key: "voyage_model",
+      value: normalizeOptionalString(input.voyageModel) ?? null,
+    });
   }
 
   if (input.preferredProvider !== undefined) {
     const raw = input.preferredProvider;
     if (raw === null || raw === "") {
-      setAppSetting("embedding_provider", null);
-    } else if (PROVIDERS.has(raw)) {
-      setAppSetting("embedding_provider", raw);
+      settings.push({ key: "embedding_provider", value: null });
+    } else if (typeof raw === "string" && PROVIDERS.has(raw as PreferredProvider)) {
+      settings.push({ key: "embedding_provider", value: raw });
     } else {
       throw new Error(
         "preferredProvider must be one of: local, ollama, openai, voyage (or empty for auto)",
@@ -240,15 +302,71 @@ export function updateSettingsKeys(input: UpdateSettingsKeysInput): SettingsKeys
 
   if (input.timeoutMs !== undefined) {
     if (input.timeoutMs === null) {
-      setAppSetting("embedding_timeout_ms", null);
+      settings.push({ key: "embedding_timeout_ms", value: null });
     } else {
       const ms = Number(input.timeoutMs);
       if (!Number.isFinite(ms) || ms <= 0) {
         throw new Error("timeoutMs must be a positive number");
       }
-      setAppSetting("embedding_timeout_ms", String(Math.round(ms)));
+      settings.push({
+        key: "embedding_timeout_ms",
+        value: String(Math.round(ms)),
+      });
     }
   }
 
+  const libraryEnables: LibraryEnableCommit[] = [];
+  const enableFields: Array<{
+    field: PreferredProvider;
+    value: LibraryEnableUpdate;
+  }> = [
+    { field: "local", value: input.localEnabled },
+    { field: "ollama", value: input.ollamaEnabled },
+    { field: "openai", value: input.openaiEnabled },
+    { field: "voyage", value: input.voyageEnabled },
+  ];
+  for (const { field, value } of enableFields) {
+    const parsed = parseLibraryEnableUpdate(field, value);
+    if (parsed) {
+      parsed.provider = field;
+      libraryEnables.push(parsed);
+    }
+  }
+
+  return { secrets, settings, libraryEnables };
+}
+
+function applySettingsKeysCommitPlan(plan: SettingsKeysCommitPlan): void {
+  for (const secret of plan.secrets) {
+    if (secret.value === null || secret.value === "") {
+      deleteKeyringSecret(secret.account);
+    } else {
+      setKeyringSecret(secret.account, secret.value);
+    }
+  }
+
+  for (const setting of plan.settings) {
+    setAppSetting(setting.key, setting.value);
+  }
+
+  for (const enable of plan.libraryEnables) {
+    if (typeof enable.saves === "boolean") {
+      setProviderLibraryEnabled(enable.provider, "saves", enable.saves);
+    }
+    if (typeof enable.likes === "boolean") {
+      setProviderLibraryEnabled(enable.provider, "likes", enable.likes);
+    }
+  }
+}
+
+/**
+ * Validate the full payload, then commit to SQLite/keyring.
+ * No writes occur if validation fails — no partial apply.
+ */
+export function updateSettingsKeys(
+  input: UpdateSettingsKeysInput,
+): SettingsKeysResponse {
+  const plan = validateSettingsKeysInput(input);
+  applySettingsKeysCommitPlan(plan);
   return getSettingsKeysStatus();
 }

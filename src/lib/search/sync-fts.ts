@@ -40,7 +40,7 @@ export function upsertItemFts(
     );
 }
 
-export function upsertLikedItemFtsDoc(
+export function upsertLikedItemFts(
   itemId: number,
   item: LikedSearchableItem,
   sqlite: Database.Database = getSqlite(),
@@ -62,6 +62,9 @@ export function upsertLikedItemFtsDoc(
       doc.source,
     );
 }
+
+/** @deprecated Alias — use upsertLikedItemFts. */
+export const upsertLikedItemFtsDoc = upsertLikedItemFts;
 
 export function removeItemSearch(
   itemId: number,

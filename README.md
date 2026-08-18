@@ -17,7 +17,7 @@ Local Next.js app that imports official Instagram data exports, stores saved pos
 - Deduping by media shortcode (and identical file content hash)
 - Periodic re-imports: adds new saves/likes, updates metadata/collections, skips unchanged
 - Overview stats, filters by type/creator/collection
-- **Schema explorer** (`/schemas`): structural schemas for every JSON file in imported zips (types/keys/nesting only — not row payloads). Aggregated **All** view or per-import by filename. Captured automatically on import into `import_schemas`; older imports need a re-import to populate.
+- **Schema explorer** (`/schemas`): structural schemas for every JSON file in imported zips (types/keys/nesting only — not row payloads or string samples). Aggregated **All** view or per-import by filename. Captured automatically on import into `import_schemas`; older imports need a re-import to populate.
 
 ## Setup
 

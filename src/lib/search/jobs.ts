@@ -32,8 +32,12 @@ import {
 import { configuredProviders, isProviderConfigured } from "./providers";
 import {
   isJobCancelRequested,
+  jobProgressPercent,
   reclaimOrphanedEmbeddingJobRows,
   runnerOwnsWork,
+  createJobSqlSet,
+  setJobColumn,
+  setJobFinishedAt,
   withPumpGuard,
 } from "../job-queue";
 import { jobLog } from "../job-log";
@@ -43,7 +47,6 @@ import {
   MAX_EMBEDDING_WORKER_ATTEMPTS,
   PermanentEmbeddingJobError,
   planWorkerRetry,
-  type WorkerExit,
 } from "./worker-policy";
 
 export {
@@ -225,12 +228,11 @@ function mapJobRow(row: {
 }): EmbeddingJobRecord {
   const total = row.total;
   const processed = row.processed;
-  const percent =
-    total <= 0
-      ? row.state === "completed"
-        ? 100
-        : 0
-      : Math.min(100, Math.round((processed / total) * 1000) / 10);
+  const percent = jobProgressPercent(
+    processed,
+    total,
+    row.state === "completed",
+  );
 
   return {
     id: row.id,
@@ -388,53 +390,28 @@ function updateJob(
     workerPid?: number | null;
   },
 ) {
-  const sets: string[] = ["updated_at = unixepoch()"];
-  const values: unknown[] = [];
+  const sql = createJobSqlSet();
 
-  if (patch.state !== undefined) {
-    sets.push("state = ?");
-    values.push(patch.state);
-  }
-  if (patch.phase !== undefined) {
-    sets.push("phase = ?");
-    values.push(patch.phase);
-  }
-  if (patch.processed !== undefined) {
-    sets.push("processed = ?");
-    values.push(patch.processed);
-  }
-  if (patch.total !== undefined) {
-    sets.push("total = ?");
-    values.push(patch.total);
-  }
-  if (patch.currentProvider !== undefined) {
-    sets.push("current_provider = ?");
-    values.push(patch.currentProvider);
-  }
-  if (patch.error !== undefined) {
-    sets.push("error = ?");
-    values.push(patch.error);
-  }
-  if (patch.message !== undefined) {
-    sets.push("message = ?");
-    values.push(patch.message);
-  }
-  if (patch.workerPid !== undefined) {
-    sets.push("worker_pid = ?");
-    values.push(patch.workerPid);
-  }
+  setJobColumn(sql, "state", patch.state);
+  setJobColumn(sql, "phase", patch.phase);
+  setJobColumn(sql, "processed", patch.processed);
+  setJobColumn(sql, "total", patch.total);
+  setJobColumn(sql, "current_provider", patch.currentProvider);
+  setJobColumn(sql, "error", patch.error);
+  setJobColumn(sql, "message", patch.message);
+  setJobColumn(sql, "worker_pid", patch.workerPid);
   if (patch.finished) {
-    sets.push("finished_at = unixepoch()");
+    setJobFinishedAt(sql);
     // Terminal rows must not keep a stale PID for the next reclaim pass.
     if (patch.workerPid === undefined) {
-      sets.push("worker_pid = NULL");
+      sql.sets.push("worker_pid = NULL");
     }
   }
 
-  values.push(id);
+  sql.values.push(id);
   getSqlite()
-    .prepare(`UPDATE embedding_jobs SET ${sets.join(", ")} WHERE id = ?`)
-    .run(...values);
+    .prepare(`UPDATE embedding_jobs SET ${sql.sets.join(", ")} WHERE id = ?`)
+    .run(...sql.values);
 
   const immediate = Boolean(
     patch.state !== undefined || patch.finished === true,

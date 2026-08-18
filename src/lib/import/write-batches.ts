@@ -1,9 +1,8 @@
 import { eq } from "drizzle-orm";
 import { getDb, getSqlite, schema } from "../db";
 import { IMPORT_WRITE_BATCH_SIZE } from "../import-limits";
-import { upsertLikedItemFts } from "../likes-fts";
 import type { ParsedLikedItem, ParsedSavedItem } from "../parse-export";
-import { upsertItemFts } from "../search/sync";
+import { upsertItemFts, upsertLikedItemFts } from "../search/sync";
 import type { FileSchemaCatalogEntry } from "../json-schema-infer";
 import { emitProgress, throwIfCancelled, yieldToEventLoop } from "./progress";
 import type { ImportRunOptions } from "./types";

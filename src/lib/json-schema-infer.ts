@@ -1,6 +1,7 @@
 /**
  * Lightweight structural schema inference for Instagram export JSON files.
  * Stores types/keys/nesting only — never large payloads or PII-heavy content.
+ * Primitive string samples are never persisted (structural-only claim).
  */
 
 /** Pathological-depth guard only (JSON cannot cycle). Practical nesting is uncapped. */
@@ -11,7 +12,8 @@ export const SCHEMA_SAFETY_MAX_DEPTH = 256;
  * If length ≤ 20, use every element.
  */
 export const SCHEMA_ARRAY_SAMPLE = 20;
-export const SCHEMA_STRING_SAMPLE_MAX = 48;
+/** @deprecated Strings are never sampled; kept for callers that referenced the old cap. */
+export const SCHEMA_STRING_SAMPLE_MAX = 0;
 
 const ARRAY_SAMPLE_FIRST = 7;
 const ARRAY_SAMPLE_LAST = 7;
@@ -35,8 +37,11 @@ export type JsonSchemaNode = {
   arrayLength?: { min: number; max: number; sample: number };
   /** Whether sampled array elements share one top-level type */
   homogeneous?: boolean;
-  /** Tiny truncated example (type-only preferred; never long strings) */
-  sample?: string | number | boolean | null;
+  /**
+   * Tiny non-string example only (number / boolean / null).
+   * Strings are never stored — exports contain usernames, URLs, captions.
+   */
+  sample?: number | boolean | null;
   /** Present when merging schemas where a key is missing in some samples */
   optional?: boolean;
   /** Safety depth ceiling hit (pathological nesting only) */
@@ -84,22 +89,50 @@ function mergeTypes(
   return list.length === 1 ? list[0]! : list;
 }
 
-function truncateSample(value: unknown): string | number | boolean | null | undefined {
+function truncateSample(
+  value: unknown,
+): number | boolean | null | undefined {
   if (value === null) return null;
-  if (typeof value === "boolean" || typeof value === "number") {
-    if (typeof value === "number" && !Number.isFinite(value)) return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") {
+    if (!Number.isFinite(value)) return undefined;
     return value;
   }
-  if (typeof value === "string") {
-    const cleaned = value.replace(/\s+/g, " ").trim();
-    if (!cleaned) return "";
-    // Avoid storing URLs / long free text — keep only a short shape hint.
-    if (cleaned.length > SCHEMA_STRING_SAMPLE_MAX) {
-      return `${cleaned.slice(0, SCHEMA_STRING_SAMPLE_MAX)}…`;
-    }
-    return cleaned;
-  }
+  // Never persist string samples (usernames, URLs, captions, etc.).
   return undefined;
+}
+
+/**
+ * Strip any string (or non-primitive) samples from a schema tree — for display
+ * of legacy rows written before structural-only scrubbing.
+ */
+export function scrubSchemaSamples(node: JsonSchemaNode): JsonSchemaNode {
+  const out: JsonSchemaNode = { type: node.type };
+  if (node.truncated) out.truncated = true;
+  if (node.optional) out.optional = true;
+  if (node.homogeneous !== undefined) out.homogeneous = node.homogeneous;
+  if (node.arrayLength) out.arrayLength = { ...node.arrayLength };
+
+  if (
+    node.sample !== undefined &&
+    (typeof node.sample === "number" ||
+      typeof node.sample === "boolean" ||
+      node.sample === null)
+  ) {
+    out.sample = node.sample;
+  }
+
+  if (node.keys) {
+    const keys: Record<string, JsonSchemaNode> = {};
+    for (const [k, child] of Object.entries(node.keys)) {
+      keys[k] = scrubSchemaSamples(child);
+    }
+    out.keys = keys;
+  }
+  if (node.items) {
+    out.items = scrubSchemaSamples(node.items);
+  }
+  return out;
 }
 
 /**
@@ -206,23 +239,34 @@ export function mergeSchemaNodes(
   if (a.truncated || b.truncated) out.truncated = true;
   if (a.optional || b.optional) out.optional = true;
 
-  // Prefer keeping a tiny sample when types agree on a primitive.
+  // Prefer keeping a tiny non-string sample when types agree on a primitive.
   const aTypes = asTypeList(a.type);
   const bTypes = asTypeList(b.type);
-  if (
+  const aSampleOk =
     a.sample !== undefined &&
+    (typeof a.sample === "number" ||
+      typeof a.sample === "boolean" ||
+      a.sample === null);
+  const bSampleOk =
     b.sample !== undefined &&
+    (typeof b.sample === "number" ||
+      typeof b.sample === "boolean" ||
+      b.sample === null);
+  if (
+    aSampleOk &&
+    bSampleOk &&
     aTypes.length === 1 &&
     bTypes.length === 1 &&
     aTypes[0] === bTypes[0] &&
     aTypes[0] !== "object" &&
-    aTypes[0] !== "array"
+    aTypes[0] !== "array" &&
+    aTypes[0] !== "string"
   ) {
     out.sample = a.sample;
-  } else if (a.sample !== undefined && b.sample === undefined) {
-    out.sample = a.sample;
-  } else if (b.sample !== undefined && a.sample === undefined) {
-    out.sample = b.sample;
+  } else if (aSampleOk && !bSampleOk) {
+    out.sample = a.sample as number | boolean | null;
+  } else if (bSampleOk && !aSampleOk) {
+    out.sample = b.sample as number | boolean | null;
   }
 
   const aHasObj = aTypes.includes("object") || Boolean(a.keys);

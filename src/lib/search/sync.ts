@@ -28,7 +28,7 @@ import {
 import {
   ftsCount,
   upsertItemFts,
-  upsertLikedItemFtsDoc,
+  upsertLikedItemFts,
 } from "./sync-fts";
 import {
   embeddingProfilesMatch,
@@ -71,6 +71,7 @@ export {
   removeItemSearch,
   removeLikedItemSearch,
   upsertItemFts,
+  upsertLikedItemFts,
   upsertLikedItemFtsDoc,
 } from "./sync-fts";
 export {
@@ -717,7 +718,7 @@ export async function rebuildConfiguredIndexes(options?: {
     sqlite.exec(`DELETE FROM saved_items_fts`);
     for (const row of savesRows) upsertItemFts(row.id, row, sqlite);
     sqlite.exec(`DELETE FROM liked_items_fts`);
-    for (const row of likesRows) upsertLikedItemFtsDoc(row.id, row, sqlite);
+    for (const row of likesRows) upsertLikedItemFts(row.id, row, sqlite);
   })();
 
   const remoteUpdated: string[] = [];
@@ -819,7 +820,7 @@ export async function rebuildKeywordIndexes(options?: {
       for (const row of savesRows) upsertItemFts(row.id, row, sqlite);
     }
     if (likesGap) {
-      for (const row of likesRows) upsertLikedItemFtsDoc(row.id, row, sqlite);
+      for (const row of likesRows) upsertLikedItemFts(row.id, row, sqlite);
     }
   })();
 
@@ -848,7 +849,7 @@ export function ensureSearchIndexBackfill() {
 
   if (likesRows.length > 0 && ftsCount("likes", sqlite) < likesRows.length) {
     sqlite.transaction(() => {
-      for (const row of likesRows) upsertLikedItemFtsDoc(row.id, row, sqlite);
+      for (const row of likesRows) upsertLikedItemFts(row.id, row, sqlite);
     })();
   }
 

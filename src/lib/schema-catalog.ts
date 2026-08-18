@@ -2,6 +2,7 @@ import { desc, eq, sql } from "drizzle-orm";
 import { getDb, schema } from "./db";
 import {
   mergeSchemaNodes,
+  scrubSchemaSamples,
   type JsonPrimitiveType,
   type JsonSchemaNode,
 } from "./json-schema-infer";
@@ -48,7 +49,8 @@ function parseStoredSchema(schemaJson: string): {
       parseError?: string | null;
     };
     return {
-      schema: parsed.schema ?? null,
+      // Scrub legacy string samples so the UI never displays export PII.
+      schema: parsed.schema ? scrubSchemaSamples(parsed.schema) : null,
       parseError: parsed.parseError ?? null,
     };
   } catch {

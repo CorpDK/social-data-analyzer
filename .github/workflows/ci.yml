@@ -8,7 +8,7 @@ on:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +27,9 @@ jobs:
       - name: Typecheck
         run: pnpm exec tsc --noEmit
 
+      - name: Lint
+        run: pnpm lint
+
       - name: Parse / job suites
         run: pnpm test:parse
         env:
@@ -34,10 +37,11 @@ jobs:
           INSTAGRAM_SAVES_KEYRING: memory
           EMBEDDING_WORKER_INLINE: "1"
 
-      # Lint is advisory for now (pre-existing debt). Fail CI on tsc + tests first.
-      - name: Lint (non-blocking)
-        continue-on-error: true
-        run: pnpm lint
+      - name: Build
+        run: pnpm build
+        env:
+          INSTAGRAM_SAVES_KEYRING: memory
+          EMBEDDING_WORKER_INLINE: "1"
 
   unit:
     runs-on: ubuntu-latest

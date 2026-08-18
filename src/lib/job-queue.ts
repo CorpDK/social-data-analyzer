@@ -1,6 +1,9 @@
 /**
  * Shared job-queue primitives for import and embedding runners.
  * Does not unify process models: embedding may use a child worker; import stays in-process.
+ *
+ * Row mapping / UPDATE SQL helpers live here so both runners share percent + SET
+ * builders without forcing a single JobStore process model (see Gate A job-queue).
  */
 
 import fs from "node:fs";
@@ -9,6 +12,44 @@ import {
   defaultProcessProbe,
   type ProcessProbe,
 } from "./job-process";
+
+/**
+ * Display percent for job progress rows (one decimal when total > 0).
+ * Completed jobs with unknown totals report 100.
+ */
+export function jobProgressPercent(
+  processed: number,
+  total: number,
+  completed: boolean,
+): number {
+  if (total <= 0) return completed ? 100 : 0;
+  return Math.min(100, Math.round((processed / total) * 1000) / 10);
+}
+
+/** Mutable SET clause builder for job UPDATE statements. */
+export type JobSqlSet = {
+  sets: string[];
+  values: unknown[];
+};
+
+export function createJobSqlSet(): JobSqlSet {
+  return { sets: ["updated_at = unixepoch()"], values: [] };
+}
+
+/** Append `column = ?` when value is defined (including null). */
+export function setJobColumn(
+  sql: JobSqlSet,
+  column: string,
+  value: unknown | undefined,
+): void {
+  if (value === undefined) return;
+  sql.sets.push(`${column} = ?`);
+  sql.values.push(value);
+}
+
+export function setJobFinishedAt(sql: JobSqlSet): void {
+  sql.sets.push("finished_at = unixepoch()");
+}
 
 /** Minimal pump state shared by both runners. */
 export type PumpGuardState = {

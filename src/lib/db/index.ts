@@ -16,12 +16,16 @@ import {
 } from "../job-queue";
 import {
   SCHEMA_VERSION,
-  VEC_DIMENSIONS,
   ensureDatabaseSchema,
 } from "./ddl";
 import * as schema from "./schema";
 
-export { SCHEMA_VERSION, VEC_DIMENSIONS, ensureDatabaseSchema } from "./ddl";
+export {
+  SCHEMA_VERSION,
+  VEC_DIMENSIONS,
+  ensureDatabaseSchema,
+  recreateEmptySearchIndexes,
+} from "./ddl";
 
 const dataDir = path.join(process.cwd(), "data");
 const dbPath =
@@ -134,53 +138,6 @@ export function getDb() {
     globalForDb.db = drizzle(getSqlite(), { schema });
   }
   return globalForDb.db;
-}
-
-/**
- * Drop and recreate empty FTS + vector indexes so the app stays usable after
- * a content wipe. Does not touch `app_settings` or keyring secrets.
- */
-export function recreateEmptySearchIndexes(
-  sqlite: Database.Database = getSqlite(),
-) {
-  sqlite.exec(`
-    DROP TABLE IF EXISTS saved_items_fts;
-    CREATE VIRTUAL TABLE saved_items_fts USING fts5(
-      author_username,
-      shortcode,
-      media_key,
-      media_type,
-      collections,
-      tokenize = 'porter unicode61 remove_diacritics 1'
-    );
-  `);
-
-  sqlite.exec(`
-    DROP TABLE IF EXISTS liked_items_fts;
-    CREATE VIRTUAL TABLE liked_items_fts USING fts5(
-      author_username,
-      shortcode,
-      media_key,
-      media_type,
-      source,
-      tokenize = 'porter unicode61 remove_diacritics 1'
-    );
-  `);
-
-  for (const index of ["local", "ollama", "openai", "voyage"] as const) {
-    for (const prefix of ["saved_items_vec", "liked_items_vec"] as const) {
-      const table = `${prefix}_${index}`;
-      sqlite.exec(`
-        DROP TABLE IF EXISTS ${table};
-        CREATE VIRTUAL TABLE ${table} USING vec0(
-          item_id INTEGER PRIMARY KEY,
-          embedding FLOAT[${VEC_DIMENSIONS}]
-        );
-      `);
-    }
-  }
-
-  sqlite.exec(`DROP TABLE IF EXISTS saved_items_vec_remote;`);
 }
 
 export { schema };

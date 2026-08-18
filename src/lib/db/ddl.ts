@@ -215,6 +215,47 @@ function ensureImportJobsTable(sqlite: Database.Database) {
   sqlite.exec(IMPORT_JOBS_SCHEMA);
 }
 
+const FTS_TOKENIZE = "porter unicode61 remove_diacritics 1";
+
+/** Single-source FTS5 DDL for saves (used by ensure + recreate). */
+export const SAVED_ITEMS_FTS_CREATE_SQL = `CREATE VIRTUAL TABLE saved_items_fts USING fts5(
+  author_username,
+  shortcode,
+  media_key,
+  media_type,
+  collections,
+  tokenize = '${FTS_TOKENIZE}'
+)`;
+
+/** Single-source FTS5 DDL for likes (used by ensure + recreate). */
+export const LIKED_ITEMS_FTS_CREATE_SQL = `CREATE VIRTUAL TABLE liked_items_fts USING fts5(
+  author_username,
+  shortcode,
+  media_key,
+  media_type,
+  source,
+  tokenize = '${FTS_TOKENIZE}'
+)`;
+
+const VECTOR_INDEXES = ["local", "ollama", "openai", "voyage"] as const;
+
+function vectorTableCreateSql(
+  library: "saves" | "likes",
+  index: (typeof VECTOR_INDEXES)[number],
+): { table: string; sql: string } {
+  const table =
+    library === "saves"
+      ? `saved_items_vec_${index}`
+      : `liked_items_vec_${index}`;
+  return {
+    table,
+    sql: `CREATE VIRTUAL TABLE ${table} USING vec0(
+  item_id INTEGER PRIMARY KEY,
+  embedding FLOAT[${VEC_DIMENSIONS}]
+)`,
+  };
+}
+
 function ensureSearchSchema(sqlite: Database.Database) {
   const legacyRemoteProvider = migrateEmbeddingProfilesTable(sqlite);
 
@@ -225,16 +266,7 @@ function ensureSearchSchema(sqlite: Database.Database) {
     .get();
 
   if (!ftsExists) {
-    sqlite.exec(`
-      CREATE VIRTUAL TABLE saved_items_fts USING fts5(
-        author_username,
-        shortcode,
-        media_key,
-        media_type,
-        collections,
-        tokenize = 'porter unicode61 remove_diacritics 1'
-      );
-    `);
+    sqlite.exec(SAVED_ITEMS_FTS_CREATE_SQL);
   }
 
   const likesFtsExists = sqlite
@@ -244,23 +276,43 @@ function ensureSearchSchema(sqlite: Database.Database) {
     .get();
 
   if (!likesFtsExists) {
-    sqlite.exec(`
-      CREATE VIRTUAL TABLE liked_items_fts USING fts5(
-        author_username,
-        shortcode,
-        media_key,
-        media_type,
-        source,
-        tokenize = 'porter unicode61 remove_diacritics 1'
-      );
-    `);
+    sqlite.exec(LIKED_ITEMS_FTS_CREATE_SQL);
   }
 
-  for (const index of ["local", "ollama", "openai", "voyage"] as const) {
+  for (const index of VECTOR_INDEXES) {
     ensureVectorTable(sqlite, "saves", index);
     ensureVectorTable(sqlite, "likes", index);
   }
   migrateLegacyRemoteVectorTable(sqlite, legacyRemoteProvider);
+}
+
+/**
+ * Drop and recreate empty FTS + vector indexes so the app stays usable after
+ * a content wipe. Uses the same DDL strings as `ensureSearchSchema`.
+ * Does not touch `app_settings` or keyring secrets.
+ */
+export function recreateEmptySearchIndexes(sqlite: Database.Database) {
+  sqlite.exec(`
+    DROP TABLE IF EXISTS saved_items_fts;
+    ${SAVED_ITEMS_FTS_CREATE_SQL};
+  `);
+
+  sqlite.exec(`
+    DROP TABLE IF EXISTS liked_items_fts;
+    ${LIKED_ITEMS_FTS_CREATE_SQL};
+  `);
+
+  for (const index of VECTOR_INDEXES) {
+    for (const library of ["saves", "likes"] as const) {
+      const { table, sql } = vectorTableCreateSql(library, index);
+      sqlite.exec(`
+        DROP TABLE IF EXISTS ${table};
+        ${sql};
+      `);
+    }
+  }
+
+  sqlite.exec(`DROP TABLE IF EXISTS saved_items_vec_remote;`);
 }
 
 const PROFILE_INDEX_CHECK =
@@ -378,12 +430,9 @@ function migrateEmbeddingProfilesTable(
 function ensureVectorTable(
   sqlite: Database.Database,
   library: "saves" | "likes",
-  index: "local" | "ollama" | "openai" | "voyage",
+  index: (typeof VECTOR_INDEXES)[number],
 ) {
-  const table =
-    library === "saves"
-      ? `saved_items_vec_${index}`
-      : `liked_items_vec_${index}`;
+  const { table, sql } = vectorTableCreateSql(library, index);
   const profileKey = library === "saves" ? index : `likes-${index}`;
   const definition = sqlite
     .prepare(
@@ -398,10 +447,7 @@ function ensureVectorTable(
   if (!definition || dimensions !== VEC_DIMENSIONS) {
     sqlite.exec(`
       DROP TABLE IF EXISTS ${table};
-      CREATE VIRTUAL TABLE ${table} USING vec0(
-        item_id INTEGER PRIMARY KEY,
-        embedding FLOAT[${VEC_DIMENSIONS}]
-      );
+      ${sql};
       DELETE FROM embedding_index_profiles WHERE index_name = '${profileKey}';
     `);
   }
