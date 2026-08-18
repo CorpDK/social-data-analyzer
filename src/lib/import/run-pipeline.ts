@@ -26,9 +26,9 @@ import {
   syncEmbeddingsAfterImport,
 } from "./run-helpers";
 import {
-  countPersistedImportRows,
   formatPartialImportMessage,
 } from "./partial-accounting";
+import { rollbackImportInserts } from "./rollback-partial";
 import { emitProgress, throwIfCancelled } from "./progress";
 import {
   processZipExportStreaming,
@@ -174,22 +174,27 @@ async function finishSuccessfulImport(args: {
       log: completedLog,
     };
   } catch (error) {
-    // Batches commit as they go — count what actually landed, never report zeroes.
-    const persisted = countPersistedImportRows(draftId);
+    // Batches commit as they go — roll back inserts so aborted imports do not
+    // leave durable new catalog rows. Residual last_seen-only updates may remain.
+    const rollback = rollbackImportInserts(draftId);
+    const residual = rollback.after;
     const baseMessage =
       error instanceof ImportCancelledError
         ? "Import cancelled"
         : error instanceof Error
           ? error.message
           : "Import failed unexpectedly";
-    const message = formatPartialImportMessage(baseMessage, persisted);
+    const message = formatPartialImportMessage(baseMessage, residual, {
+      rolledBackSaves: rollback.savesDeleted,
+      rolledBackLikes: rollback.likesDeleted,
+    });
 
     db.update(imports)
       .set({
         status: "failed",
         error: message,
-        itemsAdded: persisted.itemsAdded,
-        itemsUpdated: persisted.itemsUpdated,
+        itemsAdded: residual.itemsAdded,
+        itemsUpdated: residual.itemsUpdated,
         itemsSkipped: 0,
       })
       .where(eq(imports.id, draftId))
@@ -198,20 +203,20 @@ async function finishSuccessfulImport(args: {
     await emitProgress(options?.onProgress, {
       phase: "failed",
       processed:
-        persisted.itemsAdded +
-        persisted.itemsUpdated +
-        persisted.likesAdded +
-        persisted.likesUpdated,
+        residual.itemsAdded +
+        residual.itemsUpdated +
+        residual.likesAdded +
+        residual.likesUpdated,
       total: Math.max(1, items.length + liked.length),
       message,
       details: {
         importId: draftId,
         itemsParsed: items.length,
         likesParsed: liked.length,
-        itemsAdded: persisted.itemsAdded,
-        itemsUpdated: persisted.itemsUpdated,
-        likesAdded: persisted.likesAdded,
-        likesUpdated: persisted.likesUpdated,
+        itemsAdded: residual.itemsAdded,
+        itemsUpdated: residual.itemsUpdated,
+        likesAdded: residual.likesAdded,
+        likesUpdated: residual.likesUpdated,
       },
     });
 
@@ -226,12 +231,12 @@ async function finishSuccessfulImport(args: {
       filename,
       contentHash,
       itemsFound: items.length,
-      itemsAdded: persisted.itemsAdded,
-      itemsUpdated: persisted.itemsUpdated,
+      itemsAdded: residual.itemsAdded,
+      itemsUpdated: residual.itemsUpdated,
       itemsSkipped: 0,
       likesFound: liked.length,
-      likesAdded: persisted.likesAdded,
-      likesUpdated: persisted.likesUpdated,
+      likesAdded: residual.likesAdded,
+      likesUpdated: residual.likesUpdated,
       likesSkipped: 0,
       message,
     };

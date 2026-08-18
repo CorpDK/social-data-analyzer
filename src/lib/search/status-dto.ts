@@ -110,6 +110,14 @@ export type SearchIndexStatusDto = {
     likes: LibraryIndexStatusDto;
   };
   host: HostMemoryStatusDto;
+  /** COUNT-only coverage gaps — GET is read-only; heal via POST. */
+  gaps?: {
+    savesFtsGap: number;
+    likesFtsGap: number;
+    savesLocalGap: boolean;
+    likesLocalGap: boolean;
+    degraded: boolean;
+  };
   job: EmbeddingJobDto | null;
   pendingJobs: EmbeddingJobDto[];
   recentJobs?: EmbeddingJobDto[];

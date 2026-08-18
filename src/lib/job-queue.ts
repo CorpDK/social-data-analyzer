@@ -122,12 +122,16 @@ export type EmbeddingReclaimResult = {
   deferred: number;
 };
 
+/** Seconds a running embedding job lease stays valid without a heartbeat. */
+export const EMBEDDING_JOB_LEASE_TTL_SECONDS = 60;
+
 const DEFAULT_RECLAIM_KILL_GRACE_MS = 200;
 
 type RunningEmbeddingRow = {
   id: number;
   cancel_requested: number;
   worker_pid: number | null;
+  lease_expires_at: number | null;
 };
 
 /**
@@ -166,44 +170,56 @@ export function prepareOrphanEmbeddingWorkerForReclaim(
   return { safeToReclaim: true, killed: true };
 }
 
+/** True when lease_expires_at is missing or in the past. */
+export function isEmbeddingJobLeaseExpired(
+  leaseExpiresAt: number | null | undefined,
+  nowUnixSeconds: number = Math.floor(Date.now() / 1000),
+): boolean {
+  if (leaseExpiresAt == null || !Number.isFinite(leaseExpiresAt)) return true;
+  return leaseExpiresAt < nowUnixSeconds;
+}
+
 /**
- * Reclaim orphaned embedding `running` rows after restart/HMR.
+ * Reclaim orphaned embedding `running` rows after restart/HMR / expired lease.
  * Cancel-requested → cancelled; otherwise re-queue as pending for resume.
- * When `worker_pid` points at a live owned child, signal it first so we do not
- * spawn a duplicate writer beside an orphan. Caller must verify this process
- * does not own the job via runnerOwnsWork.
+ * Fresh leases with a live owned PID are deferred (heartbeat proves progress).
+ * Expired leases attempt careful kill then reclaim even if the PID looked alive.
+ * Caller must verify this process does not own the job via runnerOwnsWork.
  */
 export function reclaimOrphanedEmbeddingJobRows(
   sqlite: Database.Database,
   options?: {
     processProbe?: ProcessProbe;
     killGraceMs?: number;
+    nowUnixSeconds?: number;
   },
 ): EmbeddingReclaimResult {
   const probe = options?.processProbe ?? defaultProcessProbe;
   const graceMs = options?.killGraceMs ?? DEFAULT_RECLAIM_KILL_GRACE_MS;
+  const nowUnix =
+    options?.nowUnixSeconds ?? Math.floor(Date.now() / 1000);
 
-  const hasWorkerPid = (
+  const cols = (
     sqlite.prepare(`PRAGMA table_info(embedding_jobs)`).all() as Array<{
       name: string;
     }>
-  ).some((c) => c.name === "worker_pid");
+  ).map((c) => c.name);
+  const hasWorkerPid = cols.includes("worker_pid");
+  const hasLease = cols.includes("lease_expires_at");
 
-  const orphaned = (
-    hasWorkerPid
-      ? sqlite
-          .prepare(
-            `SELECT id, cancel_requested, worker_pid
-             FROM embedding_jobs WHERE state = 'running'`,
-          )
-          .all()
-      : sqlite
-          .prepare(
-            `SELECT id, cancel_requested, NULL AS worker_pid
-             FROM embedding_jobs WHERE state = 'running'`,
-          )
-          .all()
-  ) as RunningEmbeddingRow[];
+  const selectCols = [
+    "id",
+    "cancel_requested",
+    hasWorkerPid ? "worker_pid" : "NULL AS worker_pid",
+    hasLease ? "lease_expires_at" : "NULL AS lease_expires_at",
+  ].join(", ");
+
+  const orphaned = sqlite
+    .prepare(
+      `SELECT ${selectCols}
+       FROM embedding_jobs WHERE state = 'running'`,
+    )
+    .all() as RunningEmbeddingRow[];
 
   let cancelled = 0;
   let resumed = 0;
@@ -211,6 +227,22 @@ export function reclaimOrphanedEmbeddingJobRows(
   let deferred = 0;
 
   for (const row of orphaned) {
+    const leaseExpired = isEmbeddingJobLeaseExpired(
+      row.lease_expires_at,
+      nowUnix,
+    );
+
+    // Live heartbeat: do not kill a worker that still holds a valid lease.
+    if (
+      !leaseExpired &&
+      row.worker_pid != null &&
+      probe.isAlive(row.worker_pid) &&
+      probe.isOwnedWorker(row.worker_pid)
+    ) {
+      deferred += 1;
+      continue;
+    }
+
     const prep = prepareOrphanEmbeddingWorkerForReclaim(
       row.worker_pid,
       probe,
@@ -233,13 +265,14 @@ export function reclaimOrphanedEmbeddingJobRows(
     }
 
     const clearPid = hasWorkerPid ? ", worker_pid = NULL" : "";
+    const clearLease = hasLease ? ", lease_expires_at = NULL" : "";
     if (row.cancel_requested) {
       sqlite
         .prepare(
           `UPDATE embedding_jobs
            SET state = 'cancelled',
                message = 'Cancelled (interrupted while cancel was requested)',
-               error = NULL${clearPid},
+               error = NULL${clearPid}${clearLease},
                finished_at = unixepoch(),
                updated_at = unixepoch()
            WHERE id = ? AND state = 'running'`,
@@ -247,21 +280,27 @@ export function reclaimOrphanedEmbeddingJobRows(
         .run(row.id);
       cancelled += 1;
     } else {
+      const resumeMsg = leaseExpired
+        ? "Resuming after expired worker lease…"
+        : "Resuming after server restart…";
+      const requeueMsg = leaseExpired
+        ? "Re-queued after expired worker lease"
+        : "Re-queued after server restart";
       sqlite
         .prepare(
           `UPDATE embedding_jobs
            SET state = 'pending',
-               phase = 'queued'${clearPid},
+               phase = 'queued'${clearPid}${clearLease},
                message = CASE
-                 WHEN processed > 0 THEN 'Resuming after server restart…'
-                 ELSE 'Re-queued after server restart'
+                 WHEN processed > 0 THEN ?
+                 ELSE ?
                END,
                error = NULL,
                finished_at = NULL,
                updated_at = unixepoch()
            WHERE id = ? AND state = 'running'`,
         )
-        .run(row.id);
+        .run(resumeMsg, requeueMsg, row.id);
       resumed += 1;
     }
   }

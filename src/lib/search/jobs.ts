@@ -39,6 +39,7 @@ import {
   setJobColumn,
   setJobFinishedAt,
   withPumpGuard,
+  EMBEDDING_JOB_LEASE_TTL_SECONDS,
 } from "../job-queue";
 import { jobLog } from "../job-log";
 import { SEARCH_STATUS_CHANNEL, publishJobEvent } from "../sse";
@@ -388,6 +389,8 @@ function updateJob(
     message?: string | null;
     finished?: boolean;
     workerPid?: number | null;
+    /** Refresh worker lease heartbeat (default true while running). */
+    refreshLease?: boolean;
   },
 ) {
   const sql = createJobSqlSet();
@@ -405,6 +408,20 @@ function updateJob(
     // Terminal rows must not keep a stale PID for the next reclaim pass.
     if (patch.workerPid === undefined) {
       sql.sets.push("worker_pid = NULL");
+    }
+    sql.sets.push("lease_expires_at = NULL");
+  } else {
+    const shouldRefresh =
+      patch.refreshLease !== false &&
+      (patch.state === "running" ||
+        patch.workerPid !== undefined ||
+        patch.processed !== undefined ||
+        patch.phase !== undefined ||
+        patch.refreshLease === true);
+    if (shouldRefresh || patch.state === "running") {
+      sql.sets.push(
+        `lease_expires_at = unixepoch() + ${EMBEDDING_JOB_LEASE_TTL_SECONDS}`,
+      );
     }
   }
 

@@ -1,11 +1,13 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { DiscardImportRowsButton } from "@/components/discard-import-rows-button";
 import {
   parseImportLog,
   resolveAuthorMetrics,
   resolveLikesWriteMetrics,
 } from "@/lib/import-log";
 import { getImportById } from "@/lib/queries";
+import { countPersistedImportRows } from "@/lib/import/partial-accounting";
 
 export const dynamic = "force-dynamic";
 
@@ -109,6 +111,13 @@ export default async function ImportDetailPage({
       (likesWrite != null &&
         likesWrite.added + likesWrite.updated + likesWrite.skipped > 0));
 
+  const persisted = countPersistedImportRows(id);
+  const hasInserts =
+    persisted.itemsAdded > 0 || persisted.likesAdded > 0;
+  const showDiscard =
+    row.status === "failed" ||
+    (hasInserts && row.status !== "completed" && row.status !== "duplicate");
+
   return (
     <div className="space-y-8">
       <section className="space-y-2">
@@ -158,6 +167,24 @@ export default async function ImportDetailPage({
             Error
           </h2>
           <p className="mt-3 text-sm">{row.error}</p>
+          {showDiscard || hasInserts ? (
+            <div className="mt-4">
+              <DiscardImportRowsButton importId={id} />
+            </div>
+          ) : null}
+        </section>
+      ) : hasInserts && row.status === "failed" ? (
+        <section className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5">
+          <h2 className="font-[family-name:var(--font-fraunces)] text-xl">
+            Recovery
+          </h2>
+          <p className="mt-2 text-sm text-[var(--muted)]">
+            This import left rows in the catalog. Remove inserts introduced here,
+            or re-import the same export to reconcile.
+          </p>
+          <div className="mt-4">
+            <DiscardImportRowsButton importId={id} />
+          </div>
         </section>
       ) : null}
 

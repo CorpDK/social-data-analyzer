@@ -62,9 +62,9 @@ dropped before the next (parse-and-drop). Per-entry / total JSON caps still
 fail closed (`ImportZipSafetyError`). Import writes batch ~500 rows per
 transaction (`IMPORT_WRITE_BATCH_SIZE`).
 
-Upload HTTP path: multipart is accepted via `request.formData()` (in-memory
-bound **512 MB** for zip and standalone JSON). True streaming multipart is
-deferred; spool write still streams from `File.stream()`.
+Upload HTTP path: multipart is **streamed** to the spool (boundary parser; no
+`request.formData()` full-body buffer). Caps: **512 MB** zip / **512 MB**
+standalone JSON (JSON remains a UTF-8 string parse bound).
 
 ## Embedding jobs (`embedding_jobs`)
 
@@ -139,20 +139,20 @@ Settings hint for non-loopback / non-official-OpenAI hosts — see
 
 - `POST /api/settings/reset-library` → **409** while import or embedding jobs
   are `pending`/`running` (`LibraryBusyError`).
-- Embedding reclaim stores `worker_pid`; kill owned stale children before
-  re-queue; defer reclaim if a live owned worker cannot be stopped.
-- Failed/cancelled imports report persisted row counts; partial writes may
-  remain until re-import or idle reset (see runbook).
+- Embedding reclaim stores `worker_pid` + `lease_expires_at` heartbeat; kill
+  owned stale children before re-queue; **fresh leases defer reclaim**; expired
+  leases reclaim after careful kill even if the PID looked alive.
+- Failed/cancelled imports roll back inserts (`first_seen_import_id`); residual
+  updates may remain until re-import or `DELETE /api/imports/:id/rows`.
 
 ## Resource paths (Phase 4)
 
 - Upload caps: zip multipart and standalone JSON are **512 MB**
-  (`IMPORT_MAX_FILE_*` / `IMPORT_MAX_JSON_FILE_*`). `request.formData()`
-  buffers before spool; true streaming multipart is deferred. Spool still
-  uses `File.stream()`. Content-Length over the cap → **413**.
+  (`IMPORT_MAX_FILE_*` / `IMPORT_MAX_JSON_FILE_*`). Multipart streams to spool.
+  Content-Length over the cap → **413**.
 - Browse / stats / list GETs do not synchronously rebuild FTS or local
-  vectors. `GET /api/search/status` may enqueue `fts` / `local` /
-  `likes-local` jobs when coverage lags (once per process).
+  vectors. `GET /api/search/status` is read-only (reports `gaps`); enqueue via
+  `POST /api/search/heal-gaps` or explicit reindex.
 
 ## Operator runbook
 

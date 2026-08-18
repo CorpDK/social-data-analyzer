@@ -1,16 +1,14 @@
 /**
  * Upload / zip-extract safety caps.
  *
- * Honesty note (Phase 4): `POST /api/import` uses `request.formData()`, which
- * buffers the multipart body in memory before we can spool. True streaming
- * multipart (busboy / undici) is deferred. Caps below match what that path can
- * safely hold — not a theoretical 2 GiB disk spool. After formData, we still
- * stream from `File.stream()` into `data/imports/` so we do not hold a second
- * full copy while writing the spool.
+ * `POST /api/import` streams multipart via a boundary parser into the spool
+ * (no `request.formData()` full-body buffer). Zip uploads are still capped at
+ * 512 MiB for honest host RAM / proxy alignment; standalone JSON stays at
+ * 512 MiB because parse loads a UTF-8 string (Node/V8 string limits).
  */
 
 /**
- * Max size for `.zip` uploads via multipart formData (in-memory bound).
+ * Max size for `.zip` uploads via streaming multipart → spool.
  * Also used as the Next experimental bodySizeLimit string source.
  */
 export const IMPORT_MAX_FILE_BYTES = 512 * 1024 * 1024; // 512 MiB
@@ -101,7 +99,7 @@ export function importKindFromFilename(filename: string): ImportUploadKind | nul
 
 export function importFileTooLargeMessage(kind: ImportUploadKind = "zip"): string {
   if (kind === "json") return importJsonFileTooLargeMessage();
-  return `File is too large (max ${IMPORT_MAX_FILE_LABEL}). Multipart uploads are buffered in memory before spooling; true streaming upload is deferred.`;
+  return `File is too large (max ${IMPORT_MAX_FILE_LABEL}). Multipart uploads stream to disk; the cap matches proxy/host limits.`;
 }
 
 export function importJsonFileTooLargeMessage(): string {

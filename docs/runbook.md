@@ -59,12 +59,13 @@ for those jobs first — never wipe the DB under active writers.
 
 ## Partial import recovery
 
-Import writes commit in batches. A failed or cancelled import may still leave
-durable `saved_items` / `liked_items` rows. Failed jobs report truthful
-persisted add/update counts and a message that partial rows may remain.
+Import writes commit in batches. On fail/cancel the pipeline **rolls back
+inserts** (`first_seen_import_id`) so aborted runs do not leave durable new
+catalog rows. Residual last_seen-only updates may remain until re-import.
 
-**Recovery:** re-import the same export (upserts reconcile), or cancel all jobs
-then use Reset library when idle. Do not assume failed = zero writes.
+Failed jobs report rollback + residual counts. On the import detail page, use
+**Remove rows from this import** (`DELETE /api/imports/:id/rows`) to discard
+any remaining inserts, or re-import / idle Reset library.
 
 ## Import
 
@@ -78,15 +79,11 @@ then use Reset library when idle. Do not assume failed = zero writes.
 
 ### Upload size honesty
 
-`POST /api/import` uses `request.formData()`, which **buffers the multipart body
-in memory** before spooling. Documented/enforced caps are **512 MB** to match
-that path (not a theoretical multi‑GiB disk spool). True streaming multipart is
-**deferred**. After formData, the server still streams from `File.stream()` into
-`data/imports/` so the spool write does not hold a second full Buffer copy.
-
-Standalone `.json` imports are capped separately (same 512 MB today) because
-parse loads the file as a UTF-8 string. Prefer a `.zip` for large exports —
-JSON entries inside a zip are streamed from the spool.
+`POST /api/import` **streams** multipart to the spool (boundary parser; no
+`request.formData()` full-body buffer). Caps remain **512 MB** for zip (proxy /
+host alignment) and **512 MB** for standalone JSON (UTF-8 string parse limit).
+Prefer a `.zip` for large exports — JSON entries inside a zip are streamed from
+the spool.
 
 `next.config.ts` `experimental.proxyClientMaxBodySize` /
 `serverActions.bodySizeLimit` stay aligned via `IMPORT_MAX_FILE_SIZE_LIMIT`
@@ -103,11 +100,11 @@ JSON entries inside a zip are streamed from the spool.
 ### Search readiness (no sync backfill on browse)
 
 `getStats` / browse / list GETs are **read-only** — they do **not** call
-`ensureSearchIndexBackfill` (which previously could rebuild FTS + local vectors
-on first page load). Coverage gaps show as degraded on **Indexes**; opening
-status may enqueue a keyword (`fts`) and/or `local` / `likes-local` job once
-per process. Heavy rebuild remains job-scoped with SSE progress, or
-`pnpm run reindex` at the CLI.
+`ensureSearchIndexBackfill`. `GET /api/search/status` (and SSE) is also
+**read-only** for gap healing: it reports `gaps` but does not enqueue jobs.
+Use **Heal gaps** on Indexes (`POST /api/search/heal-gaps`) or explicit
+reindex / `pnpm run reindex`. Heavy rebuild remains job-scoped with SSE
+progress.
 
 ## Cancel & resume
 

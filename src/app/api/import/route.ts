@@ -1,10 +1,14 @@
 import { NextResponse } from "next/server";
-import { startImportJob } from "@/lib/import/jobs";
+import { startImportJobFromSpool } from "@/lib/import/jobs";
 import {
   IMPORT_MAX_FILE_BYTES,
   IMPORT_MAX_JSON_FILE_BYTES,
   importFileTooLargeMessage,
 } from "@/lib/import-limits";
+import {
+  MultipartUploadError,
+  spoolMultipartFileUpload,
+} from "@/lib/import/multipart-stream";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 
 export const runtime = "nodejs";
@@ -14,13 +18,12 @@ export const dynamic = "force-dynamic";
 const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 
 /**
- * Accept an export upload, spool it to disk, enqueue a background import job,
- * and return immediately (202). Progress via GET /api/import/jobs or SSE
- * GET /api/import/jobs/stream.
+ * Accept an export upload, stream multipart to disk, enqueue a background
+ * import job, and return immediately (202). Progress via GET /api/import/jobs
+ * or SSE GET /api/import/jobs/stream.
  *
- * Note: `request.formData()` buffers the multipart body before spooling.
- * Caps in import-limits match that in-memory reality; File.stream() still
- * writes the spool without a second full Buffer copy.
+ * Multipart is parsed incrementally (no `request.formData()` full-body buffer);
+ * the file part is written straight to the spool with a size counter.
  */
 export async function POST(request: Request) {
   const rejected = rejectUnlessLocalMutating(request);
@@ -30,8 +33,6 @@ export async function POST(request: Request) {
     const contentLengthHeader = request.headers.get("content-length");
     if (contentLengthHeader) {
       const contentLength = Number(contentLengthHeader);
-      // Zip and JSON share the same 512MB bound today; reject early if CL exceeds
-      // the larger of the two (+ multipart overhead) without buffering formData.
       const maxAccepted =
         Math.max(IMPORT_MAX_FILE_BYTES, IMPORT_MAX_JSON_FILE_BYTES) +
         MULTIPART_OVERHEAD_BYTES;
@@ -43,17 +44,20 @@ export async function POST(request: Request) {
       }
     }
 
-    const formData = await request.formData();
-    const file = formData.get("file");
+    const uploaded = await spoolMultipartFileUpload(request, {
+      provisionalMaxBytes: Math.max(
+        IMPORT_MAX_FILE_BYTES,
+        IMPORT_MAX_JSON_FILE_BYTES,
+      ),
+    });
 
-    if (!(file instanceof File)) {
-      return NextResponse.json(
-        { error: "Upload a .zip or .json Instagram export file." },
-        { status: 400 },
-      );
-    }
-
-    const result = await startImportJob(file);
+    const result = startImportJobFromSpool({
+      filename: uploaded.filename,
+      kind: uploaded.kind,
+      spoolPath: uploaded.spool.spoolPath,
+      contentHash: uploaded.spool.contentHash,
+      byteLength: uploaded.spool.byteLength,
+    });
     if (!result.ok) {
       return NextResponse.json(
         { error: result.error },
@@ -66,6 +70,12 @@ export async function POST(request: Request) {
       { status: 202 },
     );
   } catch (error) {
+    if (error instanceof MultipartUploadError) {
+      return NextResponse.json(
+        { error: error.message },
+        { status: error.status },
+      );
+    }
     const message =
       error instanceof Error ? error.message : "Unexpected import error";
     return NextResponse.json({ error: message }, { status: 500 });

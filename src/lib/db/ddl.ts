@@ -16,8 +16,9 @@ export const VEC_DIMENSIONS = 1024;
  *
  * v7: case-sensitive shortcode media_key repair (recompute from href).
  * v8: embedding_jobs.worker_pid for restart reclaim (kill stale child before requeue).
+ * v9: embedding_jobs.lease_expires_at heartbeat — reclaim expired leases even if PID looks alive.
  */
-export const SCHEMA_VERSION = 8;
+export const SCHEMA_VERSION = 9;
 
 export function ensureDatabaseSchema(sqlite: Database.Database) {
   const previousVersion = sqlite.pragma("user_version", {
@@ -153,6 +154,7 @@ const EMBEDDING_JOBS_SCHEMA = `
     message TEXT,
     cancel_requested INTEGER NOT NULL DEFAULT 0,
     worker_pid INTEGER,
+    lease_expires_at INTEGER,
     started_at INTEGER NOT NULL DEFAULT (unixepoch()),
     finished_at INTEGER,
     updated_at INTEGER NOT NULL DEFAULT (unixepoch())
@@ -180,6 +182,11 @@ function ensureEmbeddingJobsTable(sqlite: Database.Database) {
   // CREATE TABLE IF NOT EXISTS does not add columns on existing DBs.
   if (!tableHasColumn(sqlite, "embedding_jobs", "worker_pid")) {
     sqlite.exec(`ALTER TABLE embedding_jobs ADD COLUMN worker_pid INTEGER`);
+  }
+  if (!tableHasColumn(sqlite, "embedding_jobs", "lease_expires_at")) {
+    sqlite.exec(
+      `ALTER TABLE embedding_jobs ADD COLUMN lease_expires_at INTEGER`,
+    );
   }
 }
 

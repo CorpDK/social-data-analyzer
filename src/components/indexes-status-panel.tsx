@@ -334,6 +334,28 @@ export function IndexesStatusPanel() {
     void executeReindex(provider);
   }
 
+  async function healGaps() {
+    setPending("heal-gaps");
+    setActionError(null);
+    try {
+      const response = await fetch("/api/search/heal-gaps", {
+        method: "POST",
+        headers: localMutatingHeaders({ "content-type": "application/json" }),
+        body: "{}",
+      });
+      await readJsonResponse(response, "Failed to heal gaps");
+      await load();
+    } catch (healError) {
+      setActionError(
+        healError instanceof Error
+          ? healError.message
+          : "Failed to heal gaps",
+      );
+    } finally {
+      setPending(null);
+    }
+  }
+
   async function cancelReindex() {
     setPending("cancel");
     setActionError(null);
@@ -380,6 +402,7 @@ export function IndexesStatusPanel() {
   }
 
   const host = data?.host;
+  const gapsDegraded = Boolean(data?.gaps?.degraded);
 
   return (
     <div className="space-y-4">
@@ -429,6 +452,23 @@ export function IndexesStatusPanel() {
           </div>
         ) : null}
       </dialog>
+
+      {gapsDegraded ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[var(--line)] bg-[var(--surface)] px-3.5 py-2 text-sm">
+          <span className="text-[var(--muted)]">
+            Index coverage lags the library (keyword and/or local vectors).
+            Status GET is read-only — heal explicitly.
+          </span>
+          <button
+            type="button"
+            className={primaryButton}
+            disabled={pending !== null || queueBusy}
+            onClick={() => void healGaps()}
+          >
+            {pending === "heal-gaps" ? "Healing…" : "Heal gaps"}
+          </button>
+        </div>
+      ) : null}
 
       {error ? (
         <div

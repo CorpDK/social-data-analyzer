@@ -40,7 +40,7 @@ import {
   getRecentEmbeddingJobs,
   type EmbeddingJobRecord,
 } from "./jobs";
-import { scheduleSearchBackfillJobsIfNeeded } from "./readiness";
+import { assessSearchIndexGaps, type SearchIndexGaps } from "./readiness";
 
 export type {
   EmbeddingJobDto,
@@ -114,6 +114,8 @@ export type SearchIndexStatus = {
     likes: LibraryIndexStatus;
   };
   host: HostMemoryStatus;
+  /** COUNT-only gap assessment (read-only). */
+  gaps: SearchIndexGaps;
   /** Active running job, or latest finished when idle. */
   job: EmbeddingJobRecord | null;
   /** Jobs waiting to run (FIFO by id). */
@@ -278,10 +280,9 @@ function getLibraryIndexStatus(
 }
 
 export function getSearchIndexStatus(): SearchIndexStatus {
+  // Reclaim/pump already-queued work only — never enqueue new backfill here.
   ensureJobRunner();
-  // Schedule FTS/local backfill jobs when coverage lags — never sync-rebuild
-  // on browse/list. Idempotent; open jobs are not duplicated.
-  scheduleSearchBackfillJobsIfNeeded();
+  const gaps = assessSearchIndexGaps();
 
   const memAvailableMb = readMemAvailableMb();
   const saves = getLibraryIndexStatus("saves", memAvailableMb);
@@ -296,6 +297,7 @@ export function getSearchIndexStatus(): SearchIndexStatus {
       remoteLargeMinAvailableMb: REMOTE_LARGE_MIN_AVAILABLE_MB,
       ollamaLargeMinAvailableMb: OLLAMA_LARGE_MIN_AVAILABLE_MB,
     },
+    gaps,
     job: getDisplayEmbeddingJob(),
     pendingJobs: getPendingEmbeddingJobs(),
     recentJobs: getRecentEmbeddingJobs(8),

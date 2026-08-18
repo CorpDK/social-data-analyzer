@@ -91,8 +91,8 @@ export type ScheduleBackfillResult = {
 
 /**
  * Enqueue FTS / local backfill jobs when coverage lags. Idempotent per process
- * (one attempt); open jobs are not duplicated. Call from Indexes/status or
- * explicit startup — never from browse/list/stats.
+ * (one attempt); open jobs are not duplicated. Call from Indexes "Heal gaps"
+ * POST or documented startup — never from browse/list/stats or status GET.
  */
 export function scheduleSearchBackfillJobsIfNeeded(): ScheduleBackfillResult {
   const gaps = assessSearchIndexGaps();

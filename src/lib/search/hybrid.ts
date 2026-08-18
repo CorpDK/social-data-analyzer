@@ -1,4 +1,5 @@
 import { getSqlite } from "../db";
+import { jobLog } from "../job-log";
 import {
   embedText,
   embeddingConfigForProvider,
@@ -30,6 +31,40 @@ export type RankedHit = {
 };
 
 const RRF_K = 60;
+
+/** Injected logger for tests; defaults to jobLog. */
+type SearchWarnFn = (message: string, error?: unknown) => void;
+
+let searchWarn: SearchWarnFn = (message, error) => {
+  const detail =
+    error instanceof Error
+      ? error.message
+      : error != null
+        ? String(error)
+        : undefined;
+  jobLog("search", {
+    message: detail ? `${message}: ${detail}` : message,
+    level: "warn",
+  });
+};
+
+/** Test helper — override structured warn sink. */
+export function setHybridSearchWarnForTests(fn: SearchWarnFn | null) {
+  searchWarn =
+    fn ??
+    ((message, error) => {
+      const detail =
+        error instanceof Error
+          ? error.message
+          : error != null
+            ? String(error)
+            : undefined;
+      jobLog("search", {
+        message: detail ? `${message}: ${detail}` : message,
+        level: "warn",
+      });
+    });
+}
 
 function ftsToken(raw: string): string | null {
   const cleaned = raw.replace(/["']/g, "").trim();
@@ -84,12 +119,12 @@ export function searchFts(
   library: SearchLibrary,
   query: string,
   limit = 200,
-): Array<{ id: number; rank: number }> {
+): { hits: Array<{ id: number; rank: number }>; degraded: boolean } {
   const match = buildFtsQuery(query);
-  if (!match) return [];
+  if (!match) return { hits: [], degraded: false };
   const table = library === "saves" ? "saved_items_fts" : "liked_items_fts";
   try {
-    return getSqlite()
+    const hits = getSqlite()
       .prepare(
         `SELECT rowid AS id, rank
          FROM ${table}
@@ -98,8 +133,10 @@ export function searchFts(
          LIMIT ?`,
       )
       .all(match, limit) as Array<{ id: number; rank: number }>;
-  } catch {
-    return [];
+    return { hits, degraded: false };
+  } catch (error) {
+    searchWarn(`FTS query failed (${library})`, error);
+    return { hits: [], degraded: true };
   }
 }
 
@@ -146,7 +183,8 @@ async function searchVectorIndex(
       hits: rows.filter((row) => row.distance <= cutoff).slice(0, limit),
       status: "ok",
     };
-  } catch {
+  } catch (error) {
+    searchWarn(`Vector search failed (${library}/${index})`, error);
     return { hits: [], status: "failed" };
   }
 }
@@ -157,6 +195,10 @@ export type HybridSearchResult = {
   provider: EmbeddingProvider;
   providerFallback: boolean;
   providerFallbackReason?: string;
+  /** True when FTS threw and degraded to empty keyword hits. */
+  ftsDegraded?: boolean;
+  /** True when primary vec path failed (may still have local fallback hits). */
+  vecDegraded?: boolean;
 };
 
 async function hybridSearchIdsForLibrary(
@@ -166,10 +208,13 @@ async function hybridSearchIdsForLibrary(
   requestedProvider?: EmbeddingProvider | null,
 ): Promise<HybridSearchResult> {
   const resolved = resolveSearchProvider(requestedProvider ?? null, library);
-  const ftsHits = searchFts(library, query, limit);
+  const ftsResult = searchFts(library, query, limit);
+  const ftsHits = ftsResult.hits;
+  const ftsDegraded = ftsResult.degraded;
   let vecResult: VecSearchResult;
   let usedFallback = false;
   let activeProvider = resolved.provider;
+  let vecDegraded = false;
 
   if (resolved.provider === "local") {
     vecResult = await searchVectorIndex(
@@ -179,6 +224,7 @@ async function hybridSearchIdsForLibrary(
       query,
       limit,
     );
+    if (vecResult.status === "failed") vecDegraded = true;
   } else {
     const remoteConfig = embeddingConfigForProvider(resolved.provider);
     vecResult = await searchVectorIndex(
@@ -190,6 +236,7 @@ async function hybridSearchIdsForLibrary(
     );
     if (vecResult.status !== "ok") {
       usedFallback = true;
+      if (vecResult.status === "failed") vecDegraded = true;
       activeProvider = "local";
       vecResult = await searchVectorIndex(
         library,
@@ -198,6 +245,7 @@ async function hybridSearchIdsForLibrary(
         query,
         limit,
       );
+      if (vecResult.status === "failed") vecDegraded = true;
     }
   }
 
@@ -212,6 +260,8 @@ async function hybridSearchIdsForLibrary(
         (usedFallback
           ? `${resolved.provider} semantic search failed; using local vectors.`
           : undefined),
+      ftsDegraded,
+      vecDegraded,
     };
   }
 
@@ -223,6 +273,8 @@ async function hybridSearchIdsForLibrary(
       provider: activeProvider,
       providerFallback: resolved.fallback || usedFallback,
       providerFallbackReason: resolved.reason,
+      ftsDegraded,
+      vecDegraded,
     };
   }
   if (usedFallback || resolved.fallback) {
@@ -237,6 +289,8 @@ async function hybridSearchIdsForLibrary(
       providerFallbackReason:
         resolved.reason ??
         `${resolved.provider} semantic search unavailable; using local vectors.`,
+      ftsDegraded,
+      vecDegraded,
     };
   }
   return {
@@ -244,6 +298,8 @@ async function hybridSearchIdsForLibrary(
     mode: ftsHits.length > 0 ? "hybrid" : "vec",
     provider: activeProvider,
     providerFallback: false,
+    ftsDegraded,
+    vecDegraded,
   };
 }
 

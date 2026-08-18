@@ -593,9 +593,71 @@ export type StartImportResult =
   | { ok: true; job: ImportJobRecord }
   | { ok: false; error: string; status: number };
 
-export async function startImportJob(file: File): Promise<StartImportResult> {
+function enqueueImportFromSpool(args: {
+  filename: string;
+  kind: ImportJobKind;
+  spoolPath: string;
+  contentHash: string;
+}): StartImportResult {
   ensureImportJobRunner();
+  const sqlite = getSqlite();
+  let jobId: number;
+  try {
+    const info = sqlite
+      .prepare(
+        `INSERT INTO import_jobs(
+          filename, content_hash, spool_path, kind, state, phase,
+          processed, total, message
+        ) VALUES (?, ?, ?, ?, 'pending', 'queued', 0, 0, ?)`,
+      )
+      .run(
+        args.filename,
+        args.contentHash,
+        args.spoolPath,
+        args.kind,
+        `Queued import of ${args.filename}`,
+      );
+    jobId = Number(info.lastInsertRowid);
+  } catch (error) {
+    deleteSpoolFile(args.spoolPath);
+    return {
+      ok: false,
+      error:
+        error instanceof Error ? error.message : "Failed to create import job",
+      status: 500,
+    };
+  }
 
+  publishJobEvent(IMPORT_JOBS_CHANNEL, true);
+  pumpQueue();
+  const job = getImportJob(jobId);
+  if (!job) {
+    return { ok: false, error: "Failed to create import job", status: 500 };
+  }
+  return { ok: true, job };
+}
+
+/** Enqueue after a streaming multipart spool (preferred upload path). */
+export function startImportJobFromSpool(args: {
+  filename: string;
+  kind: ImportJobKind;
+  spoolPath: string;
+  contentHash: string;
+  byteLength: number;
+}): StartImportResult {
+  const maxBytes = importMaxBytesForKind(args.kind);
+  if (args.byteLength > maxBytes) {
+    deleteSpoolFile(args.spoolPath);
+    return { ok: false, error: importFileTooLargeMessage(args.kind), status: 413 };
+  }
+  if (args.byteLength <= 0) {
+    deleteSpoolFile(args.spoolPath);
+    return { ok: false, error: "File is empty.", status: 400 };
+  }
+  return enqueueImportFromSpool(args);
+}
+
+export async function startImportJob(file: File): Promise<StartImportResult> {
   const filename = file.name || "export.zip";
   const kind = importKindFromFilename(filename);
   if (!kind) {
@@ -627,41 +689,12 @@ export async function startImportJob(file: File): Promise<StartImportResult> {
     };
   }
 
-  const sqlite = getSqlite();
-  let jobId: number;
-  try {
-    const info = sqlite
-      .prepare(
-        `INSERT INTO import_jobs(
-          filename, content_hash, spool_path, kind, state, phase,
-          processed, total, message
-        ) VALUES (?, ?, ?, ?, 'pending', 'queued', 0, 0, ?)`,
-      )
-      .run(
-        filename,
-        spool.contentHash,
-        spool.spoolPath,
-        kind,
-        `Queued import of ${filename}`,
-      );
-    jobId = Number(info.lastInsertRowid);
-  } catch (error) {
-    deleteSpoolFile(spool.spoolPath);
-    return {
-      ok: false,
-      error:
-        error instanceof Error ? error.message : "Failed to create import job",
-      status: 500,
-    };
-  }
-
-  publishJobEvent(IMPORT_JOBS_CHANNEL, true);
-  pumpQueue();
-  const job = getImportJob(jobId);
-  if (!job) {
-    return { ok: false, error: "Failed to create import job", status: 500 };
-  }
-  return { ok: true, job };
+  return enqueueImportFromSpool({
+    filename,
+    kind,
+    spoolPath: spool.spoolPath,
+    contentHash: spool.contentHash,
+  });
 }
 
 export type CancelImportResult =

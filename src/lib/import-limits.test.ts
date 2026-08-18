@@ -12,7 +12,7 @@ import {
 } from "./import-limits";
 
 describe("import-limits", () => {
-  it("keeps zip multipart cap at a formData-safe 512MiB bound", () => {
+  it("keeps zip multipart cap at 512MiB with streaming messaging", () => {
     expect(IMPORT_MAX_FILE_BYTES).toBe(512 * 1024 * 1024);
     expect(IMPORT_MAX_FILE_LABEL).toBe("512MB");
     expect(IMPORT_MAX_FILE_SIZE_LIMIT).toBe("512mb");
@@ -25,7 +25,7 @@ describe("import-limits", () => {
     expect(importMaxBytesForKind("zip")).toBe(IMPORT_MAX_FILE_BYTES);
     expect(importJsonFileTooLargeMessage()).toMatch(/Node\/V8 string/i);
     expect(importFileTooLargeMessage("json")).toMatch(/JSON export is too large/);
-    expect(importFileTooLargeMessage("zip")).toMatch(/buffered in memory/i);
+    expect(importFileTooLargeMessage("zip")).toMatch(/stream to disk/i);
   });
 
   it("infers upload kind from filename", () => {
