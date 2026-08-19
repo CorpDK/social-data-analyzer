@@ -3,6 +3,13 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState, useTransition } from "react";
+import {
+  parseBrowseFilterOptions,
+  parseBrowseListResponse,
+  parseSearchProviderInfo,
+  type BrowseFilterOptions,
+  type BrowseListResponse,
+} from "@/lib/browse-dto";
 import type {
   EmbeddingProvider,
   SearchProviderInfoDto,
@@ -20,31 +27,8 @@ type LikeRow = {
 };
 
 type ProviderInfo = SearchProviderInfoDto;
-
-type LikesResponse = {
-  items: LikeRow[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
-  searchMode?:
-    | "hybrid"
-    | "vec"
-    | "hybrid-local-fallback"
-    | "vec-local-fallback"
-    | "fts"
-    | "like"
-    | "none";
-  searchProvider?: EmbeddingProvider | null;
-  providerFallback?: boolean;
-  providerFallbackReason?: string;
-  totalCapped?: boolean;
-  searchCap?: number;
-};
-
-type FilterOptions = {
-  authors: string[];
-};
+type LikesResponse = BrowseListResponse<LikeRow>;
+type FilterOptions = BrowseFilterOptions;
 
 const PROVIDER_STORAGE_KEY = "instagram-likes-search-provider";
 
@@ -146,8 +130,8 @@ export function LikesBrowser() {
       try {
         const res = await fetch("/api/search/providers?library=likes");
         if (!res.ok) return;
-        const json = (await res.json()) as ProviderInfo;
-        if (!cancelled) setProviders(json);
+        const json = parseSearchProviderInfo(await res.json());
+        if (!cancelled && json) setProviders(json);
       } catch {
         // optional
       }
@@ -166,8 +150,8 @@ export function LikesBrowser() {
       try {
         const res = await fetch("/api/likes?filters=1");
         if (!res.ok) return;
-        const json = (await res.json()) as FilterOptions;
-        if (!cancelled) setFilters(json);
+        const json = parseBrowseFilterOptions(await res.json());
+        if (!cancelled && json) setFilters(json);
       } catch {
         // optional
       }
@@ -218,7 +202,8 @@ export function LikesBrowser() {
           signal: controller.signal,
         });
         if (!res.ok) throw new Error("Failed to load likes");
-        const json = (await res.json()) as LikesResponse;
+        const json = parseBrowseListResponse<LikeRow>(await res.json());
+        if (!json) throw new Error("Invalid likes response");
         if (!controller.signal.aborted) setData(json);
       } catch (err) {
         if (controller.signal.aborted) return;

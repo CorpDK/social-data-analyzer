@@ -12,8 +12,6 @@ export const SCHEMA_SAFETY_MAX_DEPTH = 256;
  * If length ≤ 20, use every element.
  */
 export const SCHEMA_ARRAY_SAMPLE = 20;
-/** @deprecated Strings are never sampled; kept for callers that referenced the old cap. */
-export const SCHEMA_STRING_SAMPLE_MAX = 0;
 
 const ARRAY_SAMPLE_FIRST = 7;
 const ARRAY_SAMPLE_LAST = 7;

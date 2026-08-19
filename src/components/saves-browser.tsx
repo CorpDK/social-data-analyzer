@@ -3,6 +3,13 @@
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useState, useTransition } from "react";
+import {
+  parseBrowseFilterOptions,
+  parseBrowseListResponse,
+  parseSearchProviderInfo,
+  type BrowseFilterOptions,
+  type BrowseListResponse,
+} from "@/lib/browse-dto";
 import type {
   EmbeddingProvider,
   SearchProviderInfoDto,
@@ -19,33 +26,8 @@ type SaveRow = {
 };
 
 type ProviderInfo = SearchProviderInfoDto;
-
-type SavesResponse = {
-  items: SaveRow[];
-  total: number;
-  page: number;
-  pageSize: number;
-  totalPages: number;
-  searchMode?:
-    | "hybrid"
-    | "vec"
-    | "hybrid-local-fallback"
-    | "vec-local-fallback"
-    | "fts"
-    | "like"
-    | "none";
-  searchProvider?: EmbeddingProvider | null;
-  providerFallback?: boolean;
-  providerFallbackReason?: string;
-  /** True when hybrid search candidate set hit the browse cap. */
-  totalCapped?: boolean;
-  searchCap?: number;
-};
-
-type FilterOptions = {
-  authors: string[];
-  collections: string[];
-};
+type SavesResponse = BrowseListResponse<SaveRow>;
+type FilterOptions = BrowseFilterOptions & { collections: string[] };
 
 const PROVIDER_STORAGE_KEY = "instagram-saves-search-provider";
 
@@ -151,8 +133,8 @@ export function SavesBrowser() {
       try {
         const res = await fetch("/api/search/providers?library=saves");
         if (!res.ok) return;
-        const json = (await res.json()) as ProviderInfo;
-        if (!cancelled) setProviders(json);
+        const json = parseSearchProviderInfo(await res.json());
+        if (!cancelled && json) setProviders(json);
       } catch {
         // Provider metadata is optional for rendering.
       }
@@ -171,9 +153,12 @@ export function SavesBrowser() {
       try {
         const res = await fetch("/api/saves?filters=1");
         if (!res.ok) return;
-        const json = (await res.json()) as FilterOptions;
-        if (!cancelled) {
-          setFilters(json ?? { authors: [], collections: [] });
+        const json = parseBrowseFilterOptions(await res.json());
+        if (!cancelled && json) {
+          setFilters({
+            authors: json.authors,
+            collections: json.collections ?? [],
+          });
         }
       } catch {
         // Filter options are optional for rendering.
@@ -232,7 +217,10 @@ export function SavesBrowser() {
         });
 
         if (!savesRes.ok) throw new Error("Failed to load saves");
-        const savesJson = (await savesRes.json()) as SavesResponse;
+        const savesJson = parseBrowseListResponse<SaveRow>(
+          await savesRes.json(),
+        );
+        if (!savesJson) throw new Error("Invalid saves response");
 
         if (!controller.signal.aborted) {
           setData(savesJson);

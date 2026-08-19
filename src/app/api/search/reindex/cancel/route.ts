@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonInternalError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
+import { readJsonBody, readOptionalJobId } from "@/lib/request-json";
 import { cancelReindexJob } from "@/lib/search/jobs";
 
 export const runtime = "nodejs";
@@ -12,15 +13,9 @@ export async function POST(request: Request) {
   if (rejected) return rejected;
 
   try {
-    let jobId: number | undefined;
-    try {
-      const body = (await request.json()) as { jobId?: unknown };
-      if (typeof body.jobId === "number" && Number.isFinite(body.jobId)) {
-        jobId = Math.trunc(body.jobId);
-      }
-    } catch {
-      // Empty body cancels the active job.
-    }
+    // Empty / invalid body cancels the active job.
+    const parsed = await readJsonBody(request);
+    const jobId = parsed.ok ? readOptionalJobId(parsed.value) : undefined;
 
     const result = cancelReindexJob(jobId);
     if (!result.ok) {

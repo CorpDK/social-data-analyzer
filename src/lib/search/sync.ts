@@ -72,7 +72,6 @@ export {
   removeLikedItemSearch,
   upsertItemFts,
   upsertLikedItemFts,
-  upsertLikedItemFtsDoc,
 } from "./sync-fts";
 export {
   embeddingProfilesMatch,

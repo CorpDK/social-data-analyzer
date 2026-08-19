@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
+import { readJsonObject } from "@/lib/request-json";
 import {
   LibraryBusyError,
   RESET_LIBRARY_CONFIRMATION_PHRASE,
@@ -19,15 +20,15 @@ export async function POST(request: Request) {
   const rejected = rejectUnlessLocalMutating(request);
   if (rejected) return rejected;
 
-  let body: { confirmation?: unknown };
-  try {
-    body = (await request.json()) as { confirmation?: unknown };
-  } catch {
+  const parsed = await readJsonObject(request);
+  if (!parsed.ok) {
     return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");
   }
 
   const confirmation =
-    typeof body.confirmation === "string" ? body.confirmation : "";
+    typeof parsed.value.confirmation === "string"
+      ? parsed.value.confirmation
+      : "";
 
   if (confirmation !== RESET_LIBRARY_CONFIRMATION_PHRASE) {
     return jsonPublicError(

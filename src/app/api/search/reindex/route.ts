@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
+import { readJsonBody } from "@/lib/request-json";
 import {
   ensureJobRunner,
   getActiveEmbeddingJob,
@@ -48,12 +49,11 @@ export async function POST(request: Request) {
   if (rejected) return rejected;
 
   try {
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch {
+    const parsed = await readJsonBody(request);
+    if (!parsed.ok) {
       return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");
     }
+    const body = parsed.value;
 
     const provider =
       body && typeof body === "object" && "provider" in body

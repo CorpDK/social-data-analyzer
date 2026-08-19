@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { jsonInternalError } from "@/lib/api-error";
 import { cancelImportJob } from "@/lib/import/jobs";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
+import { readJsonBody, readOptionalJobId } from "@/lib/request-json";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -12,15 +13,9 @@ export async function POST(request: Request) {
   if (rejected) return rejected;
 
   try {
-    let jobId: number | undefined;
-    try {
-      const body = (await request.json()) as { jobId?: unknown };
-      if (typeof body.jobId === "number" && Number.isFinite(body.jobId)) {
-        jobId = Math.trunc(body.jobId);
-      }
-    } catch {
-      // Empty body cancels the active job.
-    }
+    // Empty / invalid body cancels the active job.
+    const parsed = await readJsonBody(request);
+    const jobId = parsed.ok ? readOptionalJobId(parsed.value) : undefined;
 
     const result = cancelImportJob(jobId);
     if (!result.ok) {

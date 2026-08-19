@@ -63,9 +63,6 @@ export function upsertLikedItemFts(
     );
 }
 
-/** @deprecated Alias — use upsertLikedItemFts. */
-export const upsertLikedItemFtsDoc = upsertLikedItemFts;
-
 export function removeItemSearch(
   itemId: number,
   sqlite: Database.Database = getSqlite(),

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
+import { readJsonBody } from "@/lib/request-json";
 import {
   getSettingsKeysStatus,
   updateSettingsKeys,
@@ -17,12 +18,11 @@ export async function PUT(request: Request) {
   const rejected = rejectUnlessLocalMutating(request);
   if (rejected) return rejected;
 
-  let body: UpdateSettingsKeysInput;
-  try {
-    body = (await request.json()) as UpdateSettingsKeysInput;
-  } catch {
+  const parsed = await readJsonBody(request);
+  if (!parsed.ok) {
     return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");
   }
+  const body = parsed.value as UpdateSettingsKeysInput;
 
   try {
     const status = updateSettingsKeys(body);
