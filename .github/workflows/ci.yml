@@ -40,6 +40,15 @@ jobs:
       - name: Bench smoke (RSS gate)
         run: pnpm bench:smoke
 
+      - name: Bench scale smoke (R3)
+        run: pnpm bench:scale
+
+      - name: Soak scale smoke (R3)
+        run: pnpm soak:scale
+        env:
+          INSTAGRAM_SAVES_KEYRING: memory
+          EMBEDDING_WORKER_INLINE: "1"
+
       - name: Build
         run: pnpm build
         env:

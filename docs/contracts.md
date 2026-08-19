@@ -176,11 +176,17 @@ malformed-recoverable): `scripts/fixtures/parse-edges/` via `pnpm test:parse`.
 
 ## Beyond A+ (optional backlog)
 
-Not required for the A+ grade — track elsewhere if pursued:
+Scale / parser resilience (**R3** — harnesses landed; record full baselines locally):
 
-- Fuller 50k+ import RSS / wall-time baseline (beyond `bench:smoke`) — **R3**
-- Property-based parser mutations (fast-check) — **R3**
-- Soak benchmark (250k-likes synthetic) — **R3**
+| ID | Smoke (CI / default) | Full (manual) |
+|----|----------------------|---------------|
+| `property-parse` | `pnpm test:unit -- src/lib/parse/property.test.ts` | same (deterministic seed) |
+| `rss-50k` | `pnpm bench:scale` (N=2 000) | `BENCH_SCALE_N=50000 pnpm bench:scale` |
+| `soak-250k` | `pnpm soak:scale` (N=1 000) | `SOAK_N=250000 pnpm soak:scale` |
+
+Full runs print a `[bench-scale] json …` / `[soak-scale] json …` summary line —
+paste into release notes when promoting a machine baseline. Do **not** run the
+250k soak in default CI.
 
 ### R2 durability evidence (landed)
 
@@ -191,3 +197,11 @@ Soak / chaos plan: `docs/runbook.md` § “Soak / chaos plan (R2 durability)”.
 - Vec integrity beyond counts: orphan / width / profile checks on Indexes status
   (`src/lib/search/vec-integrity.ts`, `integrityOk` on provider status)
 - CI peak-RSS gate: `pnpm bench:smoke` budgets streaming zip-extract RSS delta
+
+### R3 scale evidence (landed harness + smoke)
+
+- Property-based parser suite: `src/lib/parse/property.test.ts` (fast-check)
+- Scale RSS/wall harness: `scripts/bench-scale.ts` (`pnpm bench:scale`)
+- Synthetic soak: `scripts/soak-scale.ts` (`pnpm soak:scale`) — temp DB, FTS only
+- Shared synthetics: `src/lib/parse/synthetic.ts`
+- Operator detail: `docs/runbook.md` § “Scale baselines (R3)”

@@ -13,6 +13,10 @@ import AdmZip from "adm-zip";
 import { parseExportJsonFiles } from "../src/lib/parse/saves";
 import { parseLikedExportJsonFiles } from "../src/lib/parse/likes";
 import {
+  syntheticLikedPostsJson,
+  syntheticSavedPostsJson,
+} from "../src/lib/parse/synthetic";
+import {
   chunkIdsForSqlIn,
   SQL_IN_CLAUSE_BATCH_SIZE,
 } from "../src/lib/search/sync-rows";
@@ -38,40 +42,13 @@ function formatMiB(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
 }
 
-function syntheticSavedPostsJson(count: number): string {
-  const items = Array.from({ length: count }, (_, i) => ({
-    title: `user${i % 50}`,
-    string_list_data: [
-      {
-        href: `https://www.instagram.com/reel/bench${i}/`,
-        timestamp: 1_700_000_000 + i,
-        value: `user${i % 50}`,
-      },
-    ],
-  }));
-  return JSON.stringify({ saved_saved_media: items });
-}
-
-function syntheticLikedPostsJson(count: number): string {
-  const items = Array.from({ length: count }, (_, i) => ({
-    title: `liker${i % 40}`,
-    string_list_data: [
-      {
-        href: `https://www.instagram.com/p/likebench${i}/`,
-        timestamp: 1_700_100_000 + i,
-      },
-    ],
-  }));
-  return JSON.stringify({ likes_media_likes: items });
-}
-
 async function main() {
   const rows: BenchRow[] = [];
 
   // --- Parse (CPU only) ---
   const PARSE_N = 5_000;
-  const savesJson = syntheticSavedPostsJson(PARSE_N);
-  const likesJson = syntheticLikedPostsJson(PARSE_N);
+  const savesJson = syntheticSavedPostsJson(PARSE_N, { prefix: "bench" });
+  const likesJson = syntheticLikedPostsJson(PARSE_N, { prefix: "likebench" });
 
   let t0 = performance.now();
   const saves = parseExportJsonFiles([
@@ -126,7 +103,7 @@ async function main() {
     const okZip = new AdmZip();
     okZip.addFile(
       "your_instagram_activity/saved/saved_posts.json",
-      Buffer.from(syntheticSavedPostsJson(200), "utf8"),
+      Buffer.from(syntheticSavedPostsJson(200, { prefix: "ok" }), "utf8"),
     );
     okZip.writeZip(okZipPath);
 
@@ -143,7 +120,10 @@ async function main() {
     const rssZip = new AdmZip();
     rssZip.addFile(
       "your_instagram_activity/saved/saved_posts.json",
-      Buffer.from(syntheticSavedPostsJson(RSS_EXTRACT_N), "utf8"),
+      Buffer.from(
+        syntheticSavedPostsJson(RSS_EXTRACT_N, { prefix: "rss" }),
+        "utf8",
+      ),
     );
     rssZip.writeZip(rssZipPath);
 

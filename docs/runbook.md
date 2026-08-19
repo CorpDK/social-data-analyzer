@@ -169,7 +169,10 @@ way. **Reset library** (Settings danger zone) wipes content/indexes but keeps
 ```bash
 pnpm exec tsc --noEmit
 pnpm test:parse
+pnpm test:unit -- src/lib/parse/property.test.ts   # R3 property-parse (fast-check)
 pnpm bench:smoke   # synthetic parse / IN() chunk / zip-cap timings — no real DB, no Voyage/Ollama
+pnpm bench:scale   # R3 scale smoke (2k); full 50k: BENCH_SCALE_N=50000 pnpm bench:scale
+pnpm soak:scale    # R3 soak smoke (1k likes→temp DB+FTS); full: SOAK_N=250000 pnpm soak:scale
 ```
 
 Do **not** run `pnpm reindex` or live embedding against a real user DB while
@@ -198,13 +201,15 @@ pnpm bench:smoke
 sqlite3 data/instagram-saves.db 'PRAGMA integrity_check;'
 ```
 
-### Explicitly deferred to R3
+### Scale baselines (R3)
 
-- Fuller **50k+** import RSS / wall-time baseline (`rss-50k`)
-- **250k** synthetic soak import + reindex (`soak-250k`)
-- Property-based parser mutations (`property-parse`)
+| Scenario | How to exercise | Pass criteria |
+|----------|-----------------|---------------|
+| Property parser mutations | `pnpm test:unit -- src/lib/parse/property.test.ts` | fast-check suite green (fixed seed); parsers never throw on garbage / mutated trees |
+| 50k+ RSS / wall-time | Smoke: `pnpm bench:scale` (N=2k). Full: `BENCH_SCALE_N=50000 pnpm bench:scale` | Smoke hard-fails on wall/RSS budgets; full run prints JSON summary for contracts paste (no multi-hour soak) |
+| 250k synthetic soak | Smoke: `pnpm soak:scale` (N=1k). Full: `SOAK_N=250000 pnpm soak:scale` | Temp DB import + FTS reindex + `integrity_check`; smoke budgets hard-fail; full numbers for release notes |
 
-Long multi-hour soak harnesses are out of scope for R2; the table above is the
-first evidence slice that CI can keep green.
+Paste full-run `[bench-scale] json …` / `[soak-scale] json …` lines into release notes
+or `docs/contracts.md` Beyond A+ when recording a machine baseline.
 
 Beyond-A+ scale work: see `docs/contracts.md` and remaining-work tracker R3.
