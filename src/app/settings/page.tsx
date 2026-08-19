@@ -1,4 +1,5 @@
 import { DangerZone } from "@/components/danger-zone";
+import { DbMaintenance } from "@/components/db-maintenance";
 import { SettingsForm } from "@/components/settings-form";
 
 export const dynamic = "force-dynamic";
@@ -20,6 +21,7 @@ export default function SettingsPage() {
       </section>
 
       <SettingsForm />
+      <DbMaintenance />
       <DangerZone />
     </div>
   );

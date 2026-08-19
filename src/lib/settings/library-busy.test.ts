@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
 import {
+  assertLibraryIdle,
   assertLibraryIdleForReset,
   getLibraryBusyState,
   LibraryBusyError,
@@ -70,6 +71,14 @@ describe("getLibraryBusyState / assertLibraryIdleForReset", () => {
       expect((error as LibraryBusyError).status).toBe(409);
       expect((error as LibraryBusyError).message).toMatch(/import #1/);
       expect((error as LibraryBusyError).message).toMatch(/embedding #1/);
+    }
+
+    try {
+      assertLibraryIdle(sqlite, "run VACUUM");
+      throw new Error("expected LibraryBusyError");
+    } catch (error) {
+      expect(error).toBeInstanceOf(LibraryBusyError);
+      expect((error as LibraryBusyError).message).toMatch(/Cannot run VACUUM/);
     }
   });
 });

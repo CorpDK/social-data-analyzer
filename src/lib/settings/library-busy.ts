@@ -39,9 +39,12 @@ function tableExists(sqlite: Database.Database, name: string): boolean {
 
 /**
  * Pending or running import/embedding jobs that own (or will own) writers.
+ * `operation` is only used in the busy reason string (e.g. "reset library",
+ * "run VACUUM").
  */
 export function getLibraryBusyState(
   sqlite: Database.Database,
+  operation = "reset library",
 ): LibraryBusyState {
   const jobs: BusyJobSummary[] = [];
 
@@ -89,16 +92,26 @@ export function getLibraryBusyState(
     (j) => `${j.kind} #${j.id} (${j.state}: ${j.label})`,
   );
   const reason =
-    `Cannot reset library while jobs are active: ${parts.join("; ")}. ` +
+    `Cannot ${operation} while jobs are active: ${parts.join("; ")}. ` +
     `Cancel import/reindex (or wait until they finish), then try again.`;
 
   return { busy: true, jobs, reason };
 }
 
-/** Throw 409-class error when wipe would race active writers. */
-export function assertLibraryIdleForReset(sqlite: Database.Database): void {
-  const state = getLibraryBusyState(sqlite);
+/**
+ * Throw 409-class error when a maintenance/wipe would race active writers.
+ */
+export function assertLibraryIdle(
+  sqlite: Database.Database,
+  operation = "reset library",
+): void {
+  const state = getLibraryBusyState(sqlite, operation);
   if (state.busy) {
     throw new LibraryBusyError(state.reason);
   }
+}
+
+/** Prefer {@link assertLibraryIdle}; kept for reset-library call sites. */
+export function assertLibraryIdleForReset(sqlite: Database.Database): void {
+  assertLibraryIdle(sqlite, "reset library");
 }

@@ -57,6 +57,25 @@ Liked comments no longer collapse to `comment:<post>:<author>` alone: prefer
 `import_jobs` or `embedding_jobs` row is `pending` or `running`. Cancel or wait
 for those jobs first — never wipe the DB under active writers.
 
+## WAL checkpoint / VACUUM (Settings)
+
+Long-lived local DBs can grow a WAL file or accumulate freelist pages. On
+**Settings → Database maintenance**:
+
+| Action | API | Effect |
+|--------|-----|--------|
+| WAL checkpoint | `POST /api/settings/db-maintenance` `{ "action": "checkpoint" }` | `PRAGMA wal_checkpoint(TRUNCATE)` — flush WAL into the main `.db` |
+| VACUUM | same route `{ "action": "vacuum" }` | Rebuild the DB file; may take noticeable time on large libraries |
+
+Both refuse with **HTTP 409** (`LIBRARY_BUSY`) while import/reindex jobs are
+`pending`/`running`. Prefer checkpoint for routine flush; use VACUUM after big
+deletes (or when disk use looks inflated). CLI equivalent (app stopped):
+
+```bash
+sqlite3 data/instagram-saves.db 'PRAGMA wal_checkpoint(TRUNCATE);'
+sqlite3 data/instagram-saves.db 'VACUUM;'
+```
+
 ## Partial import recovery
 
 Import writes commit in batches. On fail/cancel the pipeline **rolls back
