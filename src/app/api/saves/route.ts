@@ -1,15 +1,16 @@
 import { NextResponse } from "next/server";
 import { jsonPublicError } from "@/lib/api-error";
-import { listSaves, listSavesFilterOptions } from "@/lib/queries";
 import { parseBrowseFilterParams, parsePageParams } from "@/lib/query-params";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
 export async function GET(request: Request) {
+  const storage = await getStorage();
   const { searchParams } = new URL(request.url);
 
   if (searchParams.get("filters") === "1") {
-    return NextResponse.json(listSavesFilterOptions());
+    return NextResponse.json(await storage.catalog.listSavesFilterOptions());
   }
 
   const pageParams = parsePageParams(searchParams);
@@ -22,7 +23,7 @@ export async function GET(request: Request) {
     return jsonPublicError(400, "INVALID_FILTER_PARAMS", filters.error);
   }
 
-  const data = await listSaves({
+  const data = await storage.catalog.listSaves({
     q: filters.q,
     type: filters.type,
     author: filters.author,

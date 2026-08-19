@@ -212,7 +212,7 @@ export async function runSyncUpsertChunkedSuite(ctx: TestContext) {
   }
 
   const settingsBeforeReset = getSettingsKeysStatus();
-  const reset = resetLibrary(RESET_LIBRARY_CONFIRMATION_PHRASE);
+  const reset = resetLibrary(RESET_LIBRARY_CONFIRMATION_PHRASE, sqlite);
   if (!reset.ok || reset.wiped.savedItems < 1 || reset.wiped.imports < 1) {
     throw new Error("resetLibrary should wipe existing content rows");
   }

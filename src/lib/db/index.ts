@@ -2,8 +2,7 @@
  * Compatibility facade for the SQLite connection.
  *
  * Connection lifecycle lives in `src/lib/storage/sqlite/connection.ts`.
- * Prefer `getStorage()` from `src/lib/storage` for new code (ME-1).
- * Sync `getSqlite` / `getDb` call sites convert in ME-2.
+ * Prefer `getStorage()` from `src/lib/storage` for app call sites.
  *
  * Ownership: Drizzle (`getDb` + `./schema`) owns the relational catalog;
  * raw SQL owns FTS/vec/jobs/`app_settings`/SCHEMA_VERSION DDL (see `./ddl.ts`).

@@ -6,8 +6,7 @@ import {
   resolveAuthorMetrics,
   resolveLikesWriteMetrics,
 } from "@/lib/import-log";
-import { getImportById } from "@/lib/queries";
-import { countPersistedImportRows } from "@/lib/import/partial-accounting";
+import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
@@ -98,7 +97,8 @@ export default async function ImportDetailPage({
   const id = Number(rawId);
   if (!Number.isFinite(id) || id <= 0) notFound();
 
-  const row = getImportById(id);
+  const storage = await getStorage();
+  const row = await storage.catalog.getImportById(id);
   if (!row) notFound();
 
   const log = parseImportLog(row.notes);
@@ -111,7 +111,7 @@ export default async function ImportDetailPage({
       (likesWrite != null &&
         likesWrite.added + likesWrite.updated + likesWrite.skipped > 0));
 
-  const persisted = countPersistedImportRows(id);
+  const persisted = await storage.catalog.countPersistedImportRows(id);
   const hasInserts =
     persisted.itemsAdded > 0 || persisted.likesAdded > 0;
   const showDiscard =

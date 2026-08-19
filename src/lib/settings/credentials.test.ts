@@ -90,20 +90,27 @@ describe("settings validate-then-commit", () => {
       localEnabled: { saves: true, likes: false },
     });
     expect(setKeyringSecret).toHaveBeenCalledWith("openai", "sk-ok");
-    expect(setAppSetting).toHaveBeenCalledWith("embedding_provider", "openai");
+    expect(setAppSetting).toHaveBeenCalledWith(
+      "embedding_provider",
+      "openai",
+      expect.anything(),
+    );
     expect(setAppSetting).toHaveBeenCalledWith(
       "embedding_timeout_ms",
       "12000",
+      expect.anything(),
     );
     expect(setProviderLibraryEnabled).toHaveBeenCalledWith(
       "local",
       "saves",
       true,
+      expect.anything(),
     );
     expect(setProviderLibraryEnabled).toHaveBeenCalledWith(
       "local",
       "likes",
       false,
+      expect.anything(),
     );
   });
 });

@@ -32,7 +32,7 @@ full ORM rewrite of FTS/vec/jobs.
 
 - Wire/job contracts: `docs/contracts.md`
 - Connection entry: `src/lib/storage` (`getStorage`) + `src/lib/storage/sqlite/connection.ts`
-  (`getSqlite` / `getDb`; also re-exported from `src/lib/db` until ME-2)
+  (`getSqlite` / `getDb`; internal open/schema — prefer ports at call sites)
 - DDL + `SCHEMA_VERSION`: `src/lib/db/ddl.ts`
 - Drizzle catalog only: `src/lib/db/schema.ts`
-- Ports: `src/lib/storage/ports.ts` (ME-1); call-site await conversion is ME-2
+- Ports: `src/lib/storage/ports.ts`; routes/pages/SSE await `getStorage()` (ME-2)

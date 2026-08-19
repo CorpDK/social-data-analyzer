@@ -37,8 +37,8 @@ export type RankedHit = {
  */
 export const BROWSE_HYBRID_SEARCH_LIMIT = 10_000;
 
-/** sqlite-vec `k` ceiling when fetching hybrid vector candidates. */
-export const HYBRID_VEC_FETCH_K_MAX = 10_000;
+/** sqlite-vec `k` ceiling when fetching hybrid vector candidates (engine max). */
+export const HYBRID_VEC_FETCH_K_MAX = 4_096;
 
 const RRF_K = 60;
 
@@ -128,13 +128,14 @@ function rrfMerge(
 export function searchFts(
   library: SearchLibrary,
   query: string,
-  limit = 200,
+  limit: number,
+  sqlite: import("better-sqlite3").Database,
 ): { hits: Array<{ id: number; rank: number }>; degraded: boolean } {
   const match = buildFtsQuery(query);
   if (!match) return { hits: [], degraded: false };
   const table = library === "saves" ? "saved_items_fts" : "liked_items_fts";
   try {
-    const hits = getSqlite()
+    const hits = sqlite
       .prepare(
         `SELECT rowid AS id, rank
          FROM ${table}
@@ -223,7 +224,7 @@ async function hybridSearchIdsForLibrary(
   requestedProvider?: EmbeddingProvider | null,
 ): Promise<HybridSearchResult> {
   const resolved = resolveSearchProvider(requestedProvider ?? null, library);
-  const ftsResult = searchFts(library, query, limit);
+  const ftsResult = searchFts(library, query, limit, getSqlite());
   const ftsHits = ftsResult.hits;
   const ftsDegraded = ftsResult.degraded;
   let vecResult: VecSearchResult;

@@ -11,6 +11,7 @@ import {
   type LibraryEnables,
   type PreferredProvider,
 } from "./app-settings";
+import { getSqlite } from "../db";
 import {
   deleteKeyringSecret,
   getKeyringSecret,
@@ -87,15 +88,15 @@ export type SettingsKeysResponse = {
 };
 
 export function getSettingsKeysStatus(): SettingsKeysResponse {
-  const ollama = getOllamaSettings();
-  const openai = getOpenAiSettings();
-  const voyage = getVoyageSettings();
+  const ollama = getOllamaSettings(getSqlite());
+  const openai = getOpenAiSettings(getSqlite());
+  const voyage = getVoyageSettings(getSqlite());
   const ollamaSecret = getSecretStatus("ollama");
-  const localEnabled = getProviderLibraryEnables("local");
+  const localEnabled = getProviderLibraryEnables("local", getSqlite());
   return {
     keyring: getKeyringStatus(),
-    preferredProvider: getPreferredEmbeddingProvider(),
-    timeoutMs: getEmbeddingTimeoutMs(),
+    preferredProvider: getPreferredEmbeddingProvider(getSqlite()),
+    timeoutMs: getEmbeddingTimeoutMs(getSqlite()),
     local: {
       enabled: localEnabled,
     },
@@ -346,15 +347,15 @@ function applySettingsKeysCommitPlan(plan: SettingsKeysCommitPlan): void {
   }
 
   for (const setting of plan.settings) {
-    setAppSetting(setting.key, setting.value);
+    setAppSetting(setting.key, setting.value, getSqlite());
   }
 
   for (const enable of plan.libraryEnables) {
     if (typeof enable.saves === "boolean") {
-      setProviderLibraryEnabled(enable.provider, "saves", enable.saves);
+      setProviderLibraryEnabled(enable.provider, "saves", enable.saves, getSqlite());
     }
     if (typeof enable.likes === "boolean") {
-      setProviderLibraryEnabled(enable.provider, "likes", enable.likes);
+      setProviderLibraryEnabled(enable.provider, "likes", enable.likes, getSqlite());
     }
   }
 }

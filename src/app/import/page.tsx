@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { UploadForm } from "@/components/upload-form";
-import { listImports } from "@/lib/queries";
+import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
@@ -11,8 +11,9 @@ function formatDate(value: Date) {
   });
 }
 
-export default function ImportPage() {
-  const imports = listImports();
+export default async function ImportPage() {
+  const storage = await getStorage();
+  const imports = await storage.catalog.listImports();
 
   return (
     <div className="space-y-8">

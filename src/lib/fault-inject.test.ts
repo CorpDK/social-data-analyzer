@@ -70,7 +70,7 @@ const deadWorkerProbe: ProcessProbe = {
 };
 
 describe("fault injection durability", () => {
-  it("SIGKILL mid-embed: reclaim resumes with processed preserved + integrity ok", () => {
+  it("SIGKILL mid-embed: reclaim resumes with processed preserved + integrity ok", async () => {
     const sqlite = memoryDb();
     // Simulate committed embedding chunks before the kill.
     sqlite
@@ -86,7 +86,7 @@ describe("fault injection durability", () => {
       )
       .run(Math.floor(Date.now() / 1000) - 120);
 
-    const result = reclaimOrphanedEmbeddingJobRows(sqlite, {
+    const result = await reclaimOrphanedEmbeddingJobRows(sqlite, {
       processProbe: deadWorkerProbe,
       killGraceMs: 0,
     });
@@ -120,7 +120,7 @@ describe("fault injection durability", () => {
     expect(itemCount).toBe(2);
   });
 
-  it("SIGKILL mid-import-write: spool present → requeue; integrity ok", () => {
+  it("SIGKILL mid-import-write: spool present → requeue; integrity ok", async () => {
     const sqlite = memoryDb();
     // First write batch already committed before the kill.
     sqlite
@@ -149,7 +149,7 @@ describe("fault injection durability", () => {
     expect(checkSqliteIntegrity(sqlite).ok).toBe(true);
   });
 
-  it("SIGKILL mid-import with missing spool → failed; committed rows stay consistent", () => {
+  it("SIGKILL mid-import with missing spool → failed; committed rows stay consistent", async () => {
     const sqlite = memoryDb();
     sqlite
       .prepare(

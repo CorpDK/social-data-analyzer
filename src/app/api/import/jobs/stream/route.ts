@@ -1,7 +1,5 @@
-import {
-  getImportJobsStatus,
-  isImportQueueIdle,
-} from "@/lib/import/jobs";
+import { isImportQueueIdle } from "@/lib/import/jobs";
+import { getStorage } from "@/lib/storage";
 import { IMPORT_JOBS_CHANNEL, createJobSseResponse } from "@/lib/sse";
 import { importJobsFingerprint } from "@/lib/sse-fingerprint";
 
@@ -16,7 +14,10 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   return createJobSseResponse({
     channel: IMPORT_JOBS_CHANNEL,
-    getSnapshot: () => getImportJobsStatus(),
+    getSnapshot: async () => {
+      const storage = await getStorage();
+      return storage.jobs.getImportJobsStatus();
+    },
     fingerprint: importJobsFingerprint,
     isIdle: isImportQueueIdle,
     signal: request.signal,

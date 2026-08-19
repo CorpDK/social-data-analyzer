@@ -3,6 +3,7 @@ import {
   getOpenAiApiKey,
   getVoyageApiKey,
 } from "../settings/credentials";
+import { getSqlite } from "../db";
 import {
   getEmbeddingTimeoutMs,
   getOllamaSettings,
@@ -67,11 +68,11 @@ function openAiCompatibleEndpoint(baseUrl: string): string {
 }
 
 function openAiEndpoint(): string {
-  return openAiCompatibleEndpoint(getOpenAiSettings().baseUrl);
+  return openAiCompatibleEndpoint(getOpenAiSettings(getSqlite()).baseUrl);
 }
 
 function ollamaEndpoint(): string {
-  return openAiCompatibleEndpoint(getOllamaSettings().baseUrl);
+  return openAiCompatibleEndpoint(getOllamaSettings(getSqlite()).baseUrl);
 }
 
 export function localEmbeddingConfig(): EmbeddingConfig {
@@ -156,7 +157,7 @@ export function embeddingConfigForProvider(
 ): EmbeddingConfig {
   if (provider === "local") return localEmbeddingConfig();
   if (provider === "ollama") {
-    const settings = getOllamaSettings();
+    const settings = getOllamaSettings(getSqlite());
     return {
       profile: {
         provider,
@@ -171,7 +172,7 @@ export function embeddingConfigForProvider(
     return {
       profile: {
         provider,
-        model: getVoyageSettings().model,
+        model: getVoyageSettings(getSqlite()).model,
         dimensions: EMBEDDING_DIMENSIONS,
         endpoint: VOYAGE_ENDPOINT,
       },
@@ -181,7 +182,7 @@ export function embeddingConfigForProvider(
   return {
     profile: {
       provider,
-      model: getOpenAiSettings().model,
+      model: getOpenAiSettings(getSqlite()).model,
       dimensions: EMBEDDING_DIMENSIONS,
       endpoint: openAiEndpoint(),
     },
@@ -192,9 +193,9 @@ export function embeddingConfigForProvider(
 /** At least one neural index is explicitly enabled and credentialed. */
 export function isRemoteEmbeddingConfigured(): boolean {
   return Boolean(
-    (isOpenAiEnabled() && getOpenAiApiKey()) ||
-      (isVoyageEnabled() && getVoyageApiKey()) ||
-      isOllamaEnabled(),
+    (isOpenAiEnabled(getSqlite()) && getOpenAiApiKey()) ||
+      (isVoyageEnabled(getSqlite()) && getVoyageApiKey()) ||
+      isOllamaEnabled(getSqlite()),
   );
 }
 
@@ -202,7 +203,7 @@ export function isRemoteEmbeddingConfigured(): boolean {
 export const EMBEDDING_API_BATCH_SIZE = 64;
 
 function embeddingRequestTimeoutMs(batchSize: number): number {
-  const timeout = getEmbeddingTimeoutMs();
+  const timeout = getEmbeddingTimeoutMs(getSqlite());
   if (batchSize <= 1) return timeout;
   // Modest headroom for batched remote calls without unbounded waits.
   return Math.min(timeout * 8, timeout + batchSize * 250);

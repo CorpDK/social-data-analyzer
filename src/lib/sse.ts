@@ -91,7 +91,7 @@ export function encodeSseEvent(event: string, data: unknown): string {
 
 export type SseStreamOptions<T> = {
   channel: string;
-  getSnapshot: () => T;
+  getSnapshot: () => T | Promise<T>;
   /**
    * When true after a snapshot, also emit an `idle` event.
    * Does not close the stream (EventSource would reconnect); the client closes.
@@ -182,47 +182,69 @@ export function createJobSseResponse<T>(
         }
       };
 
-      const pushSnapshot = (force = false) => {
+      let pushInFlight = false;
+      let pushQueued = false;
+      let pushQueuedForce = false;
+
+      const pushSnapshot = async (force = false) => {
         if (closed) return;
-        let snapshot: T;
-        try {
-          snapshot = options.getSnapshot();
-        } catch (error) {
-          console.error("SSE snapshot failed", error);
-          sendRaw(
-            encodeSseEvent("error", {
-              error: "Failed to read job status",
-              code: "SSE_SNAPSHOT_FAILED",
-            }),
-          );
+        if (pushInFlight) {
+          pushQueued = true;
+          pushQueuedForce = pushQueuedForce || force;
           return;
         }
+        pushInFlight = true;
+        try {
+          do {
+            const runForce = force || pushQueuedForce;
+            pushQueued = false;
+            pushQueuedForce = false;
+            force = false;
 
-        const fp = fingerprint(snapshot);
-        if (!force && fp === lastFingerprint) return;
-        lastFingerprint = fp;
-        sendRaw(encodeSseEvent("snapshot", snapshot));
-        lastHeartbeat = Date.now();
+            let snapshot: T;
+            try {
+              snapshot = await options.getSnapshot();
+            } catch (error) {
+              console.error("SSE snapshot failed", error);
+              sendRaw(
+                encodeSseEvent("error", {
+                  error: "Failed to read job status",
+                  code: "SSE_SNAPSHOT_FAILED",
+                }),
+              );
+              continue;
+            }
 
-        if (options.isIdle?.(snapshot)) {
-          if (!idleNotified) {
-            idleNotified = true;
-            sendRaw(encodeSseEvent("idle", snapshot));
-          }
-        } else {
-          idleNotified = false;
+            if (closed) return;
+            const fp = fingerprint(snapshot);
+            if (!runForce && fp === lastFingerprint) continue;
+            lastFingerprint = fp;
+            sendRaw(encodeSseEvent("snapshot", snapshot));
+            lastHeartbeat = Date.now();
+
+            if (options.isIdle?.(snapshot)) {
+              if (!idleNotified) {
+                idleNotified = true;
+                sendRaw(encodeSseEvent("idle", snapshot));
+              }
+            } else {
+              idleNotified = false;
+            }
+          } while (pushQueued && !closed);
+        } finally {
+          pushInFlight = false;
         }
       };
 
       // Initial snapshot
-      pushSnapshot(true);
+      void pushSnapshot(true);
 
       unsubscribe = subscribeJobEvents(options.channel, () => {
-        pushSnapshot(false);
+        void pushSnapshot(false);
       });
 
       pollTimer = setInterval(() => {
-        pushSnapshot(false);
+        void pushSnapshot(false);
       }, pollMs);
 
       heartbeatTimer = setInterval(() => {

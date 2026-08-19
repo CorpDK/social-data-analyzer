@@ -28,7 +28,7 @@ export function createSqliteMaintenanceOps(
       getLibraryBusyState(sqlite, operation),
     runMaintenance: async (action) => runDbMaintenance(action, sqlite),
     // resetLibrary still uses getSqlite(); bind singleton before calling in tests.
-    resetLibrary: async (confirmation) => resetLibrary(confirmation),
+    resetLibrary: async (confirmation) => resetLibrary(confirmation, sqlite),
     checkIntegrity: async () => checkSqliteIntegrity(sqlite),
   };
 }

@@ -26,7 +26,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
     getActiveEmbeddingJob,
   } = await import("../../src/lib/search/jobs");
 
-  const statusBefore = getSearchIndexStatus();
+  const statusBefore = await getSearchIndexStatus();
   if (statusBefore.libraries.saves.providers.length !== 4) {
     throw new Error("Status should include all four embedding providers");
   }
@@ -53,7 +53,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
     throw new Error("OpenAI should be enabled and credentialed for status test");
   }
   updateSettingsKeys({ openaiEnabled: false });
-  const disabledOpenAi = getSearchIndexStatus().libraries.saves.providers.find(
+  const disabledOpenAi = (await getSearchIndexStatus()).libraries.saves.providers.find(
     (p) => p.provider === "openai",
   );
   if (
@@ -70,10 +70,10 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   updateSettingsKeys({
     openaiEnabled: { saves: false, likes: true },
   });
-  const likesOnlyOpenAi = getSearchIndexStatus().libraries.likes.providers.find(
+  const likesOnlyOpenAi = (await getSearchIndexStatus()).libraries.likes.providers.find(
     (p) => p.provider === "openai",
   );
-  const savesOnlyOpenAi = getSearchIndexStatus().libraries.saves.providers.find(
+  const savesOnlyOpenAi = (await getSearchIndexStatus()).libraries.saves.providers.find(
     (p) => p.provider === "openai",
   );
   if (
@@ -93,14 +93,14 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   sqlite
     .prepare(`DELETE FROM embedding_index_profiles WHERE index_name = 'openai'`)
     .run();
-  const emptyOpenAi = getSearchIndexStatus().libraries.saves.providers.find(
+  const emptyOpenAi = (await getSearchIndexStatus()).libraries.saves.providers.find(
     (p) => p.provider === "openai",
   );
   if (emptyOpenAi?.health !== "empty" || emptyOpenAi.embeddedCount !== 0) {
     throw new Error("Cleared openai index should report empty coverage");
   }
 
-  const started = startReindexJob("openai");
+  const started = await startReindexJob("openai");
   if (!started.ok) {
     throw new Error(`Failed to start openai reindex: ${started.error}`);
   }
@@ -108,14 +108,14 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
     throw new Error("Started openai job should be running");
   }
   // Different provider should enqueue behind the active job (not 409).
-  const queued = startReindexJob("local");
+  const queued = await startReindexJob("local");
   if (!queued.ok) {
     throw new Error(`Local reindex should enqueue while openai runs: ${queued.error}`);
   }
   if (queued.job.state !== "pending" && getPendingEmbeddingJobs().length < 1) {
     throw new Error("Local job should be pending in the queue");
   }
-  const duplicate = startReindexJob("local");
+  const duplicate = await startReindexJob("local");
   if (duplicate.ok || duplicate.status !== 409) {
     throw new Error("Duplicate local job should be rejected with 409");
   }
@@ -126,7 +126,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
       `Queue should finish with a completed job (got ${finished?.state}: ${finished?.error})`,
     );
   }
-  const openaiAfter = getSearchIndexStatus().libraries.saves.providers.find(
+  const openaiAfter = (await getSearchIndexStatus()).libraries.saves.providers.find(
     (p) => p.provider === "openai",
   );
   if (
@@ -137,7 +137,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   }
 
   // all-configured expands to one job per enabled provider × library (saves + likes).
-  const allJobs = startReindexJob("all-configured");
+  const allJobs = await startReindexJob("all-configured");
   if (!allJobs.ok) {
     throw new Error(`Failed to start all-configured reindex: ${allJobs.error}`);
   }
@@ -161,7 +161,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   }
 
   // Cancel active only; queued jobs remain and continue.
-  const cancelled = cancelReindexJob(activeAfterAll.id);
+  const cancelled = await cancelReindexJob(activeAfterAll.id);
   if (!cancelled.ok) {
     throw new Error(`Cancel should succeed: ${cancelled.error}`);
   }
@@ -237,7 +237,7 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
   if (!failedReason || !failedReason.includes("failed")) {
     throw new Error("A failed job must never be startable by a worker");
   }
-  ensureJobRunner();
+  await ensureJobRunner();
   if (getEmbeddingJob(failedJobId)?.state !== "failed") {
     throw new Error("Terminal jobs must not be revived by the queue");
   }
@@ -254,7 +254,7 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
       `Queued job for a disabled provider must be blocked (got ${staleReason})`,
     );
   }
-  ensureJobRunner();
+  await ensureJobRunner();
   const staleVoyageJob = getEmbeddingJob(staleVoyageJobId);
   if (staleVoyageJob?.state !== "failed" || !staleVoyageJob.error) {
     throw new Error(
@@ -348,7 +348,7 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
 
   // --- SSE re-entrancy: a status subscriber must not re-queue a claimed job ---
   // This mirrors the /api/search/status/stream handler, whose every snapshot
-  // calls ensureJobRunner(). Job writes publish synchronously, so an unclaimed
+  // calls await ensureJobRunner(). Job writes publish synchronously, so an unclaimed
   // runner used to re-queue the row it had just started and start it again.
   const { subscribeJobEvents, SEARCH_STATUS_CHANNEL } = await import(
     "../../src/lib/sse"
@@ -363,11 +363,11 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
         .get() as { c: number }
     ).c;
     maxConcurrentRunning = Math.max(maxConcurrentRunning, running);
-    ensureJobRunner();
+    void ensureJobRunner();
   });
 
   try {
-    const reentrant = startReindexJob("local");
+    const reentrant = await startReindexJob("local");
     if (!reentrant.ok) {
       throw new Error(`Reentrancy job should start: ${reentrant.error}`);
     }

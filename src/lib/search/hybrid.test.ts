@@ -14,7 +14,7 @@ vi.mock("../db", () => ({
 describe("hybrid browse caps", () => {
   it("raises the former 500 browse/search ceiling for honest totals", () => {
     expect(BROWSE_HYBRID_SEARCH_LIMIT).toBe(10_000);
-    expect(HYBRID_VEC_FETCH_K_MAX).toBe(10_000);
+    expect(HYBRID_VEC_FETCH_K_MAX).toBe(4_096);
     expect(BROWSE_HYBRID_SEARCH_LIMIT).toBeGreaterThan(500);
   });
 });
@@ -33,15 +33,15 @@ describe("hybrid search degrade logging", () => {
       );
     });
 
-    vi.mocked(getSqlite).mockReturnValue({
+    const sqlite = {
       prepare: () => ({
         all: () => {
           throw new Error("fts5: syntax error");
         },
       }),
-    } as never);
+    } as never;
 
-    const result = searchFts("saves", "nature");
+    const result = searchFts("saves", "nature", 200, sqlite);
     expect(result.hits).toEqual([]);
     expect(result.degraded).toBe(true);
     expect(warnings[0]).toMatch(/FTS query failed \(saves\)/);

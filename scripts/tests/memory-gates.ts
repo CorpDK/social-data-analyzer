@@ -71,7 +71,7 @@ export async function runMemoryGatesSuite(_ctx: TestContext) {
     );
   }
 
-  const statusWithHost = getSearchIndexStatus();
+  const statusWithHost = await getSearchIndexStatus();
   if (
     !statusWithHost.host ||
     typeof statusWithHost.host.ollamaLargeMinAvailableMb !== "number" ||

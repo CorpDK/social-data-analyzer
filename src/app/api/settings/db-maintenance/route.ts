@@ -2,11 +2,8 @@ import { NextResponse } from "next/server";
 import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import { readJsonObject } from "@/lib/request-json";
-import {
-  LibraryBusyError,
-  parseDbMaintenanceAction,
-  runDbMaintenance,
-} from "@/lib/settings/db-maintenance";
+import { LibraryBusyError, parseDbMaintenanceAction } from "@/lib/settings/db-maintenance";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -35,7 +32,8 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = runDbMaintenance(action);
+    const storage = await getStorage();
+    const result = await storage.maintenance.runMaintenance(action);
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof LibraryBusyError) {

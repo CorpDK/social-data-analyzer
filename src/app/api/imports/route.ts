@@ -1,11 +1,14 @@
 import { NextResponse } from "next/server";
-import { listFilterOptions, listImports } from "@/lib/queries";
+import { listFilterOptions } from "@/lib/queries";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
 export async function GET() {
+  const storage = await getStorage();
+  const imports = await storage.catalog.listImports();
   return NextResponse.json({
-    imports: listImports().map((row) => ({
+    imports: imports.map((row) => ({
       ...row,
       importedAt: row.importedAt.toISOString(),
     })),

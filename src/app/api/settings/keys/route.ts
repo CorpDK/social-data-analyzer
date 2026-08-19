@@ -7,10 +7,12 @@ import {
   updateSettingsKeys,
   type UpdateSettingsKeysInput,
 } from "@/lib/settings/credentials";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
 export async function GET() {
+  await getStorage();
   return NextResponse.json(getSettingsKeysStatus());
 }
 
@@ -18,6 +20,7 @@ export async function PUT(request: Request) {
   const rejected = rejectUnlessLocalMutating(request);
   if (rejected) return rejected;
 
+  await getStorage();
   const parsed = await readJsonBody(request);
   if (!parsed.ok) {
     return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");

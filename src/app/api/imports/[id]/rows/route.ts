@@ -1,11 +1,8 @@
 import { NextResponse } from "next/server";
 import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
-import {
-  discardImportInserts,
-  ImportDiscardBusyError,
-} from "@/lib/import/rollback-partial";
+import { ImportDiscardBusyError } from "@/lib/import/rollback-partial";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
-import { getImportById } from "@/lib/queries";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -22,18 +19,19 @@ export async function DELETE(
   if (rejected) return rejected;
 
   try {
+    const storage = await getStorage();
     const { id: rawId } = await context.params;
     const id = Number(rawId);
     if (!Number.isFinite(id) || id <= 0) {
       return jsonPublicError(400, "INVALID_IMPORT_ID", "Invalid import id");
     }
 
-    const row = getImportById(id);
+    const row = await storage.catalog.getImportById(id);
     if (!row) {
       return jsonPublicError(404, "IMPORT_NOT_FOUND", "Import not found");
     }
 
-    const result = discardImportInserts(id);
+    const result = await storage.catalog.discardImportInserts(id);
     return NextResponse.json({
       importId: id,
       savesDeleted: result.savesDeleted,

@@ -1,5 +1,4 @@
 import type Database from "better-sqlite3";
-import { getSqlite } from "../db";
 
 export type PreferredProvider = "local" | "ollama" | "openai" | "voyage";
 
@@ -86,7 +85,7 @@ const LIBRARY_ENABLED_KEYS: Record<
 const legacyEnableMigrated = new WeakSet<object>();
 
 export function migrateLegacyProviderEnableKeys(
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   if (legacyEnableMigrated.has(sqlite)) return;
   ensureAppSettingsTable(sqlite);
@@ -108,7 +107,7 @@ export function migrateLegacyProviderEnableKeys(
 }
 
 export function ensureAppSettingsTable(
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   sqlite.exec(`
     CREATE TABLE IF NOT EXISTS app_settings (
@@ -121,7 +120,7 @@ export function ensureAppSettingsTable(
 
 export function getAppSetting(
   key: AppSettingKey,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): string | null {
   ensureAppSettingsTable(sqlite);
   const row = sqlite
@@ -134,7 +133,7 @@ export function getAppSetting(
 export function setAppSetting(
   key: AppSettingKey,
   value: string | null,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   ensureAppSettingsTable(sqlite);
   if (value === null || value.trim() === "") {
@@ -230,7 +229,7 @@ function envCandidatesForProvider(
 export function isProviderIndexEnabled(
   provider: PreferredProvider,
   library: SearchLibrarySetting,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): boolean {
   migrateLegacyProviderEnableKeys(sqlite);
 
@@ -249,64 +248,72 @@ export function isProviderIndexEnabled(
 
 /** True when enabled for the given library, or either library if omitted. */
 export function isLocalEnabled(
-  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  libraryOrSqlite: SearchLibrarySetting | Database.Database,
   maybeSqlite?: Database.Database,
 ): boolean {
   if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    if (!maybeSqlite) {
+      throw new Error("isLocalEnabled(library, sqlite) requires sqlite");
+    }
     return isProviderIndexEnabled("local", libraryOrSqlite, maybeSqlite);
   }
-  const sqlite = libraryOrSqlite ?? getSqlite();
   return (
-    isProviderIndexEnabled("local", "saves", sqlite) ||
-    isProviderIndexEnabled("local", "likes", sqlite)
+    isProviderIndexEnabled("local", "saves", libraryOrSqlite) ||
+    isProviderIndexEnabled("local", "likes", libraryOrSqlite)
   );
 }
 
 export function isOpenAiEnabled(
-  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  libraryOrSqlite: SearchLibrarySetting | Database.Database,
   maybeSqlite?: Database.Database,
 ): boolean {
   if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    if (!maybeSqlite) {
+      throw new Error("isOpenAiEnabled(library, sqlite) requires sqlite");
+    }
     return isProviderIndexEnabled("openai", libraryOrSqlite, maybeSqlite);
   }
-  const sqlite = libraryOrSqlite ?? getSqlite();
   return (
-    isProviderIndexEnabled("openai", "saves", sqlite) ||
-    isProviderIndexEnabled("openai", "likes", sqlite)
+    isProviderIndexEnabled("openai", "saves", libraryOrSqlite) ||
+    isProviderIndexEnabled("openai", "likes", libraryOrSqlite)
   );
 }
 
 export function isVoyageEnabled(
-  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  libraryOrSqlite: SearchLibrarySetting | Database.Database,
   maybeSqlite?: Database.Database,
 ): boolean {
   if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    if (!maybeSqlite) {
+      throw new Error("isVoyageEnabled(library, sqlite) requires sqlite");
+    }
     return isProviderIndexEnabled("voyage", libraryOrSqlite, maybeSqlite);
   }
-  const sqlite = libraryOrSqlite ?? getSqlite();
   return (
-    isProviderIndexEnabled("voyage", "saves", sqlite) ||
-    isProviderIndexEnabled("voyage", "likes", sqlite)
+    isProviderIndexEnabled("voyage", "saves", libraryOrSqlite) ||
+    isProviderIndexEnabled("voyage", "likes", libraryOrSqlite)
   );
 }
 
 export function isOllamaEnabled(
-  libraryOrSqlite?: SearchLibrarySetting | Database.Database,
+  libraryOrSqlite: SearchLibrarySetting | Database.Database,
   maybeSqlite?: Database.Database,
 ): boolean {
   if (libraryOrSqlite === "saves" || libraryOrSqlite === "likes") {
+    if (!maybeSqlite) {
+      throw new Error("isOllamaEnabled(library, sqlite) requires sqlite");
+    }
     return isProviderIndexEnabled("ollama", libraryOrSqlite, maybeSqlite);
   }
-  const sqlite = libraryOrSqlite ?? getSqlite();
   return (
-    isProviderIndexEnabled("ollama", "saves", sqlite) ||
-    isProviderIndexEnabled("ollama", "likes", sqlite)
+    isProviderIndexEnabled("ollama", "saves", libraryOrSqlite) ||
+    isProviderIndexEnabled("ollama", "likes", libraryOrSqlite)
   );
 }
 
 export function getProviderLibraryEnables(
   provider: PreferredProvider,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): LibraryEnables {
   return {
     saves: isProviderIndexEnabled(provider, "saves", sqlite),
@@ -318,7 +325,7 @@ export function setProviderLibraryEnabled(
   provider: PreferredProvider,
   library: SearchLibrarySetting,
   enabled: boolean,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   const otherLibrary: SearchLibrarySetting =
     library === "saves" ? "likes" : "saves";
@@ -347,7 +354,7 @@ export function setProviderLibraryEnabled(
   setAppSetting(LEGACY_ENABLED_KEYS[provider], null, sqlite);
 }
 
-export function getOllamaSettings(sqlite: Database.Database = getSqlite()) {
+export function getOllamaSettings(sqlite: Database.Database) {
   const baseUrl =
     firstNonEmpty(
       getAppSetting("ollama_base_url", sqlite),
@@ -369,7 +376,7 @@ export function getOllamaSettings(sqlite: Database.Database = getSqlite()) {
   };
 }
 
-export function getOpenAiSettings(sqlite: Database.Database = getSqlite()) {
+export function getOpenAiSettings(sqlite: Database.Database) {
   return {
     baseUrl:
       firstNonEmpty(
@@ -385,7 +392,7 @@ export function getOpenAiSettings(sqlite: Database.Database = getSqlite()) {
   };
 }
 
-export function getVoyageSettings(sqlite: Database.Database = getSqlite()) {
+export function getVoyageSettings(sqlite: Database.Database) {
   return {
     model:
       firstNonEmpty(
@@ -398,7 +405,7 @@ export function getVoyageSettings(sqlite: Database.Database = getSqlite()) {
 
 /** Preferred default semantic provider from Settings, then env. Null = auto. */
 export function getPreferredEmbeddingProvider(
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): PreferredProvider | null {
   return (
     parseProvider(getAppSetting("embedding_provider", sqlite)) ||
@@ -408,7 +415,7 @@ export function getPreferredEmbeddingProvider(
 }
 
 export function getEmbeddingTimeoutMs(
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): number {
   const raw =
     firstNonEmpty(
@@ -433,7 +440,7 @@ export type RuntimeAppSettings = {
 
 /** Fresh read of all non-secret runtime settings (sqlite → env → defaults). */
 export function getRuntimeAppSettings(
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): RuntimeAppSettings {
   return {
     preferredProvider: getPreferredEmbeddingProvider(sqlite),

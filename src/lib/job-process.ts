@@ -68,29 +68,24 @@ export function signalProcess(
   }
 }
 
-/** Short synchronous pause (reclaim path; keep brief). */
-export function sleepSyncMs(ms: number): void {
+/** Short async pause for reclaim kill grace (replaces Atomics.wait). */
+export async function sleepMs(ms: number): Promise<void> {
   if (ms <= 0) return;
-  try {
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-  } catch {
-    const end = Date.now() + ms;
-    while (Date.now() < end) {
-      /* spin */
-    }
-  }
+  await new Promise<void>((resolve) => {
+    setTimeout(resolve, ms);
+  });
 }
 
 export type ProcessProbe = {
   isAlive: (pid: number) => boolean;
   isOwnedWorker: (pid: number) => boolean;
   signal: (pid: number, signal: NodeJS.Signals) => boolean;
-  sleepMs?: (ms: number) => void;
+  sleepMs?: (ms: number) => void | Promise<void>;
 };
 
 export const defaultProcessProbe: ProcessProbe = {
   isAlive: isProcessAlive,
   isOwnedWorker: isOwnedEmbeddingWorkerPid,
   signal: signalProcess,
-  sleepMs: sleepSyncMs,
+  sleepMs,
 };

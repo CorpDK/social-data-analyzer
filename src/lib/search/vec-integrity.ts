@@ -6,7 +6,6 @@
  * and unreadable / wrong-width embedding payloads.
  */
 import type Database from "better-sqlite3";
-import { getSqlite } from "../db";
 import {
   itemsTableName,
   type SearchLibrary,
@@ -65,7 +64,7 @@ function sampleEmbeddingWidthIssues(
 export function assessVectorIntegrity(
   library: SearchLibrary,
   index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
   options?: { sampleLimit?: number },
 ): VecIntegrityReport {
   const issues: string[] = [];

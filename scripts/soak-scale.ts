@@ -74,7 +74,9 @@ async function main() {
     "../src/lib/parse/synthetic"
   );
   const { importExportJson } = await import("../src/lib/import-export");
-  const { closeSqlite, getSqlite } = await import("../src/lib/db");
+  const { closeStorage, getStorage, getSqlite } = await import(
+    "../src/lib/storage"
+  );
   const { checkSqliteIntegrity } = await import("../src/lib/db/integrity");
   const { rebuildKeywordIndexes, ftsCount } = await import(
     "../src/lib/search/sync"
@@ -125,6 +127,7 @@ async function main() {
     const fts = await rebuildKeywordIndexes();
     ftsMs = msSince(t0);
 
+    await getStorage();
     const sqlite = getSqlite();
     const likedRows = (
       sqlite.prepare(`SELECT COUNT(*) AS c FROM liked_items`).get() as {
@@ -154,7 +157,7 @@ async function main() {
   } finally {
     clearInterval(sample);
     peakRss = Math.max(peakRss, process.memoryUsage().rss);
-    closeSqlite();
+    closeStorage();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 

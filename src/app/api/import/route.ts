@@ -31,6 +31,8 @@ export async function POST(request: Request) {
   if (rejected) return rejected;
 
   try {
+    const { getStorage } = await import("@/lib/storage");
+    await getStorage();
     const contentLengthHeader = request.headers.get("content-length");
     if (contentLengthHeader) {
       const contentLength = Number(contentLengthHeader);

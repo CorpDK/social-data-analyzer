@@ -3,7 +3,6 @@
  * Extracted from sync.ts — behavior-preserving move.
  */
 import type Database from "better-sqlite3";
-import { getSqlite } from "../db";
 import type { LikedSearchableItem, SearchableItem } from "./document";
 
 /**
@@ -73,7 +72,7 @@ function querySavesSearchRowsBatch(
  * Exported for tests (synthetic >32k id sets).
  */
 export function allSavesSearchRows(
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
   itemIds?: number[],
 ): SavesSearchRow[] {
   if (itemIds?.length === 0) return [];
@@ -112,7 +111,7 @@ function queryLikesSearchRowsBatch(
  * Exported for tests (synthetic >32k id sets).
  */
 export function allLikesSearchRows(
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
   itemIds?: number[],
 ): LikesSearchRow[] {
   if (itemIds?.length === 0) return [];

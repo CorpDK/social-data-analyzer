@@ -5,8 +5,8 @@ import { readJsonObject } from "@/lib/request-json";
 import {
   LibraryBusyError,
   RESET_LIBRARY_CONFIRMATION_PHRASE,
-  resetLibrary,
 } from "@/lib/settings/reset-library";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 
@@ -39,7 +39,8 @@ export async function POST(request: Request) {
   }
 
   try {
-    const result = resetLibrary(confirmation);
+    const storage = await getStorage();
+    const result = await storage.maintenance.resetLibrary(confirmation);
     return NextResponse.json(result);
   } catch (error) {
     if (error instanceof LibraryBusyError) {

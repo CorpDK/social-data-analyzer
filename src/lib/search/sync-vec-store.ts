@@ -3,7 +3,6 @@
  * Extracted from sync.ts; rebuild orchestration stays there.
  */
 import type Database from "better-sqlite3";
-import { getSqlite } from "../db";
 import {
   embeddingToBuffer,
   type EmbeddingConfig,
@@ -72,7 +71,7 @@ export function insertItemEmbedding(
   index: VectorIndexName,
   itemId: number,
   embedding: Float32Array,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   sqlite
     .prepare(
@@ -86,7 +85,7 @@ export function upsertItemEmbedding(
   index: VectorIndexName,
   itemId: number,
   embedding: Float32Array,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   const table = vectorTableName(library, index);
   const id = BigInt(itemId);
@@ -99,7 +98,7 @@ export function upsertItemEmbedding(
 export function vecCount(
   library: SearchLibrary,
   index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): number {
   if (vectorTableDimensions(library, index, sqlite) === null) return 0;
   return (
@@ -114,7 +113,7 @@ export function vecCount(
 export function vectorTableDimensions(
   library: SearchLibrary,
   index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): number | null {
   const row = sqlite
     .prepare(
@@ -131,7 +130,7 @@ export function vectorTableDimensions(
 export function getIndexedEmbeddingProfileMeta(
   library: SearchLibrary,
   index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): IndexedEmbeddingProfileMeta | null {
   const row = sqlite
     .prepare(
@@ -147,7 +146,7 @@ export function getIndexedEmbeddingProfileMeta(
 export function getIndexedEmbeddingProfile(
   library: SearchLibrary,
   index: VectorIndexName,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): EmbeddingProfile | null {
   const meta = getIndexedEmbeddingProfileMeta(library, index, sqlite);
   if (!meta) return null;
@@ -175,7 +174,7 @@ export function vectorIndexMatchesConfig(
   library: SearchLibrary,
   index: VectorIndexName,
   config: EmbeddingConfig,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): boolean {
   const indexed = getIndexedEmbeddingProfile(library, index, sqlite);
   return Boolean(
@@ -192,7 +191,7 @@ export function writeEmbeddingChunk(
   index: VectorIndexName,
   generated: GeneratedEmbedding[],
   writeMode: EmbeddingWriteMode,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   if (generated.length === 0) return;
   sqlite.transaction(() => {

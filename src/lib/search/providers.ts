@@ -1,3 +1,4 @@
+import { getSqlite } from "../db";
 import {
   embeddingConfigForProvider,
   isEmbeddingProvider,
@@ -32,7 +33,7 @@ export function isProviderEnabled(
   provider: EmbeddingProvider,
   library: SearchLibrary,
 ): boolean {
-  return isProviderIndexEnabled(provider, library);
+  return isProviderIndexEnabled(provider, library, getSqlite());
 }
 
 /**
@@ -71,7 +72,7 @@ export function configuredProviders(
 export function defaultSearchProvider(
   library: SearchLibrary,
 ): EmbeddingProvider {
-  const preferred = getPreferredEmbeddingProvider();
+  const preferred = getPreferredEmbeddingProvider(getSqlite());
   if (preferred && isProviderConfigured(preferred, library)) return preferred;
   if (isProviderConfigured("openai", library)) return "openai";
   if (isProviderConfigured("voyage", library)) return "voyage";

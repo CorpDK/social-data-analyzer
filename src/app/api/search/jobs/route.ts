@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
 import { jsonInternalError, jsonPublicError } from "@/lib/api-error";
 import { parseBoundedIntParam } from "@/lib/query-params";
-import { ensureJobRunner, listEmbeddingJobs } from "@/lib/search/jobs";
+import { ensureJobRunner } from "@/lib/search/jobs";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
 export async function GET(request: Request) {
   try {
-    ensureJobRunner();
+    await getStorage();
+    await ensureJobRunner();
+    const storage = await getStorage();
     const { searchParams } = new URL(request.url);
     const limit = parseBoundedIntParam(searchParams.get("limit"), {
       name: "limit",
@@ -28,7 +31,7 @@ export async function GET(request: Request) {
     if (!offset.ok) {
       return jsonPublicError(400, "INVALID_OFFSET", offset.error);
     }
-    const result = listEmbeddingJobs({
+    const result = await storage.jobs.listEmbeddingJobs({
       limit: limit.value,
       offset: offset.value,
     });

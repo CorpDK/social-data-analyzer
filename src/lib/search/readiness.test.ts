@@ -100,7 +100,7 @@ describe("search readiness", () => {
     expect(gaps.degraded).toBe(true);
   });
 
-  it("enqueues fts and local jobs once when gaps exist", () => {
+  it("enqueues fts and local jobs once when gaps exist", async () => {
     mockCounts({
       saves: 10,
       likes: 8,
@@ -114,24 +114,24 @@ describe("search readiness", () => {
     );
     vi.mocked(vectorIndexMatchesConfig).mockReturnValue(false);
 
-    const first = scheduleSearchBackfillJobsIfNeeded();
+    const first = await scheduleSearchBackfillJobsIfNeeded();
     expect(first.enqueued).toContain("fts");
     expect(first.enqueued).toContain("local");
     expect(enqueueFtsBackfillJob).toHaveBeenCalledTimes(1);
     expect(startReindexJob).toHaveBeenCalledWith("local");
 
-    const second = scheduleSearchBackfillJobsIfNeeded();
+    const second = await scheduleSearchBackfillJobsIfNeeded();
     expect(second.skipped).toBe(true);
     expect(enqueueFtsBackfillJob).toHaveBeenCalledTimes(1);
   });
 
-  it("is not degraded when counts match and local is current", () => {
+  it("is not degraded when counts match and local is current", async () => {
     mockCounts({ saves: 4, likes: 2, savesFts: 4, likesFts: 2 });
     vi.mocked(isProviderConfigured).mockReturnValue(true);
     vi.mocked(vectorIndexMatchesConfig).mockReturnValue(true);
 
     const gaps = assessSearchIndexGaps();
     expect(gaps.degraded).toBe(false);
-    expect(scheduleSearchBackfillJobsIfNeeded().enqueued).toEqual([]);
+    expect((await scheduleSearchBackfillJobsIfNeeded()).enqueued).toEqual([]);
   });
 });

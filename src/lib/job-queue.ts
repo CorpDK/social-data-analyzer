@@ -139,11 +139,11 @@ type RunningEmbeddingRow = {
  * Returns true when it is safe to reclaim (process gone / not our worker).
  * Returns false when a live owned worker remains — leave the row running.
  */
-export function prepareOrphanEmbeddingWorkerForReclaim(
+export async function prepareOrphanEmbeddingWorkerForReclaim(
   workerPid: number | null | undefined,
   probe: ProcessProbe = defaultProcessProbe,
   graceMs = DEFAULT_RECLAIM_KILL_GRACE_MS,
-): { safeToReclaim: boolean; killed: boolean } {
+): Promise<{ safeToReclaim: boolean; killed: boolean }> {
   if (workerPid == null || !Number.isInteger(workerPid) || workerPid <= 0) {
     return { safeToReclaim: true, killed: false };
   }
@@ -158,10 +158,10 @@ export function prepareOrphanEmbeddingWorkerForReclaim(
   }
 
   probe.signal(workerPid, "SIGTERM");
-  (probe.sleepMs ?? (() => undefined))(graceMs);
+  await (probe.sleepMs ?? (async () => undefined))(graceMs);
   if (probe.isAlive(workerPid)) {
     probe.signal(workerPid, "SIGKILL");
-    (probe.sleepMs ?? (() => undefined))(Math.min(100, graceMs));
+    await (probe.sleepMs ?? (async () => undefined))(Math.min(100, graceMs));
   }
 
   if (probe.isAlive(workerPid)) {
@@ -186,14 +186,14 @@ export function isEmbeddingJobLeaseExpired(
  * Expired leases attempt careful kill then reclaim even if the PID looked alive.
  * Caller must verify this process does not own the job via runnerOwnsWork.
  */
-export function reclaimOrphanedEmbeddingJobRows(
+export async function reclaimOrphanedEmbeddingJobRows(
   sqlite: Database.Database,
   options?: {
     processProbe?: ProcessProbe;
     killGraceMs?: number;
     nowUnixSeconds?: number;
   },
-): EmbeddingReclaimResult {
+): Promise<EmbeddingReclaimResult> {
   const probe = options?.processProbe ?? defaultProcessProbe;
   const graceMs = options?.killGraceMs ?? DEFAULT_RECLAIM_KILL_GRACE_MS;
   const nowUnix =
@@ -243,7 +243,7 @@ export function reclaimOrphanedEmbeddingJobRows(
       continue;
     }
 
-    const prep = prepareOrphanEmbeddingWorkerForReclaim(
+    const prep = await prepareOrphanEmbeddingWorkerForReclaim(
       row.worker_pid,
       probe,
       graceMs,

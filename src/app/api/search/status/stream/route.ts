@@ -1,4 +1,5 @@
 import { getSearchIndexStatusForStream } from "@/lib/search/status";
+import { getStorage } from "@/lib/storage";
 import { SEARCH_STATUS_CHANNEL, createJobSseResponse } from "@/lib/sse";
 import { searchStatusFingerprint } from "@/lib/sse-fingerprint";
 
@@ -21,7 +22,10 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   return createJobSseResponse({
     channel: SEARCH_STATUS_CHANNEL,
-    getSnapshot: () => getSearchIndexStatusForStream(),
+    getSnapshot: async () => {
+      await getStorage();
+      return getSearchIndexStatusForStream();
+    },
     fingerprint: searchStatusFingerprint,
     // Pub/sub covers progress; slower poll is a safety net (status snapshot is heavier).
     pollMs: 2_500,

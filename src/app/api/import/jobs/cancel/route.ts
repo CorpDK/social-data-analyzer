@@ -3,6 +3,7 @@ import { jsonInternalError } from "@/lib/api-error";
 import { cancelImportJob } from "@/lib/import/jobs";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import { readJsonBody, readOptionalJobId } from "@/lib/request-json";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -13,6 +14,7 @@ export async function POST(request: Request) {
   if (rejected) return rejected;
 
   try {
+    await getStorage();
     // Empty / invalid body cancels the active job.
     const parsed = await readJsonBody(request);
     const jobId = parsed.ok ? readOptionalJobId(parsed.value) : undefined;

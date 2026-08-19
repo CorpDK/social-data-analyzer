@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { jsonInternalError } from "@/lib/api-error";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import { scheduleSearchBackfillJobsIfNeeded } from "@/lib/search/readiness";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -15,7 +16,8 @@ export async function POST(request: Request) {
   if (rejected) return rejected;
 
   try {
-    const result = scheduleSearchBackfillJobsIfNeeded();
+    await getStorage();
+    const result = await scheduleSearchBackfillJobsIfNeeded();
     return NextResponse.json(
       {
         gaps: result.gaps,

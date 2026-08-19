@@ -71,9 +71,8 @@ export function createSqliteSearchIndex(sqlite: Database.Database): SearchIndex 
     allSavesSearchRows: async (itemIds) => allSavesSearchRows(sqlite, itemIds),
     allLikesSearchRows: async (itemIds) => allLikesSearchRows(sqlite, itemIds),
 
-    // hybrid.searchFts still resolves getSqlite(); same singleton when bound.
-    searchFts: async (library, query, limit) =>
-      searchFts(library, query, limit),
+    searchFts: async (library, query, limit = 200) =>
+      searchFts(library, query, limit, sqlite),
 
     assessVectorIntegrity: async (library, index, options) =>
       assessVectorIntegrity(library, index, sqlite, options),

@@ -1,5 +1,5 @@
 import { SchemaExplorer } from "@/components/schema-explorer";
-import { getSchemaCatalog } from "@/lib/schema-catalog";
+import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
@@ -9,7 +9,8 @@ export default async function SchemasPage({
   searchParams: Promise<{ importId?: string }>;
 }) {
   const params = await searchParams;
-  const catalog = getSchemaCatalog(params.importId ?? "all");
+  const storage = await getStorage();
+  const catalog = await storage.catalog.getSchemaCatalog(params.importId ?? "all");
 
   return (
     <div className="space-y-5">

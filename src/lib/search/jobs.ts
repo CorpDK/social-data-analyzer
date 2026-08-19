@@ -187,12 +187,12 @@ function reclaimOrphanedJobs() {
   // `running` while it works, and re-queuing it here would let the queue spawn
   // a second worker for the same job.
   if (runnerOwnsWork(state)) return;
-  reclaimOrphanedJobRows();
+  void reclaimOrphanedJobRows();
 }
 
 /** Caller must have verified that no job is owned by this process. */
-function reclaimOrphanedJobRows() {
-  const result = reclaimOrphanedEmbeddingJobRows(getSqlite());
+async function reclaimOrphanedJobRows() {
+  const result = await reclaimOrphanedEmbeddingJobRows(getSqlite());
   if (
     result.cancelled > 0 ||
     result.resumed > 0 ||
@@ -385,8 +385,8 @@ function insertPendingFtsJob(): EmbeddingJobRecord {
  * Enqueue a keyword-index backfill job when none is already open.
  * Used by readiness scheduling — not by browse/list GETs.
  */
-export function enqueueFtsBackfillJob(): EmbeddingJobRecord | null {
-  ensureJobRunner();
+export async function enqueueFtsBackfillJob(): Promise<EmbeddingJobRecord | null> {
+  await ensureJobRunner();
   if (getOpenJobForTarget("fts")) return null;
   const job = insertPendingFtsJob();
   pumpQueue();
@@ -826,8 +826,12 @@ function pumpQueue() {
 
     // DB may still say "running" after a crash — reclaim before starting another.
     // Ownership was just checked above, so reclaim the rows directly.
-    if (getActiveEmbeddingJob()) reclaimOrphanedJobRows();
-
+    if (getActiveEmbeddingJob()) {
+      void reclaimOrphanedJobRows().then(() => {
+        pumpQueue();
+      });
+      return;
+    }
     failBlockedPendingJobs();
 
     const now = Date.now();
@@ -844,10 +848,10 @@ function pumpQueue() {
  * Reclaim orphaned running rows and resume the pending queue after restart/HMR.
  * Safe to call from status polls.
  */
-export function ensureJobRunner() {
+export async function ensureJobRunner() {
   const state = runner();
   if (runnerOwnsWork(state)) return;
-  reclaimOrphanedJobs();
+  await reclaimOrphanedJobRows();
   pumpQueue();
 }
 
@@ -861,8 +865,8 @@ export type StartReindexResult =
       jobs?: EmbeddingJobRecord[];
     };
 
-export function startReindexJob(target: EmbeddingJobTarget): StartReindexResult {
-  ensureJobRunner();
+export async function startReindexJob(target: EmbeddingJobTarget): Promise<StartReindexResult> {
+  await ensureJobRunner();
 
   if (target === "all-configured") {
     const pairs: Array<{ library: SearchLibrary; provider: EmbeddingProvider }> =
@@ -985,8 +989,8 @@ export type CancelReindexResult =
  * Cancel the active (running) job only. Pending queued jobs remain and will
  * start after the active job settles (cancelled / completed / failed).
  */
-export function cancelReindexJob(jobId?: number): CancelReindexResult {
-  ensureJobRunner();
+export async function cancelReindexJob(jobId?: number): Promise<CancelReindexResult> {
+  await ensureJobRunner();
 
   const state = runner();
   const active = jobId ? getEmbeddingJob(jobId) : getActiveEmbeddingJob();
@@ -1048,7 +1052,7 @@ export async function waitForIdleJob(
 ): Promise<EmbeddingJobRecord | null> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    ensureJobRunner();
+    await ensureJobRunner();
     const active = getActiveEmbeddingJob();
     const pending = getPendingEmbeddingJobs();
     if (!active && pending.length === 0) return getLatestEmbeddingJob();

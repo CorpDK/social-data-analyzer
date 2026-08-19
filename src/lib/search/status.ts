@@ -305,9 +305,9 @@ function getLibraryIndexStatus(
   };
 }
 
-export function getSearchIndexStatus(): SearchIndexStatus {
+export async function getSearchIndexStatus(): Promise<SearchIndexStatus> {
   // Reclaim/pump already-queued work only — never enqueue new backfill here.
-  ensureJobRunner();
+  await ensureJobRunner();
   const gaps = assessSearchIndexGaps();
 
   const memAvailableMb = readMemAvailableMb();
@@ -351,8 +351,8 @@ const globalForStatus = globalThis as unknown as {
  * Force a full refresh when activity flips (job start/stop) so coverage
  * catches up promptly after a rebuild finishes.
  */
-export function getSearchIndexStatusForStream(): SearchIndexStatus {
-  ensureJobRunner();
+export async function getSearchIndexStatusForStream(): Promise<SearchIndexStatus> {
+  await ensureJobRunner();
   const active = getActiveEmbeddingJob();
   const now = Date.now();
   const cache = globalForStatus.__searchStatusStreamCache ?? null;
@@ -364,7 +364,7 @@ export function getSearchIndexStatusForStream(): SearchIndexStatus {
     activityFlipped ||
     now - cache.at >= STREAM_FULL_REFRESH_MS
   ) {
-    const status = getSearchIndexStatus();
+    const status = await getSearchIndexStatus();
     globalForStatus.__searchStatusStreamCache = {
       at: now,
       hadActive: isActive,

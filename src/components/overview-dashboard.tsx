@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { getStats } from "@/lib/queries";
+import { getStorage } from "@/lib/storage";
 
 function formatDate(value: Date | null | undefined) {
   if (!value) return "—";
@@ -9,8 +9,9 @@ function formatDate(value: Date | null | undefined) {
   });
 }
 
-export function OverviewDashboard() {
-  const stats = getStats();
+export async function OverviewDashboard() {
+  const storage = await getStorage();
+  const stats = await storage.catalog.getStats();
 
   return (
     <div className="space-y-8">

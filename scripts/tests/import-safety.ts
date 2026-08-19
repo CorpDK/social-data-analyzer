@@ -332,7 +332,7 @@ export async function runImportSafetySuite(ctx: TestContext) {
 
   let rejectedBadPhrase = false;
   try {
-    resetLibrary("wrong phrase");
+    resetLibrary("wrong phrase", sqlite);
   } catch {
     rejectedBadPhrase = true;
   }

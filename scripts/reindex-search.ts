@@ -1,11 +1,11 @@
 import { loadEnvConfig } from "@next/env";
 import { rebuildSearchIndex } from "../src/lib/search/sync";
-import { getSqlite } from "../src/lib/db";
+import { getStorage } from "../src/lib/storage";
 
 loadEnvConfig(process.cwd());
 
 async function main() {
-  getSqlite();
+  await getStorage();
   const requireRemote = process.argv.includes("--remote");
   const result = await rebuildSearchIndex({ requireRemote });
   const remote =

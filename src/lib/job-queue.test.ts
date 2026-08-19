@@ -31,24 +31,24 @@ function memoryDbWithJobs(): Database.Database {
 }
 
 describe("prepareOrphanEmbeddingWorkerForReclaim", () => {
-  it("reclaims when PID is missing or dead", () => {
+  it("reclaims when PID is missing or dead", async () => {
     const probe: ProcessProbe = {
       isAlive: () => false,
       isOwnedWorker: () => true,
       signal: () => true,
       sleepMs: () => undefined,
     };
-    expect(prepareOrphanEmbeddingWorkerForReclaim(null, probe)).toEqual({
+    expect(await prepareOrphanEmbeddingWorkerForReclaim(null, probe)).toEqual({
       safeToReclaim: true,
       killed: false,
     });
-    expect(prepareOrphanEmbeddingWorkerForReclaim(4242, probe)).toEqual({
+    expect(await prepareOrphanEmbeddingWorkerForReclaim(4242, probe)).toEqual({
       safeToReclaim: true,
       killed: false,
     });
   });
 
-  it("kills owned live workers then reclaims when they exit", () => {
+  it("kills owned live workers then reclaims when they exit", async () => {
     let alive = true;
     const signals: NodeJS.Signals[] = [];
     const probe: ProcessProbe = {
@@ -61,12 +61,12 @@ describe("prepareOrphanEmbeddingWorkerForReclaim", () => {
       },
       sleepMs: () => undefined,
     };
-    const result = prepareOrphanEmbeddingWorkerForReclaim(99, probe, 0);
+    const result = await prepareOrphanEmbeddingWorkerForReclaim(99, probe, 0);
     expect(result).toEqual({ safeToReclaim: true, killed: true });
     expect(signals).toEqual(["SIGTERM", "SIGKILL"]);
   });
 
-  it("defers when a live process is not an owned worker", () => {
+  it("defers when a live process is not an owned worker", async () => {
     const probe: ProcessProbe = {
       isAlive: () => true,
       isOwnedWorker: () => false,
@@ -75,20 +75,20 @@ describe("prepareOrphanEmbeddingWorkerForReclaim", () => {
       },
       sleepMs: () => undefined,
     };
-    expect(prepareOrphanEmbeddingWorkerForReclaim(7, probe)).toEqual({
+    expect(await prepareOrphanEmbeddingWorkerForReclaim(7, probe)).toEqual({
       safeToReclaim: false,
       killed: false,
     });
   });
 
-  it("defers when owned worker stays alive after kill", () => {
+  it("defers when owned worker stays alive after kill", async () => {
     const probe: ProcessProbe = {
       isAlive: () => true,
       isOwnedWorker: () => true,
       signal: () => true,
       sleepMs: () => undefined,
     };
-    expect(prepareOrphanEmbeddingWorkerForReclaim(7, probe, 0)).toEqual({
+    expect(await prepareOrphanEmbeddingWorkerForReclaim(7, probe, 0)).toEqual({
       safeToReclaim: false,
       killed: true,
     });
@@ -96,7 +96,7 @@ describe("prepareOrphanEmbeddingWorkerForReclaim", () => {
 });
 
 describe("reclaimOrphanedEmbeddingJobRows", () => {
-  it("requeues dead-PID running jobs and cancels cancel-requested", () => {
+  it("requeues dead-PID running jobs and cancels cancel-requested", async () => {
     const sqlite = memoryDbWithJobs();
     sqlite
       .prepare(
@@ -118,7 +118,7 @@ describe("reclaimOrphanedEmbeddingJobRows", () => {
       sleepMs: () => undefined,
     };
 
-    const result = reclaimOrphanedEmbeddingJobRows(sqlite, {
+    const result = await reclaimOrphanedEmbeddingJobRows(sqlite, {
       processProbe: probe,
       killGraceMs: 0,
     });
@@ -136,7 +136,7 @@ describe("reclaimOrphanedEmbeddingJobRows", () => {
     expect(states[1]).toEqual({ state: "cancelled", workerPid: null });
   });
 
-  it("defers reclaim while an owned worker PID is still alive", () => {
+  it("defers reclaim while an owned worker PID is still alive", async () => {
     const sqlite = memoryDbWithJobs();
     const now = Math.floor(Date.now() / 1000);
     sqlite
@@ -153,7 +153,7 @@ describe("reclaimOrphanedEmbeddingJobRows", () => {
       sleepMs: () => undefined,
     };
 
-    const result = reclaimOrphanedEmbeddingJobRows(sqlite, {
+    const result = await reclaimOrphanedEmbeddingJobRows(sqlite, {
       processProbe: probe,
       killGraceMs: 0,
       nowUnixSeconds: now,
@@ -171,7 +171,7 @@ describe("reclaimOrphanedEmbeddingJobRows", () => {
     expect(row.state).toBe("running");
   });
 
-  it("reclaims expired leases even when PID appears alive (after careful kill)", () => {
+  it("reclaims expired leases even when PID appears alive (after careful kill)", async () => {
     const sqlite = memoryDbWithJobs();
     const now = Math.floor(Date.now() / 1000);
     sqlite
@@ -194,7 +194,7 @@ describe("reclaimOrphanedEmbeddingJobRows", () => {
       sleepMs: () => undefined,
     };
 
-    const result = reclaimOrphanedEmbeddingJobRows(sqlite, {
+    const result = await reclaimOrphanedEmbeddingJobRows(sqlite, {
       processProbe: probe,
       killGraceMs: 0,
       nowUnixSeconds: now,
@@ -224,7 +224,7 @@ describe("reclaimOrphanedEmbeddingJobRows", () => {
     expect(row.message).toMatch(/expired worker lease/i);
   });
 
-  it("defers reclaim for a live lease without killing", () => {
+  it("defers reclaim for a live lease without killing", async () => {
     const sqlite = memoryDbWithJobs();
     const now = Math.floor(Date.now() / 1000);
     sqlite
@@ -243,7 +243,7 @@ describe("reclaimOrphanedEmbeddingJobRows", () => {
       sleepMs: () => undefined,
     };
 
-    const result = reclaimOrphanedEmbeddingJobRows(sqlite, {
+    const result = await reclaimOrphanedEmbeddingJobRows(sqlite, {
       processProbe: probe,
       killGraceMs: 0,
       nowUnixSeconds: now,

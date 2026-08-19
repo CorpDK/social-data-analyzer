@@ -1,4 +1,4 @@
-import { getSqlite, recreateEmptySearchIndexes } from "../db";
+import { recreateEmptySearchIndexes } from "../db";
 import { clearImportSpool } from "../import/spool";
 import {
   assertLibraryIdleForReset,
@@ -24,8 +24,8 @@ export type ResetLibraryResult = {
   kept: string[];
 };
 
-function tableExists(name: string): boolean {
-  const row = getSqlite()
+function tableExists(sqlite: import("better-sqlite3").Database, name: string): boolean {
+  const row = sqlite
     .prepare(
       `SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = ?`,
     )
@@ -33,9 +33,9 @@ function tableExists(name: string): boolean {
   return Boolean(row);
 }
 
-function countRows(table: string): number {
+function countRows(sqlite: import("better-sqlite3").Database, table: string): number {
   return (
-    getSqlite().prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
+    sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
       c: number;
     }
   ).c;
@@ -49,51 +49,53 @@ function countRows(table: string): number {
  * Refuses (LibraryBusyError / HTTP 409) while import or embedding jobs are
  * pending/running so we never DELETE under active writers.
  */
-export function resetLibrary(confirmation: string): ResetLibraryResult {
+export function resetLibrary(
+  confirmation: string,
+  sqlite: import("better-sqlite3").Database,
+): ResetLibraryResult {
   if (confirmation !== RESET_LIBRARY_CONFIRMATION_PHRASE) {
     throw new Error(
       `Confirmation phrase must be exactly "${RESET_LIBRARY_CONFIRMATION_PHRASE}"`,
     );
   }
 
-  const sqlite = getSqlite();
   assertLibraryIdleForReset(sqlite);
 
   const before = {
-    imports: countRows("imports"),
-    savedItems: countRows("saved_items"),
-    likedItems: tableExists("liked_items") ? countRows("liked_items") : 0,
-    itemCollections: countRows("item_collections"),
-    embeddingProfiles: tableExists("embedding_index_profiles")
-      ? countRows("embedding_index_profiles")
+    imports: countRows(sqlite, "imports"),
+    savedItems: countRows(sqlite, "saved_items"),
+    likedItems: tableExists(sqlite, "liked_items") ? countRows(sqlite, "liked_items") : 0,
+    itemCollections: countRows(sqlite, "item_collections"),
+    embeddingProfiles: tableExists(sqlite, "embedding_index_profiles")
+      ? countRows(sqlite, "embedding_index_profiles")
       : 0,
-    embeddingJobs: countRows("embedding_jobs"),
-    importJobs: tableExists("import_jobs") ? countRows("import_jobs") : 0,
+    embeddingJobs: countRows(sqlite, "embedding_jobs"),
+    importJobs: tableExists(sqlite, "import_jobs") ? countRows(sqlite, "import_jobs") : 0,
   };
 
   const wipeContent = sqlite.transaction(() => {
     // Children first — FK from import_schemas/item_collections/liked_items → imports.
     // Clear import_jobs before imports (FK import_id → imports.id).
-    if (tableExists("import_jobs")) {
+    if (tableExists(sqlite, "import_jobs")) {
       sqlite.exec(`DELETE FROM import_jobs`);
     }
-    if (tableExists("import_schemas")) {
+    if (tableExists(sqlite, "import_schemas")) {
       sqlite.exec(`DELETE from import_schemas`);
     }
     sqlite.exec(`DELETE from item_collections`);
     sqlite.exec(`DELETE FROM saved_items`);
-    if (tableExists("liked_items")) {
+    if (tableExists(sqlite, "liked_items")) {
       sqlite.exec(`DELETE FROM liked_items`);
     }
     sqlite.exec(`DELETE FROM imports`);
 
-    if (tableExists("embedding_index_profiles")) {
+    if (tableExists(sqlite, "embedding_index_profiles")) {
       sqlite.exec(`DELETE from embedding_index_profiles`);
     }
 
     sqlite.exec(`DELETE FROM embedding_jobs`);
 
-    if (tableExists("sqlite_sequence")) {
+    if (tableExists(sqlite, "sqlite_sequence")) {
       sqlite.exec(`
         DELETE FROM sqlite_sequence
         WHERE name IN (

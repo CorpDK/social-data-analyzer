@@ -4,12 +4,10 @@ import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
 import { readJsonBody } from "@/lib/request-json";
 import {
   ensureJobRunner,
-  getActiveEmbeddingJob,
-  getDisplayEmbeddingJob,
-  getPendingEmbeddingJobs,
   parseReindexTarget,
   startReindexJob,
 } from "@/lib/search/jobs";
+import { getStorage } from "@/lib/storage";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -17,11 +15,12 @@ export const dynamic = "force-dynamic";
 /** Current / latest reindex job progress (also included in GET /api/search/status). */
 export async function GET() {
   try {
-    ensureJobRunner();
-    const active = getActiveEmbeddingJob();
+    const storage = await getStorage();
+    await ensureJobRunner();
+    const active = await storage.jobs.getActiveEmbeddingJob();
     return NextResponse.json({
-      job: active ?? getDisplayEmbeddingJob(),
-      pendingJobs: getPendingEmbeddingJobs(),
+      job: active ?? (await storage.jobs.getDisplayEmbeddingJob()),
+      pendingJobs: await storage.jobs.getPendingEmbeddingJobs(),
       cancelSupported: true,
     });
   } catch (error) {
@@ -49,6 +48,7 @@ export async function POST(request: Request) {
   if (rejected) return rejected;
 
   try {
+    await getStorage();
     const parsed = await readJsonBody(request);
     if (!parsed.ok) {
       return jsonPublicError(400, "INVALID_JSON", "Invalid JSON body");
@@ -69,7 +69,7 @@ export async function POST(request: Request) {
       );
     }
 
-    const result = startReindexJob(target);
+    const result = await startReindexJob(target);
     if (!result.ok) {
       return NextResponse.json(
         {

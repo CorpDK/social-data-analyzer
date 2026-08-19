@@ -1,8 +1,8 @@
 /**
- * Async storage ports for multi-engine support (ME-1).
+ * Async storage ports for multi-engine support.
  *
  * SQLite is the first implementation; Postgres arrives in ME-4.
- * Call sites stay mostly sync until ME-2 async-ifies them to await these ports.
+ * App call sites await these ports via `getStorage()`.
  */
 import type { FileSchemaCatalogEntry } from "../json-schema-infer";
 import type { ParsedLikedItem, ParsedSavedItem } from "../parse-export";

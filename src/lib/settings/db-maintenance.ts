@@ -3,7 +3,6 @@
  * VACUUM. Refuses while import/reindex jobs are active so we never race writers.
  */
 import type Database from "better-sqlite3";
-import { getSqlite } from "../db";
 import { assertLibraryIdle, LibraryBusyError } from "./library-busy";
 
 export { LibraryBusyError };
@@ -67,7 +66,7 @@ export function parseDbMaintenanceAction(
  */
 export function runDbMaintenance(
   action: DbMaintenanceAction,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): DbMaintenanceResult {
   const operation =
     action === "vacuum" ? "run VACUUM" : "run WAL checkpoint";

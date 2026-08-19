@@ -1,20 +1,17 @@
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   parseDbMaintenanceAction,
   runDbMaintenance,
 } from "./db-maintenance";
 import { LibraryBusyError } from "./library-busy";
+import {
+  createSqliteStorage,
+  installSqliteConnectionForTests,
+  closeStorage,
+} from "../storage";
 
 const sqliteHolders: Database.Database[] = [];
-
-vi.mock("../db", () => ({
-  getSqlite: () => {
-    const sqlite = sqliteHolders[sqliteHolders.length - 1];
-    if (!sqlite) throw new Error("test DB not installed");
-    return sqlite;
-  },
-}));
 
 function installMemoryDb(): Database.Database {
   const sqlite = new Database(":memory:");
@@ -35,13 +32,20 @@ function installMemoryDb(): Database.Database {
     CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT);
   `);
   sqlite.exec(`INSERT INTO t (v) VALUES ('a'), ('b'), ('c')`);
+  installSqliteConnectionForTests(sqlite);
+  createSqliteStorage(sqlite);
   sqliteHolders.push(sqlite);
   return sqlite;
 }
 
 afterEach(() => {
+  closeStorage();
   while (sqliteHolders.length > 0) {
-    sqliteHolders.pop()?.close();
+    try {
+      sqliteHolders.pop()?.close();
+    } catch {
+      // already closed by closeStorage
+    }
   }
 });
 
@@ -55,9 +59,10 @@ describe("parseDbMaintenanceAction", () => {
 });
 
 describe("runDbMaintenance", () => {
-  it("runs WAL checkpoint when idle", () => {
-    installMemoryDb();
-    const result = runDbMaintenance("checkpoint");
+  it("runs WAL checkpoint when idle", async () => {
+    const sqlite = installMemoryDb();
+    const storage = createSqliteStorage(sqlite);
+    const result = await storage.maintenance.runMaintenance("checkpoint");
     expect(result.ok).toBe(true);
     expect(result.action).toBe("checkpoint");
     expect(result.walCheckpoint).toEqual(
@@ -70,9 +75,9 @@ describe("runDbMaintenance", () => {
     expect(result.pageCount).toBeGreaterThan(0);
   });
 
-  it("runs VACUUM when idle", () => {
-    installMemoryDb();
-    const result = runDbMaintenance("vacuum");
+  it("runs VACUUM when idle", async () => {
+    const sqlite = installMemoryDb();
+    const result = runDbMaintenance("vacuum", sqlite);
     expect(result.ok).toBe(true);
     expect(result.action).toBe("vacuum");
     expect(result.vacuumMs).toBeGreaterThanOrEqual(0);
@@ -87,9 +92,11 @@ describe("runDbMaintenance", () => {
       )
       .run();
 
-    expect(() => runDbMaintenance("checkpoint")).toThrow(LibraryBusyError);
+    expect(() => runDbMaintenance("checkpoint", sqlite)).toThrow(
+      LibraryBusyError,
+    );
     try {
-      runDbMaintenance("vacuum");
+      runDbMaintenance("vacuum", sqlite);
       throw new Error("expected LibraryBusyError");
     } catch (error) {
       expect(error).toBeInstanceOf(LibraryBusyError);

@@ -1,10 +1,10 @@
 import Link from "next/link";
 import {
   ensureJobRunner,
-  listEmbeddingJobs,
   type EmbeddingJobRecord,
   type EmbeddingJobState,
 } from "@/lib/search/jobs";
+import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
@@ -65,11 +65,12 @@ export default async function IndexesHistoryPage({
 }: {
   searchParams: Promise<{ page?: string }>;
 }) {
-  ensureJobRunner();
+  await ensureJobRunner();
+  const storage = await getStorage();
 
   const { page: pageRaw } = await searchParams;
   const currentPage = Math.max(1, Number.parseInt(pageRaw ?? "1", 10) || 1);
-  const { jobs: pageJobs, total, limit } = listEmbeddingJobs({
+  const { jobs: pageJobs, total, limit } = await storage.jobs.listEmbeddingJobs({
     limit: PAGE_SIZE,
     offset: (currentPage - 1) * PAGE_SIZE,
   });

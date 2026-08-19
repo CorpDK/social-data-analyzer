@@ -3,7 +3,6 @@
  * Extracted from sync.ts; embedding sync orchestration stays there.
  */
 import type Database from "better-sqlite3";
-import { getSqlite } from "../db";
 import {
   buildLikedSearchDocument,
   buildSearchDocument,
@@ -20,7 +19,7 @@ import { vectorTableDimensions } from "./sync-vec-store";
 export function upsertItemFts(
   itemId: number,
   item: SearchableItem,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   const doc = buildSearchDocument(item);
   sqlite.prepare(`DELETE FROM saved_items_fts WHERE rowid = ?`).run(itemId);
@@ -43,7 +42,7 @@ export function upsertItemFts(
 export function upsertLikedItemFts(
   itemId: number,
   item: LikedSearchableItem,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   const doc = buildLikedSearchDocument(item);
   sqlite.prepare(`DELETE FROM liked_items_fts WHERE rowid = ?`).run(itemId);
@@ -65,7 +64,7 @@ export function upsertLikedItemFts(
 
 export function removeItemSearch(
   itemId: number,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   sqlite.prepare(`DELETE FROM saved_items_fts WHERE rowid = ?`).run(itemId);
   for (const index of ALL_VECTOR_INDEXES) {
@@ -81,7 +80,7 @@ export function removeItemSearch(
 
 export function removeLikedItemSearch(
   itemId: number,
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ) {
   sqlite.prepare(`DELETE FROM liked_items_fts WHERE rowid = ?`).run(itemId);
   for (const index of ALL_VECTOR_INDEXES) {
@@ -97,7 +96,7 @@ export function removeLikedItemSearch(
 
 export function ftsCount(
   library: SearchLibrary = "saves",
-  sqlite: Database.Database = getSqlite(),
+  sqlite: Database.Database,
 ): number {
   const table = library === "saves" ? "saved_items_fts" : "liked_items_fts";
   return (

@@ -1,6 +1,6 @@
 # Multi-Engine Database Support (SQLite default + Postgres)
 
-Status: **ME-1 landed — ports + SQLite behind them** (Aug 2026). Phases 2–6 remain.
+Status: **ME-2 landed — call sites await ports** (Aug 2026). Phases 3–6 remain.
 
 Goal: refactor from hard-wired better-sqlite3 to an async port-based storage
 layer with two full backends — SQLite (default, embedded) and Postgres
@@ -16,7 +16,7 @@ backend targets real servers only.
 ## Phase checklist
 
 - [x] Phase 1: Define async port interfaces (`CatalogStore`, `SearchIndex`, `JobStore`, `SettingsStore`, `MaintenanceOps`) and move existing SQLite code into `src/lib/storage/sqlite/` behind them
-- [ ] Phase 2: Async-ify all call sites (routes, pages, SSE snapshots, scripts, worker), remove `getSqlite()` defaults and top-level HMR ensure, adapt existing tests; full suite green on SQLite
+- [x] Phase 2: Async-ify all call sites (routes, pages, SSE snapshots, scripts, worker), remove `getSqlite()` defaults and top-level HMR ensure, adapt existing tests; full suite green on SQLite
 - [ ] Phase 3: Move all plain tables to Drizzle schemas per dialect with Drizzle Kit migrations; shrink hand-rolled DDL to FTS5/vec0 (SQLite) and extension/tsvector SQL migrations (PG); baseline-stamp existing v9 DBs; rewrite `docs/db-boundary.md`
 - [ ] Phase 4: Implement Postgres backend (pg Pool, tsvector search docs, pgvector embeddings, jobs with lease reclaim, maintenance/reset, engine-aware UI), validate distance-metric parity, add docker-compose recipe
 - [ ] Phase 5: Port contract tests against both engines (Testcontainers pgvector), parameterize Gate A harness and soak over engine, optional Postgres e2e project

@@ -56,10 +56,11 @@ function localVectorNeedsBackfill(library: SearchLibrary): boolean {
 
 /** COUNT-only gap assessment — safe on any read path. */
 export function assessSearchIndexGaps(): SearchIndexGaps {
+  const sqlite = getSqlite();
   const savesItems = itemCount("saves");
   const likesItems = itemCount("likes");
-  const savesFts = ftsCount("saves");
-  const likesFts = ftsCount("likes");
+  const savesFts = ftsCount("saves", sqlite);
+  const likesFts = ftsCount("likes", sqlite);
   const savesFtsGap = Math.max(0, savesItems - savesFts);
   const likesFtsGap = Math.max(0, likesItems - likesFts);
   const savesLocalGap = localVectorNeedsBackfill("saves");
@@ -94,7 +95,7 @@ export type ScheduleBackfillResult = {
  * (one attempt); open jobs are not duplicated. Call from Indexes "Heal gaps"
  * POST or documented startup — never from browse/list/stats or status GET.
  */
-export function scheduleSearchBackfillJobsIfNeeded(): ScheduleBackfillResult {
+export async function scheduleSearchBackfillJobsIfNeeded(): Promise<ScheduleBackfillResult> {
   const gaps = assessSearchIndexGaps();
   if (!gaps.degraded) {
     return { gaps, enqueued: [], skipped: false };
@@ -105,18 +106,18 @@ export function scheduleSearchBackfillJobsIfNeeded(): ScheduleBackfillResult {
   }
   globalForReadiness.__searchBackfillScheduleAttempted = true;
 
-  ensureJobRunner();
+  await ensureJobRunner();
   const enqueued: string[] = [];
 
   if (gaps.savesFtsGap > 0 || gaps.likesFtsGap > 0) {
     if (!hasOpenEmbeddingJobForTarget("fts")) {
-      const job = enqueueFtsBackfillJob();
+      const job = await enqueueFtsBackfillJob();
       if (job) enqueued.push("fts");
     }
   }
 
   if (gaps.savesLocalGap && !hasOpenEmbeddingJobForTarget(formatJobTarget("saves", "local"))) {
-    const result = startReindexJob("local");
+    const result = await startReindexJob("local");
     if (result.ok) enqueued.push("local");
   }
 
@@ -124,7 +125,7 @@ export function scheduleSearchBackfillJobsIfNeeded(): ScheduleBackfillResult {
     gaps.likesLocalGap &&
     !hasOpenEmbeddingJobForTarget(formatJobTarget("likes", "local"))
   ) {
-    const result = startReindexJob("likes-local");
+    const result = await startReindexJob("likes-local");
     if (result.ok) enqueued.push("likes-local");
   }
 

@@ -15,7 +15,7 @@
  * Or:    `pnpm exec tsx scripts/embedding-worker.ts <jobId>`
  */
 import { loadEnvConfig } from "@next/env";
-import { closeSqlite, getSqlite } from "../src/lib/db";
+import { closeStorage, getStorage } from "../src/lib/storage";
 import { jobLog } from "../src/lib/job-log";
 import {
   EMBEDDING_WORKER_PERMANENT_EXIT_CODE,
@@ -58,12 +58,12 @@ async function main() {
     message: `start heapMb=${heapMb}`,
   });
 
-  getSqlite();
+  await getStorage();
   try {
     await runEmbeddingJobById(jobId);
     jobLog("embedding-worker", { jobId, phase: "done", message: "exit=0" });
   } finally {
-    closeSqlite();
+    closeStorage();
   }
 }
 
@@ -84,11 +84,11 @@ main()
         message: `aborting: ${message}`,
         level: "error",
       });
-      closeSqlite();
+      closeStorage();
       process.exit(EMBEDDING_WORKER_PERMANENT_EXIT_CODE);
     }
     jobLog("embedding-worker", { message, level: "error" });
     console.error("[embedding-worker]", error);
-    closeSqlite();
+    closeStorage();
     process.exit(1);
   });
