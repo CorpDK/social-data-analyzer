@@ -2,6 +2,7 @@
  * Optional SQLite housekeeping for long-lived local DBs: WAL checkpoint and
  * VACUUM. Refuses while import/reindex jobs are active so we never race writers.
  */
+import type Database from "better-sqlite3";
 import { getSqlite } from "../db";
 import { assertLibraryIdle, LibraryBusyError } from "./library-busy";
 
@@ -28,7 +29,7 @@ export type DbMaintenanceResult = {
   pageSize: number;
 };
 
-function readDbStats(sqlite: ReturnType<typeof getSqlite>): {
+function readDbStats(sqlite: Database.Database): {
   pageCount: number;
   freelistCount: number;
   pageSize: number;
@@ -66,8 +67,8 @@ export function parseDbMaintenanceAction(
  */
 export function runDbMaintenance(
   action: DbMaintenanceAction,
+  sqlite: Database.Database = getSqlite(),
 ): DbMaintenanceResult {
-  const sqlite = getSqlite();
   const operation =
     action === "vacuum" ? "run VACUUM" : "run WAL checkpoint";
   assertLibraryIdle(sqlite, operation);

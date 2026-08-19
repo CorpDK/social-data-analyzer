@@ -1,6 +1,6 @@
 # Multi-Engine Database Support (SQLite default + Postgres)
 
-Status: **planned — not yet implemented** (Aug 2026).
+Status: **ME-1 landed — ports + SQLite behind them** (Aug 2026). Phases 2–6 remain.
 
 Goal: refactor from hard-wired better-sqlite3 to an async port-based storage
 layer with two full backends — SQLite (default, embedded) and Postgres
@@ -15,7 +15,7 @@ backend targets real servers only.
 
 ## Phase checklist
 
-- [ ] Phase 1: Define async port interfaces (`CatalogStore`, `SearchIndex`, `JobStore`, `SettingsStore`, `MaintenanceOps`) and move existing SQLite code into `src/lib/storage/sqlite/` behind them
+- [x] Phase 1: Define async port interfaces (`CatalogStore`, `SearchIndex`, `JobStore`, `SettingsStore`, `MaintenanceOps`) and move existing SQLite code into `src/lib/storage/sqlite/` behind them
 - [ ] Phase 2: Async-ify all call sites (routes, pages, SSE snapshots, scripts, worker), remove `getSqlite()` defaults and top-level HMR ensure, adapt existing tests; full suite green on SQLite
 - [ ] Phase 3: Move all plain tables to Drizzle schemas per dialect with Drizzle Kit migrations; shrink hand-rolled DDL to FTS5/vec0 (SQLite) and extension/tsvector SQL migrations (PG); baseline-stamp existing v9 DBs; rewrite `docs/db-boundary.md`
 - [ ] Phase 4: Implement Postgres backend (pg Pool, tsvector search docs, pgvector embeddings, jobs with lease reclaim, maintenance/reset, engine-aware UI), validate distance-metric parity, add docker-compose recipe
@@ -46,7 +46,9 @@ Engine selection: `INSTAGRAM_SAVES_DATABASE_URL=postgres://…` selects
 Postgres; otherwise SQLite at `INSTAGRAM_SAVES_DB` (current default path). A
 `getStorage(): Promise<Storage>` factory replaces `getSqlite()`/`getDb()` as
 the app-wide entry point (cached on `globalThis` like today, in
-`src/lib/db/index.ts`).
+`src/lib/storage/index.ts`). Connection lifecycle lives in
+`src/lib/storage/sqlite/connection.ts`; `src/lib/db/index.ts` re-exports
+`getSqlite`/`getDb` for ME-2 call-site conversion.
 
 ## Phase 1 — Define ports and restructure the SQLite code behind them
 
