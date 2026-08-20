@@ -7,10 +7,11 @@
  * Full 250k soak (manual / release note; can take many minutes):
  *
  *   SOAK_N=250000 pnpm soak:scale
+ *   SOAK_N=250000 pnpm soak:scale -- --engine=postgres
  *
  * Does NOT touch the real library DB.
  *
- * Usage: pnpm soak:scale
+ * Usage: pnpm soak:scale [--engine=sqlite|postgres]
  */
 import { performance } from "node:perf_hooks";
 import fs from "node:fs";
@@ -41,6 +42,15 @@ function resolveN(): { n: number; mode: "smoke" | "full" | "custom" } {
   return { n, mode: "custom" };
 }
 
+function resolveEngine(): "sqlite" | "postgres" {
+  const argument = process.argv.find((value) => value.startsWith("--engine="));
+  const raw = argument?.slice("--engine=".length) ?? process.env.SOAK_ENGINE ?? "sqlite";
+  if (raw !== "sqlite" && raw !== "postgres") {
+    throw new Error(`--engine must be sqlite or postgres, got ${raw}`);
+  }
+  return raw;
+}
+
 function msSince(start: number): number {
   return Math.round((performance.now() - start) * 10) / 10;
 }
@@ -51,6 +61,7 @@ function formatMiB(bytes: number): string {
 
 async function main() {
   const { n, mode } = resolveN();
+  const engine = resolveEngine();
   const hardFailWall =
     mode === "smoke" || process.env.SOAK_HARD_FAIL === "1";
 
@@ -58,7 +69,16 @@ async function main() {
   const tmpDb = path.join(tmpDir, "soak.db");
 
   // Must set before importing db / import modules (singleton connection).
-  process.env.INSTAGRAM_SAVES_DB = tmpDb;
+  if (engine === "postgres") {
+    if (!process.env.INSTAGRAM_SAVES_DATABASE_URL?.trim()) {
+      throw new Error(
+        "--engine=postgres requires INSTAGRAM_SAVES_DATABASE_URL",
+      );
+    }
+  } else {
+    delete process.env.INSTAGRAM_SAVES_DATABASE_URL;
+    process.env.INSTAGRAM_SAVES_DB = tmpDb;
+  }
   process.env.INSTAGRAM_SAVES_KEYRING = "memory";
   process.env.EMBEDDING_WORKER_INLINE = "1";
   delete process.env.EMBEDDING_PROVIDER;
@@ -67,20 +87,15 @@ async function main() {
   delete process.env.OLLAMA_BASE_URL;
 
   console.log(
-    `[soak-scale] mode=${mode} N=${n} db=${tmpDb} (set SOAK_N=${SOAK_FULL_N} for full soak)`,
+    `[soak-scale] engine=${engine} mode=${mode} N=${n} target=${engine === "sqlite" ? tmpDb : "INSTAGRAM_SAVES_DATABASE_URL"} (set SOAK_N=${SOAK_FULL_N} for full soak)`,
   );
 
   const { syntheticLikedPostsJson } = await import(
     "../src/lib/parse/synthetic"
   );
   const { importExportJson } = await import("../src/lib/import-export");
-  const { closeStorage, getStorage, getSqlite } = await import(
-    "../src/lib/storage"
-  );
-  const { checkSqliteIntegrity } = await import("../src/lib/db/integrity");
-  const { rebuildKeywordIndexes, ftsCount } = await import(
-    "../src/lib/search/sync"
-  );
+  const { closeStorage, getStorage } = await import("../src/lib/storage");
+  const { rebuildKeywordIndexes } = await import("../src/lib/search/sync");
 
   const likesJson = syntheticLikedPostsJson(n, { prefix: "Sk" });
   const jsonBytes = Buffer.byteLength(likesJson, "utf8");
@@ -127,14 +142,9 @@ async function main() {
     const fts = await rebuildKeywordIndexes();
     ftsMs = msSince(t0);
 
-    await getStorage();
-    const sqlite = getSqlite();
-    const likedRows = (
-      sqlite.prepare(`SELECT COUNT(*) AS c FROM liked_items`).get() as {
-        c: number;
-      }
-    ).c;
-    const likedFts = ftsCount("likes", sqlite);
+    const storage = await getStorage();
+    const likedRows = (await storage.catalog.getStats()).totalLikes;
+    const likedFts = await storage.search.ftsCount("likes");
 
     if (likedRows !== n) {
       throw new Error(`liked_items count=${likedRows}, expected ${n}`);
@@ -150,7 +160,7 @@ async function main() {
       );
     }
 
-    const integrity = checkSqliteIntegrity(sqlite);
+    const integrity = await storage.maintenance.checkIntegrity();
     if (!integrity.ok) {
       throw new Error(`integrity_check failed: ${integrity.detail}`);
     }
@@ -163,6 +173,7 @@ async function main() {
 
   const delta = Math.max(0, peakRss - baselineRss);
   const summary = {
+    engine,
     mode,
     n,
     jsonMiB: Math.round((jsonBytes / (1024 * 1024)) * 100) / 100,

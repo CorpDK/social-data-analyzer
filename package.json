@@ -9,6 +9,8 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:unit": "vitest run",
+    "test:contracts": "vitest run src/lib/storage/contracts.test.ts",
+    "test:pg": "vitest run src/lib/storage/contracts.test.ts",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:parse": "pnpm exec tsx scripts/test-parse.ts",

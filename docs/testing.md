@@ -9,6 +9,8 @@ How to run and where to put tests for this repo.
 | `pnpm test` / `pnpm test:unit` | Vitest unit + component tests (`src/**/*.test.ts(x)`) |
 | `pnpm test:parse` | Legacy tsx integration suites under `scripts/tests/` (temp SQLite; no live reindex / Voyage / Ollama) |
 | `pnpm test:e2e` | Playwright smoke / UI (`e2e/*.spec.ts`) against `http://127.0.0.1:3000` |
+| `pnpm test:contracts` | Shared storage port contracts (SQLite always; Postgres skip-if-unavailable) |
+| `pnpm test:pg` | Same suite; intended with `INSTAGRAM_SAVES_DATABASE_URL` so Postgres runs |
 | `pnpm test:all` | Unit + parse (local convenience; CI splits jobs) |
 
 ```bash
@@ -58,7 +60,8 @@ Storybook is **out of scope** for Phase 0. Prefer RTL over snapshot-heavy compon
 
 ## CI
 
-- **unit** job: Vitest
+- **unit** job: Vitest (SQLite; Postgres contracts skip because the URL is unset)
+- **contracts-pg** job: `pgvector/pgvector:pg17` service + `pnpm test:pg` with `INSTAGRAM_SAVES_DATABASE_URL` (must actually run, not skip)
 - **check** job: `tsc` + `pnpm test:parse` (unchanged offline env)
 - **e2e** job: Playwright chromium smoke (installs browsers; starts Next via webServer)
 

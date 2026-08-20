@@ -76,6 +76,46 @@ jobs:
       - name: Unit / component (Vitest)
         run: pnpm test:unit
 
+  contracts-pg:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_DB: instagram_saves
+          POSTGRES_USER: instagram_saves
+          POSTGRES_PASSWORD: instagram_saves_dev
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U instagram_saves -d instagram_saves"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.13.1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Postgres storage contracts
+        run: pnpm test:pg
+        env:
+          CI: "true"
+          INSTAGRAM_SAVES_DATABASE_URL: postgres://instagram_saves:instagram_saves_dev@127.0.0.1:5432/instagram_saves
+          INSTAGRAM_SAVES_KEYRING: memory
+          EMBEDDING_WORKER_INLINE: "1"
+
   e2e:
     runs-on: ubuntu-latest
     timeout-minutes: 20

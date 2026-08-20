@@ -1,8 +1,9 @@
 # Multi-Engine Database Support (SQLite default + Postgres)
 
-Status: **ME-4 complete — Postgres feature parity through storage ports** (Aug
-2026). Distance parity and import/embedding runner routing are validated;
-phases 5–6 have not started.
+Status: **ME-5 complete — dual-engine storage contracts** (Aug 2026).
+SQLite contracts run in the default suite; Postgres runs from an available
+environment-provided test URL and skips clearly when unavailable. ME-6 has not
+started.
 
 Goal: refactor from hard-wired better-sqlite3 to an async port-based storage
 layer with two full backends — SQLite (default, embedded) and Postgres
@@ -21,7 +22,7 @@ backend targets real servers only.
 - [x] Phase 2: Async-ify all call sites (routes, pages, SSE snapshots, scripts, worker), remove `getSqlite()` defaults and top-level HMR ensure, adapt existing tests; full suite green on SQLite
 - [x] Phase 3: Move all plain tables to Drizzle schemas per dialect with Drizzle Kit migrations; shrink hand-rolled DDL to FTS5/vec0 (SQLite) and journaled extension/tsvector/vector SQL (PG); stamp empty SQLite databases at v10 and reject legacy/non-empty unstamped files; rewrite `docs/db-boundary.md`
 - [x] Phase 4: Postgres Pool/migrations, all five adapter ports, tsvector/pgvector storage, lease reclaim, maintenance/reset, engine-aware UI, distance parity, docker-compose recipe, and port-routed import/embedding runners
-- [ ] Phase 5: Port contract tests against both engines (Testcontainers pgvector), parameterize Gate A harness and soak over engine, optional Postgres e2e project
+- [x] Phase 5: Shared port contracts against SQLite and optional environment-provided Postgres; Docker-free default tests, `test:pg`, engine-selectable soak, and documented optional Postgres browser smoke
 - [ ] Phase 6: Build `scripts/migrate-engine.ts` for bidirectional SQLite/Postgres library migration with identity preservation; document in runbook; fresh start remains default
 
 ## Target architecture
@@ -180,13 +181,22 @@ SQLite APIs from returning to runner files.
 
 ## Phase 5 — Test infrastructure for two engines
 
-- Contract test suite: one spec file per port run against both
-  implementations (SQLite `:memory:`; Postgres via Testcontainers with a
-  pgvector image), tagged so `pnpm test` stays fast without Docker and
-  `pnpm test:pg` runs the full matrix.
-- Gate A harness (`scripts/tests/harness.ts`) parameterized over engine;
-  Playwright e2e gets an optional Postgres project.
-- Soak script gains `--engine=postgres` mode.
+Implementation status: complete. `src/lib/storage/contracts.test.ts` registers
+one shared suite against SQLite `:memory:` and, when reachable,
+`INSTAGRAM_SAVES_DATABASE_URL`. Missing/unavailable Postgres is a clear skip
+locally, so `pnpm test:unit` stays Docker-free. GitHub Actions `contracts-pg`
+starts a `pgvector/pgvector:pg17` service, sets the URL, and runs
+`pnpm test:pg` (fail-loud if the URL is set but Postgres is unreachable).
+`pnpm test:contracts` is the same suite without requiring Docker.
+
+The contracts cover all five ports, including import-adjacent catalog writes
+and rollback, FTS, normalized 1024-dimension vector ranking, embedding/import
+job lifecycles, settings, busy-state enforcement, integrity, and reset.
+`scripts/soak-scale.ts` accepts `--engine=sqlite|postgres` and uses storage
+ports for count and integrity assertions. Gate A remains in `test:all`, while
+its database behavior is exercised through the shared storage contracts.
+Optional Postgres Playwright smoke is documented as an environment-selected
+run rather than adding Docker Compose to CI.
 
 ## Phase 6 — Engine-to-engine migration tool
 

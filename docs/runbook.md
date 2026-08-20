@@ -60,12 +60,8 @@ port 5432 is occupied. Storage startup applies `drizzle/postgres/` automatically
 including the `vector` extension, generated `tsvector` documents, and indexes.
 Unset `INSTAGRAM_SAVES_DATABASE_URL` to return to SQLite.
 
-The ME-4 adapter implements all five storage ports and has a Docker migration /
-empty-library smoke path. Some import and embedding queue runner internals still
-resolve the legacy SQLite singleton directly; those paths must be moved fully
-behind the ports before Postgres can be called feature-complete. Until then,
-use Postgres for adapter development and read/search/maintenance validation, not
-as the only copy of an imported library.
+The Postgres adapter implements all five storage ports, including import and
+embedding queue runner operations.
 
 Back up a Postgres library with:
 
@@ -73,10 +69,51 @@ Back up a Postgres library with:
 pg_dump "$INSTAGRAM_SAVES_DATABASE_URL" --format=custom --file=instagram-saves.dump
 ```
 
-Restore into a fresh database with `pg_restore --clean --if-exists`. The app
-does not run PostgreSQL tests in normal CI; a local smoke uses the Compose
-recipe, starts the app (or constructs `createPostgresStorage`), and verifies all
-five ports after migrations.
+Restore into a fresh database with `pg_restore --clean --if-exists`. CI
+(`contracts-pg`) runs storage contracts against `pgvector/pgvector:pg17`. Local
+smoke still uses this Compose recipe if you want to start the app or construct
+`createPostgresStorage` yourself.
+
+## Dual-engine storage contracts (ME-5)
+
+The shared contract suite always runs against an in-memory SQLite database.
+When `INSTAGRAM_SAVES_DATABASE_URL` is set and reachable, the same catalog,
+jobs, search/FTS/vector, settings, and maintenance assertions also run against
+Postgres. Locally, without Postgres it prints a clear skip and remains green.
+GitHub Actions always sets the URL against a healthy pgvector service, so
+`pnpm test:pg` must execute the Postgres cases (CI fails if the URL is set
+but the database is unreachable):
+
+```bash
+pnpm test:contracts
+```
+
+To run the full matrix locally with the existing pgvector recipe:
+
+```bash
+docker compose -f docker-compose.postgres.yml up -d --wait
+export INSTAGRAM_SAVES_DATABASE_URL='postgres://instagram_saves:instagram_saves_dev@127.0.0.1:5432/instagram_saves'
+pnpm test:pg
+```
+
+The Postgres contract suite truncates application tables before and after each
+case. Use only the disposable Compose database or another dedicated test
+database, never an operator library. The suite does not start Docker itself.
+
+The Gate A parser/import harness remains part of `pnpm test:all`; its
+storage-engine-neutral behavior is covered at the port boundary by the shared
+contracts. The synthetic soak accepts an explicit engine:
+
+```bash
+pnpm soak:scale
+INSTAGRAM_SAVES_DATABASE_URL='postgres://…/instagram_saves_test' \
+  pnpm soak:scale -- --engine=postgres
+```
+
+Use a fresh, disposable Postgres database for the soak because it writes the
+synthetic library. Optional browser smoke can target Postgres by exporting the
+same URL before `pnpm test:e2e`; Playwright's isolated SQLite path is ignored
+when the Postgres URL is configured.
 
 Postgres uses pgvector cosine distance. Embeddings are L2-normalized before
 storage, so ordering is equivalent to SQLite's L2 metric and thresholds convert
