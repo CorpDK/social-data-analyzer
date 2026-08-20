@@ -112,7 +112,10 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   if (!queued.ok) {
     throw new Error(`Local reindex should enqueue while openai runs: ${queued.error}`);
   }
-  if (queued.job.state !== "pending" && getPendingEmbeddingJobs().length < 1) {
+  if (
+    queued.job.state !== "pending" &&
+    (await getPendingEmbeddingJobs()).length < 1
+  ) {
     throw new Error("Local job should be pending in the queue");
   }
   const duplicate = await startReindexJob("local");
@@ -152,11 +155,11 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
   if (!allJobs.jobs.some((job) => job.target.startsWith("likes-"))) {
     throw new Error("all-configured should include likes-* job targets");
   }
-  const activeAfterAll = getActiveEmbeddingJob();
+  const activeAfterAll = await getActiveEmbeddingJob();
   if (!activeAfterAll || activeAfterAll.state !== "running") {
     throw new Error("First all-configured provider job should be running");
   }
-  if (getPendingEmbeddingJobs().length < 1) {
+  if ((await getPendingEmbeddingJobs()).length < 1) {
     throw new Error("Remaining all-configured providers should be pending");
   }
 
@@ -195,7 +198,7 @@ export async function runJobsPolicyQueueSuite(_ctx: TestContext) {
 
   // Let the remaining queue drain so later tests see a clean runner.
   await waitForIdleJob(120_000);
-  if (getLatestEmbeddingJob() == null) {
+  if ((await getLatestEmbeddingJob()) == null) {
     throw new Error("Expected embedding jobs after all-configured queue");
   }
 
@@ -233,29 +236,29 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
   };
 
   const failedJobId = insertJobRow("local", "failed");
-  const failedReason = embeddingJobSpawnBlockReason(failedJobId);
+  const failedReason = await embeddingJobSpawnBlockReason(failedJobId);
   if (!failedReason || !failedReason.includes("failed")) {
     throw new Error("A failed job must never be startable by a worker");
   }
   await ensureJobRunner();
-  if (getEmbeddingJob(failedJobId)?.state !== "failed") {
+  if ((await getEmbeddingJob(failedJobId))?.state !== "failed") {
     throw new Error("Terminal jobs must not be revived by the queue");
   }
-  if (embeddingJobSpawnBlockReason(failedJobId + 10_000) === null) {
+  if ((await embeddingJobSpawnBlockReason(failedJobId + 10_000)) === null) {
     throw new Error("A missing job must never be startable");
   }
 
   // A provider disabled after enqueue must fail its queued job, not spawn for it.
   updateSettingsKeys({ voyageEnabled: false });
   const staleVoyageJobId = insertJobRow("voyage", "pending");
-  const staleReason = embeddingJobSpawnBlockReason(staleVoyageJobId);
+  const staleReason = await embeddingJobSpawnBlockReason(staleVoyageJobId);
   if (!staleReason || !staleReason.includes("not enabled")) {
     throw new Error(
       `Queued job for a disabled provider must be blocked (got ${staleReason})`,
     );
   }
   await ensureJobRunner();
-  const staleVoyageJob = getEmbeddingJob(staleVoyageJobId);
+  const staleVoyageJob = await getEmbeddingJob(staleVoyageJobId);
   if (staleVoyageJob?.state !== "failed" || !staleVoyageJob.error) {
     throw new Error(
       `Stale disabled-provider job should fail terminally (got ${staleVoyageJob?.state})`,
@@ -264,7 +267,7 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
   updateSettingsKeys({ voyageEnabled: true });
 
   const enabledLocalJobId = insertJobRow("local", "pending");
-  if (embeddingJobSpawnBlockReason(enabledLocalJobId) !== null) {
+  if ((await embeddingJobSpawnBlockReason(enabledLocalJobId)) !== null) {
     throw new Error("An enabled provider's pending job should be startable");
   }
   sqlite
@@ -272,7 +275,7 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
       `UPDATE embedding_jobs SET state = 'cancelled', finished_at = unixepoch() WHERE id = ?`,
     )
     .run(enabledLocalJobId);
-  if (embeddingJobSpawnBlockReason(enabledLocalJobId) === null) {
+  if ((await embeddingJobSpawnBlockReason(enabledLocalJobId)) === null) {
     throw new Error("A cancelled job must never be startable");
   }
 
@@ -385,7 +388,7 @@ export async function runJobsPolicyWorkerSuite(_ctx: TestContext) {
         `Only one job may run at a time (saw ${maxConcurrentRunning})`,
       );
     }
-    const reentrantJob = getEmbeddingJob(reentrant.job.id);
+    const reentrantJob = await getEmbeddingJob(reentrant.job.id);
     if (reentrantJob?.state !== "completed") {
       throw new Error(
         `Re-entrancy guard job should end completed (got ${reentrantJob?.state})`,

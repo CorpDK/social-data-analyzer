@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     const parsed = await readJsonBody(request);
     const jobId = parsed.ok ? readOptionalJobId(parsed.value) : undefined;
 
-    const result = cancelImportJob(jobId);
+    const result = await cancelImportJob(jobId);
     if (!result.ok) {
       return NextResponse.json(
         { error: result.error, code: "IMPORT_CANCEL_REJECTED", job: result.job ?? null },

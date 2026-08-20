@@ -52,7 +52,7 @@ export async function runSyncUpsertResumeSuite(_ctx: TestContext) {
   const { embeddingConfigForProvider } = await import(
     "../../src/lib/search/embeddings"
   );
-  const localDims = embeddingConfigForProvider("local").profile.dimensions;
+  const localDims = (await embeddingConfigForProvider("local")).profile.dimensions;
   const duplicateChunk = [
     { id: keepId, embedding: new Float32Array(localDims).fill(0.5) },
   ];

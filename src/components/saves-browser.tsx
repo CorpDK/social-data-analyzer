@@ -78,7 +78,13 @@ function resolveProvider(
   return providers?.default ?? "local";
 }
 
-export function SavesBrowser() {
+export function SavesBrowser({
+  keywordTech = "FTS5",
+  vectorTech = "sqlite-vec",
+}: {
+  keywordTech?: string;
+  vectorTech?: string;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
@@ -255,7 +261,7 @@ export function SavesBrowser() {
           Saved media
         </h1>
         <p className="text-[var(--muted)]">
-          Keyword (FTS5) and semantic (sqlite-vec) search over creators,
+          Keyword ({keywordTech}) and semantic ({vectorTech}) search over creators,
           shortcodes, and collections.
         </p>
       </section>
@@ -343,7 +349,7 @@ export function SavesBrowser() {
               Semantic search provider
             </p>
             <p className="text-xs text-[var(--muted)]">
-              Keyword search stays on FTS5. Only the vector path changes.
+              Keyword search stays on {keywordTech}. Only the vector path changes.
             </p>
           </div>
           <div

@@ -1,6 +1,8 @@
 # Multi-Engine Database Support (SQLite default + Postgres)
 
-Status: **ME-3 landed — greenfield Drizzle journals** (Aug 2026). Phases 4–6 remain.
+Status: **ME-4 complete — Postgres feature parity through storage ports** (Aug
+2026). Distance parity and import/embedding runner routing are validated;
+phases 5–6 have not started.
 
 Goal: refactor from hard-wired better-sqlite3 to an async port-based storage
 layer with two full backends — SQLite (default, embedded) and Postgres
@@ -18,7 +20,7 @@ backend targets real servers only.
 - [x] Phase 1: Define async port interfaces (`CatalogStore`, `SearchIndex`, `JobStore`, `SettingsStore`, `MaintenanceOps`) and move existing SQLite code into `src/lib/storage/sqlite/` behind them
 - [x] Phase 2: Async-ify all call sites (routes, pages, SSE snapshots, scripts, worker), remove `getSqlite()` defaults and top-level HMR ensure, adapt existing tests; full suite green on SQLite
 - [x] Phase 3: Move all plain tables to Drizzle schemas per dialect with Drizzle Kit migrations; shrink hand-rolled DDL to FTS5/vec0 (SQLite) and journaled extension/tsvector/vector SQL (PG); stamp empty SQLite databases at v10 and reject legacy/non-empty unstamped files; rewrite `docs/db-boundary.md`
-- [ ] Phase 4: Implement Postgres backend (pg Pool, tsvector search docs, pgvector embeddings, jobs with lease reclaim, maintenance/reset, engine-aware UI), validate distance-metric parity, add docker-compose recipe
+- [x] Phase 4: Postgres Pool/migrations, all five adapter ports, tsvector/pgvector storage, lease reclaim, maintenance/reset, engine-aware UI, distance parity, docker-compose recipe, and port-routed import/embedding runners
 - [ ] Phase 5: Port contract tests against both engines (Testcontainers pgvector), parameterize Gate A harness and soak over engine, optional Postgres e2e project
 - [ ] Phase 6: Build `scripts/migrate-engine.ts` for bidirectional SQLite/Postgres library migration with identity preservation; document in runbook; fresh start remains default
 
@@ -135,6 +137,14 @@ Exit gate: `pnpm test:all` + e2e green, app behavior-identical on SQLite.
   access).
 
 ## Phase 4 — Postgres backend
+
+Implementation status: complete. The Pool bootstrap, Drizzle migrator, all five
+concrete port adapters, engine-selected factory, engine-aware UI labels/actions,
+Docker pgvector recipe, and normalized-vector distance conversion tests have
+landed. Import lifecycle/catalog writes, import and embedding job mutations,
+provider settings, FTS/vector rebuilds, vector queries, readiness, and status
+now route through the storage ports. A boundary regression test prevents direct
+SQLite APIs from returning to runner files.
 
 `src/lib/storage/postgres/` implementing all five ports over a `pg` Pool:
 

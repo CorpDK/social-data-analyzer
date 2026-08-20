@@ -79,7 +79,13 @@ function resolveProvider(
   return providers?.default ?? "local";
 }
 
-export function LikesBrowser() {
+export function LikesBrowser({
+  keywordTech = "FTS5",
+  vectorTech = "sqlite-vec",
+}: {
+  keywordTech?: string;
+  vectorTech?: string;
+}) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
@@ -231,7 +237,7 @@ export function LikesBrowser() {
           Liked media
         </h1>
         <p className="text-[var(--muted)]">
-          Keyword (FTS5) and semantic (sqlite-vec) search over creators,
+          Keyword ({keywordTech}) and semantic ({vectorTech}) search over creators,
           shortcodes, and like sources. The Saved column marks media also in
           your saves library.
         </p>
@@ -306,7 +312,7 @@ export function LikesBrowser() {
               Semantic search provider
             </p>
             <p className="text-xs text-[var(--muted)]">
-              Keyword search stays on FTS5. Only the likes vector path changes.
+              Keyword search stays on {keywordTech}. Only the likes vector path changes.
             </p>
           </div>
           <div

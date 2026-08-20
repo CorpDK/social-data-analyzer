@@ -3,16 +3,7 @@ import {
   getOpenAiApiKey,
   getVoyageApiKey,
 } from "../settings/credentials";
-import { getSqlite } from "../db";
-import {
-  getEmbeddingTimeoutMs,
-  getOllamaSettings,
-  getOpenAiSettings,
-  getVoyageSettings,
-  isOllamaEnabled,
-  isOpenAiEnabled,
-  isVoyageEnabled,
-} from "../settings/app-settings";
+import { getStorage } from "../storage";
 
 export type EmbeddingProvider = "local" | "ollama" | "openai" | "voyage";
 export type EmbeddingInputType = "document" | "query";
@@ -27,6 +18,7 @@ export type EmbeddingProfile = {
 export type EmbeddingConfig = {
   profile: EmbeddingProfile;
   apiKey: string | null;
+  timeoutMs?: number;
 };
 
 const LOCAL_MODEL = "feature-hash-v1";
@@ -65,14 +57,6 @@ function openAiCompatibleEndpoint(baseUrl: string): string {
   return normalized.endsWith("/embeddings")
     ? normalized
     : `${normalized}/embeddings`;
-}
-
-function openAiEndpoint(): string {
-  return openAiCompatibleEndpoint(getOpenAiSettings(getSqlite()).baseUrl);
-}
-
-function ollamaEndpoint(): string {
-  return openAiCompatibleEndpoint(getOllamaSettings(getSqlite()).baseUrl);
 }
 
 export function localEmbeddingConfig(): EmbeddingConfig {
@@ -152,58 +136,77 @@ export function embeddingToBuffer(vec: Float32Array): Buffer {
   return Buffer.from(vec.buffer, vec.byteOffset, vec.byteLength);
 }
 
-export function embeddingConfigForProvider(
+/** Normalize vectors so SQLite L2 and pgvector cosine rankings are equivalent. */
+export function normalizeEmbedding(vec: Float32Array): Float32Array {
+  let squaredNorm = 0;
+  for (const value of vec) squaredNorm += value * value;
+  const norm = Math.sqrt(squaredNorm);
+  if (!Number.isFinite(norm) || norm === 0) return vec;
+  const normalized = new Float32Array(vec.length);
+  for (let index = 0; index < vec.length; index += 1) {
+    normalized[index] = vec[index]! / norm;
+  }
+  return normalized;
+}
+
+export async function embeddingConfigForProvider(
   provider: EmbeddingProvider,
-): EmbeddingConfig {
+): Promise<EmbeddingConfig> {
   if (provider === "local") return localEmbeddingConfig();
+  const settings = await (await getStorage()).settings.getRuntimeAppSettings();
   if (provider === "ollama") {
-    const settings = getOllamaSettings(getSqlite());
     return {
       profile: {
         provider,
-        model: settings.model,
+        model: settings.ollama.model,
         dimensions: EMBEDDING_DIMENSIONS,
-        endpoint: ollamaEndpoint(),
+        endpoint: openAiCompatibleEndpoint(settings.ollama.baseUrl),
       },
       apiKey: getOllamaApiKey(),
+      timeoutMs: settings.timeoutMs,
     };
   }
   if (provider === "voyage") {
     return {
       profile: {
         provider,
-        model: getVoyageSettings(getSqlite()).model,
+        model: settings.voyage.model,
         dimensions: EMBEDDING_DIMENSIONS,
         endpoint: VOYAGE_ENDPOINT,
       },
       apiKey: getVoyageApiKey(),
+      timeoutMs: settings.timeoutMs,
     };
   }
   return {
     profile: {
       provider,
-      model: getOpenAiSettings(getSqlite()).model,
+      model: settings.openai.model,
       dimensions: EMBEDDING_DIMENSIONS,
-      endpoint: openAiEndpoint(),
+      endpoint: openAiCompatibleEndpoint(settings.openai.baseUrl),
     },
     apiKey: getOpenAiApiKey(),
+    timeoutMs: settings.timeoutMs,
   };
 }
 
 /** At least one neural index is explicitly enabled and credentialed. */
-export function isRemoteEmbeddingConfigured(): boolean {
+export async function isRemoteEmbeddingConfigured(): Promise<boolean> {
+  const settings = await (await getStorage()).settings.getRuntimeAppSettings();
   return Boolean(
-    (isOpenAiEnabled(getSqlite()) && getOpenAiApiKey()) ||
-      (isVoyageEnabled(getSqlite()) && getVoyageApiKey()) ||
-      isOllamaEnabled(getSqlite()),
+    ((settings.openai.enabled.saves || settings.openai.enabled.likes) &&
+      getOpenAiApiKey()) ||
+      ((settings.voyage.enabled.saves || settings.voyage.enabled.likes) &&
+        getVoyageApiKey()) ||
+      settings.ollama.enabled.saves ||
+      settings.ollama.enabled.likes,
   );
 }
 
 /** Max texts per remote embedding HTTP request (Voyage / OpenAI / Ollama). */
 export const EMBEDDING_API_BATCH_SIZE = 64;
 
-function embeddingRequestTimeoutMs(batchSize: number): number {
-  const timeout = getEmbeddingTimeoutMs(getSqlite());
+function embeddingRequestTimeoutMs(batchSize: number, timeout = 30_000): number {
   if (batchSize <= 1) return timeout;
   // Modest headroom for batched remote calls without unbounded waits.
   return Math.min(timeout * 8, timeout + batchSize * 250);
@@ -231,7 +234,7 @@ function parseEmbeddingResponse(
         `Embedding API returned unexpected dimensions at index ${i} (want ${dimensions}, got ${values?.length ?? 0})`,
       );
     }
-    return Float32Array.from(values);
+    return normalizeEmbedding(Float32Array.from(values));
   });
 }
 
@@ -271,7 +274,9 @@ async function embedTextsRemote(
             dimensions: profile.dimensions,
           },
     ),
-    signal: AbortSignal.timeout(embeddingRequestTimeoutMs(texts.length)),
+    signal: AbortSignal.timeout(
+      embeddingRequestTimeoutMs(texts.length, config.timeoutMs),
+    ),
   });
 
   if (!response.ok) {

@@ -1,10 +1,12 @@
 import { DangerZone } from "@/components/danger-zone";
 import { DbMaintenance } from "@/components/db-maintenance";
 import { SettingsForm } from "@/components/settings-form";
+import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
-export default function SettingsPage() {
+export default async function SettingsPage() {
+  const engine = await (await getStorage()).maintenance.engineInfo();
   return (
     <div className="space-y-5">
       <section className="space-y-1.5">
@@ -21,7 +23,7 @@ export default function SettingsPage() {
       </section>
 
       <SettingsForm />
-      <DbMaintenance />
+      <DbMaintenance engine={engine} />
       <DangerZone />
     </div>
   );

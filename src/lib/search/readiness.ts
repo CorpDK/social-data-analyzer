@@ -6,12 +6,8 @@
  * synchronously for the whole library). Gaps are healed via embedding jobs
  * (`fts`, `local`, `likes-local`) with SSE progress on the Indexes UI.
  */
-import { getSqlite } from "../db";
-import { ftsCount } from "./sync-fts";
-import { vecCount, vectorIndexMatchesConfig } from "./sync-vec-store";
-import { localEmbeddingConfig } from "./embeddings";
+import { getStorage } from "../storage";
 import { formatJobTarget, type SearchLibrary } from "./library";
-import { isProviderConfigured } from "./providers";
 import {
   enqueueFtsBackfillJob,
   ensureJobRunner,
@@ -30,54 +26,9 @@ export type SearchIndexGaps = {
   degraded: boolean;
 };
 
-function itemCount(library: SearchLibrary): number {
-  const table = library === "saves" ? "saved_items" : "liked_items";
-  return (
-    getSqlite().prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
-      c: number;
-    }
-  ).c;
-}
-
-function localVectorNeedsBackfill(library: SearchLibrary): boolean {
-  if (!isProviderConfigured("local", library)) return false;
-  const total = itemCount(library);
-  if (total <= 0) return false;
-  const sqlite = getSqlite();
-  const embedded = vecCount(library, "local", sqlite);
-  if (embedded < total) return true;
-  return !vectorIndexMatchesConfig(
-    library,
-    "local",
-    localEmbeddingConfig(),
-    sqlite,
-  );
-}
-
 /** COUNT-only gap assessment — safe on any read path. */
-export function assessSearchIndexGaps(): SearchIndexGaps {
-  const sqlite = getSqlite();
-  const savesItems = itemCount("saves");
-  const likesItems = itemCount("likes");
-  const savesFts = ftsCount("saves", sqlite);
-  const likesFts = ftsCount("likes", sqlite);
-  const savesFtsGap = Math.max(0, savesItems - savesFts);
-  const likesFtsGap = Math.max(0, likesItems - likesFts);
-  const savesLocalGap = localVectorNeedsBackfill("saves");
-  const likesLocalGap = localVectorNeedsBackfill("likes");
-  return {
-    savesItems,
-    likesItems,
-    savesFtsGap,
-    likesFtsGap,
-    savesLocalGap,
-    likesLocalGap,
-    degraded:
-      savesFtsGap > 0 ||
-      likesFtsGap > 0 ||
-      savesLocalGap ||
-      likesLocalGap,
-  };
+export async function assessSearchIndexGaps(): Promise<SearchIndexGaps> {
+  return (await getStorage()).search.assessSearchIndexGaps();
 }
 
 const globalForReadiness = globalThis as unknown as {
@@ -96,7 +47,7 @@ export type ScheduleBackfillResult = {
  * POST or documented startup — never from browse/list/stats or status GET.
  */
 export async function scheduleSearchBackfillJobsIfNeeded(): Promise<ScheduleBackfillResult> {
-  const gaps = assessSearchIndexGaps();
+  const gaps = await assessSearchIndexGaps();
   if (!gaps.degraded) {
     return { gaps, enqueued: [], skipped: false };
   }
@@ -110,20 +61,23 @@ export async function scheduleSearchBackfillJobsIfNeeded(): Promise<ScheduleBack
   const enqueued: string[] = [];
 
   if (gaps.savesFtsGap > 0 || gaps.likesFtsGap > 0) {
-    if (!hasOpenEmbeddingJobForTarget("fts")) {
+    if (!(await hasOpenEmbeddingJobForTarget("fts"))) {
       const job = await enqueueFtsBackfillJob();
       if (job) enqueued.push("fts");
     }
   }
 
-  if (gaps.savesLocalGap && !hasOpenEmbeddingJobForTarget(formatJobTarget("saves", "local"))) {
+  if (
+    gaps.savesLocalGap &&
+    !(await hasOpenEmbeddingJobForTarget(formatJobTarget("saves", "local")))
+  ) {
     const result = await startReindexJob("local");
     if (result.ok) enqueued.push("local");
   }
 
   if (
     gaps.likesLocalGap &&
-    !hasOpenEmbeddingJobForTarget(formatJobTarget("likes", "local"))
+    !(await hasOpenEmbeddingJobForTarget(formatJobTarget("likes", "local")))
   ) {
     const result = await startReindexJob("likes-local");
     if (result.ok) enqueued.push("likes-local");

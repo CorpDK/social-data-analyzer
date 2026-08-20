@@ -463,7 +463,7 @@ export async function runParseSuite(ctx: TestContext) {
     throw new Error(`Expected 3 offline vectors after imports, got ${localCount}`);
   }
 
-  const availabilityLocal = getProviderAvailability();
+  const availabilityLocal = await getProviderAvailability();
   if (
     availabilityLocal.available.join(",") !== "local" ||
     availabilityLocal.default !== "local"
@@ -521,7 +521,7 @@ export async function runParseSuite(ctx: TestContext) {
     throw new Error("Settings status must never echo secret values");
   }
 
-  const availabilityKeysOnly = getProviderAvailability();
+  const availabilityKeysOnly = await getProviderAvailability();
   if (
     availabilityKeysOnly.available.join(",") !== "local" ||
     availabilityKeysOnly.configured.openai ||
@@ -562,8 +562,8 @@ export async function runParseSuite(ctx: TestContext) {
   const {
     getProviderAvailability: getAvailabilityForLibrary,
   } = await import("../../src/lib/search/providers");
-  const savesOpenai = getAvailabilityForLibrary("saves");
-  const likesOpenai = getAvailabilityForLibrary("likes");
+  const savesOpenai = await getAvailabilityForLibrary("saves");
+  const likesOpenai = await getAvailabilityForLibrary("likes");
   if (!savesOpenai.configured.openai || likesOpenai.configured.openai) {
     throw new Error(
       "OpenAI enabled for Saves only must configure Saves and leave Likes unavailable",
@@ -577,7 +577,7 @@ export async function runParseSuite(ctx: TestContext) {
   delete process.env.EMBEDDING_MODEL;
   delete process.env.VOYAGE_MODEL;
 
-  const availabilityAll = getProviderAvailability();
+  const availabilityAll = await getProviderAvailability();
   if (
     availabilityAll.available.join(",") !== "local,ollama,openai,voyage" ||
     availabilityAll.default !== "openai"
@@ -766,12 +766,12 @@ export async function runParseSuite(ctx: TestContext) {
 
   // Env key alone must not enable; explicit enable + env key does.
   process.env.OPENAI_API_KEY = "env-fallback-key";
-  const envKeyOnly = getProviderAvailability();
+  const envKeyOnly = await getProviderAvailability();
   if (envKeyOnly.configured.openai) {
     throw new Error("OPENAI_API_KEY alone must not enable openai");
   }
   updateSettingsKeys({ openaiEnabled: true });
-  const envAvailability = getProviderAvailability();
+  const envAvailability = await getProviderAvailability();
   if (!envAvailability.configured.openai) {
     throw new Error("Enabled OpenAI with OPENAI_API_KEY env fallback should work");
   }

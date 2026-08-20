@@ -1,4 +1,4 @@
-import { getSqlite } from "../db";
+import { getStorage } from "../storage";
 import {
   embeddingConfigForProvider,
   isEmbeddingProvider,
@@ -29,11 +29,11 @@ export function providerHasCredentials(provider: EmbeddingProvider): boolean {
   return Boolean(getVoyageApiKey());
 }
 
-export function isProviderEnabled(
+export async function isProviderEnabled(
   provider: EmbeddingProvider,
   library: SearchLibrary,
-): boolean {
-  return isProviderIndexEnabled(provider, library, getSqlite());
+): Promise<boolean> {
+  return (await getStorage()).settings.isProviderIndexEnabled(provider, library);
 }
 
 /**
@@ -41,62 +41,62 @@ export function isProviderEnabled(
  * explicit enable for that library + credentials when required.
  * Storing an API key alone never makes a provider configured.
  */
-export function isProviderConfigured(
+export async function isProviderConfigured(
   provider: EmbeddingProvider,
   library: SearchLibrary,
-): boolean {
-  return isProviderEnabled(provider, library) && providerHasCredentials(provider);
+): Promise<boolean> {
+  return (await isProviderEnabled(provider, library)) && providerHasCredentials(provider);
 }
 
 /** Enabled + credentialed neural providers for a library (excludes local). */
-export function configuredRemoteProviders(
+export async function configuredRemoteProviders(
   library: SearchLibrary,
-): EmbeddingProvider[] {
+): Promise<EmbeddingProvider[]> {
   const providers: EmbeddingProvider[] = [];
-  if (isProviderConfigured("ollama", library)) providers.push("ollama");
-  if (isProviderConfigured("openai", library)) providers.push("openai");
-  if (isProviderConfigured("voyage", library)) providers.push("voyage");
+  if (await isProviderConfigured("ollama", library)) providers.push("ollama");
+  if (await isProviderConfigured("openai", library)) providers.push("openai");
+  if (await isProviderConfigured("voyage", library)) providers.push("voyage");
   return providers;
 }
 
 /** All enabled + credentialed providers for a library, local first when enabled. */
-export function configuredProviders(
+export async function configuredProviders(
   library: SearchLibrary,
-): EmbeddingProvider[] {
+): Promise<EmbeddingProvider[]> {
   const providers: EmbeddingProvider[] = [];
-  if (isProviderConfigured("local", library)) providers.push("local");
-  providers.push(...configuredRemoteProviders(library));
+  if (await isProviderConfigured("local", library)) providers.push("local");
+  providers.push(...(await configuredRemoteProviders(library)));
   return providers;
 }
 
-export function defaultSearchProvider(
+export async function defaultSearchProvider(
   library: SearchLibrary,
-): EmbeddingProvider {
-  const preferred = getPreferredEmbeddingProvider(getSqlite());
-  if (preferred && isProviderConfigured(preferred, library)) return preferred;
-  if (isProviderConfigured("openai", library)) return "openai";
-  if (isProviderConfigured("voyage", library)) return "voyage";
-  if (isProviderConfigured("ollama", library)) return "ollama";
-  if (isProviderConfigured("local", library)) return "local";
+): Promise<EmbeddingProvider> {
+  const preferred = await (await getStorage()).settings.getPreferredEmbeddingProvider();
+  if (preferred && (await isProviderConfigured(preferred, library))) return preferred;
+  if (await isProviderConfigured("openai", library)) return "openai";
+  if (await isProviderConfigured("voyage", library)) return "voyage";
+  if (await isProviderConfigured("ollama", library)) return "ollama";
+  if (await isProviderConfigured("local", library)) return "local";
   // Hard fallback for hybrid/vec code paths when every index is disabled.
   return "local";
 }
 
-export function getProviderAvailability(
+export async function getProviderAvailability(
   library: SearchLibrary = "saves",
-): ProviderAvailability {
+): Promise<ProviderAvailability> {
   const enabled = {
-    local: isProviderEnabled("local", library),
-    ollama: isProviderEnabled("ollama", library),
-    openai: isProviderEnabled("openai", library),
-    voyage: isProviderEnabled("voyage", library),
+    local: await isProviderEnabled("local", library),
+    ollama: await isProviderEnabled("ollama", library),
+    openai: await isProviderEnabled("openai", library),
+    voyage: await isProviderEnabled("voyage", library),
   } satisfies Record<EmbeddingProvider, boolean>;
 
   const configured = {
-    local: isProviderConfigured("local", library),
-    ollama: isProviderConfigured("ollama", library),
-    openai: isProviderConfigured("openai", library),
-    voyage: isProviderConfigured("voyage", library),
+    local: await isProviderConfigured("local", library),
+    ollama: await isProviderConfigured("ollama", library),
+    openai: await isProviderConfigured("openai", library),
+    voyage: await isProviderConfigured("voyage", library),
   } satisfies Record<EmbeddingProvider, boolean>;
 
   const available: EmbeddingProvider[] = [];
@@ -110,7 +110,7 @@ export function getProviderAvailability(
     available,
     configured,
     enabled,
-    default: defaultSearchProvider(library),
+    default: await defaultSearchProvider(library),
   };
 }
 
@@ -129,11 +129,11 @@ export function parseProviderParam(
   return null;
 }
 
-export function resolveSearchProvider(
+export async function resolveSearchProvider(
   requested: EmbeddingProvider | null | undefined,
   library: SearchLibrary,
-): ResolvedSearchProvider {
-  const availability = getProviderAvailability(library);
+): Promise<ResolvedSearchProvider> {
+  const availability = await getProviderAvailability(library);
   const fallbackDefault = availability.default;
 
   if (!requested) {
@@ -147,7 +147,7 @@ export function resolveSearchProvider(
   if (!availability.available.includes(requested)) {
     const fallback =
       availability.available[0] ??
-      (isProviderConfigured("local", library) ? "local" : fallbackDefault);
+      ((await isProviderConfigured("local", library)) ? "local" : fallbackDefault);
     return {
       requested,
       provider: fallback,
@@ -156,7 +156,7 @@ export function resolveSearchProvider(
     };
   }
 
-  const config = embeddingConfigForProvider(requested);
+  const config = await embeddingConfigForProvider(requested);
   // Ollama uses a dummy bearer token; cloud providers need a real key.
   if (requested !== "local" && requested !== "ollama" && !config.apiKey) {
     const fallback =

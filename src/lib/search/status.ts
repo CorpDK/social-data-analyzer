@@ -1,4 +1,4 @@
-import { getSqlite } from "../db";
+import { getStorage } from "../storage";
 import {
   embeddingConfigForProvider,
   type EmbeddingProfile,
@@ -19,15 +19,7 @@ import {
   readMemAvailableMb,
   type ReindexMemoryAssessment,
 } from "./memory";
-import {
-  embeddingProfilesMatch,
-  getIndexedEmbeddingProfile,
-  getIndexedEmbeddingProfileMeta,
-  vecCount,
-  vectorTableDimensions,
-  type VectorIndexName,
-} from "./sync";
-import { assessVectorIntegrity } from "./vec-integrity";
+import { embeddingProfilesMatch, type VectorIndexName } from "./sync";
 import {
   isProviderConfigured,
   isProviderEnabled,
@@ -162,32 +154,29 @@ function providerHint(
   return null;
 }
 
-export function getProviderIndexStatus(
+export async function getProviderIndexStatus(
   library: SearchLibrary,
   provider: EmbeddingProvider,
   totalItems?: number,
   memAvailableMb?: number | null,
-): ProviderIndexStatus {
-  const sqlite = getSqlite();
-  const table = library === "saves" ? "saved_items" : "liked_items";
+): Promise<ProviderIndexStatus> {
+  const { search } = await getStorage();
   const total =
     totalItems ??
-    (
-      sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
-        c: number;
-      }
-    ).c;
+    (library === "saves"
+      ? (await search.allSavesSearchRows()).length
+      : (await search.allLikesSearchRows()).length);
 
-  const enabled = isProviderEnabled(provider, library);
+  const enabled = await isProviderEnabled(provider, library);
   const hasCredentials = providerHasCredentials(provider);
-  const configured = isProviderConfigured(provider, library);
+  const configured = await isProviderConfigured(provider, library);
   const index = provider as VectorIndexName;
-  const tableDimensions = vectorTableDimensions(library, index, sqlite);
-  const embeddedCount = vecCount(library, index, sqlite);
-  const meta = getIndexedEmbeddingProfileMeta(library, index, sqlite);
-  const storedProfile = getIndexedEmbeddingProfile(library, index, sqlite);
+  const tableDimensions = await search.vectorTableDimensions(library, index);
+  const embeddedCount = await search.vecCount(library, index);
+  const meta = await search.getIndexedEmbeddingProfileMeta(library, index);
+  const storedProfile = await search.getIndexedEmbeddingProfile(library, index);
   const expected = hasCredentials
-    ? embeddingConfigForProvider(provider).profile
+    ? (await embeddingConfigForProvider(provider)).profile
     : null;
 
   const indexPresent = tableDimensions !== null && embeddedCount > 0;
@@ -215,7 +204,7 @@ export function getProviderIndexStatus(
           ok: true,
           issues: [] as string[],
         }
-      : assessVectorIntegrity(library, index, sqlite);
+      : await search.assessVectorIntegrity(library, index);
   if (
     !integrity.ok &&
     (health === "ready" || health === "partial")
@@ -268,23 +257,16 @@ export function getProviderIndexStatus(
   };
 }
 
-function getLibraryIndexStatus(
+async function getLibraryIndexStatus(
   library: SearchLibrary,
   memAvailableMb: number | null,
-): LibraryIndexStatus {
-  const sqlite = getSqlite();
-  const itemsTable = library === "saves" ? "saved_items" : "liked_items";
-  const ftsTable = library === "saves" ? "saved_items_fts" : "liked_items_fts";
-  const totalItems = (
-    sqlite.prepare(`SELECT count(*) AS c FROM ${itemsTable}`).get() as {
-      c: number;
-    }
-  ).c;
-  const ftsCount = (
-    sqlite.prepare(`SELECT count(*) AS c FROM ${ftsTable}`).get() as {
-      c: number;
-    }
-  ).c;
+): Promise<LibraryIndexStatus> {
+  const { search } = await getStorage();
+  const totalItems =
+    library === "saves"
+      ? (await search.allSavesSearchRows()).length
+      : (await search.allLikesSearchRows()).length;
+  const ftsCount = await search.ftsCount(library);
 
   const providers: EmbeddingProvider[] = [
     "local",
@@ -299,8 +281,10 @@ function getLibraryIndexStatus(
     totalItems,
     ftsCount,
     estimatedVectorMb: estimatedVectorMegabytes(totalItems),
-    providers: providers.map((provider) =>
-      getProviderIndexStatus(library, provider, totalItems, memAvailableMb),
+    providers: await Promise.all(
+      providers.map((provider) =>
+        getProviderIndexStatus(library, provider, totalItems, memAvailableMb),
+      ),
     ),
   };
 }
@@ -308,11 +292,11 @@ function getLibraryIndexStatus(
 export async function getSearchIndexStatus(): Promise<SearchIndexStatus> {
   // Reclaim/pump already-queued work only — never enqueue new backfill here.
   await ensureJobRunner();
-  const gaps = assessSearchIndexGaps();
+  const gaps = await assessSearchIndexGaps();
 
   const memAvailableMb = readMemAvailableMb();
-  const saves = getLibraryIndexStatus("saves", memAvailableMb);
-  const likes = getLibraryIndexStatus("likes", memAvailableMb);
+  const saves = await getLibraryIndexStatus("saves", memAvailableMb);
+  const likes = await getLibraryIndexStatus("likes", memAvailableMb);
 
   return {
     libraries: { saves, likes },
@@ -324,9 +308,9 @@ export async function getSearchIndexStatus(): Promise<SearchIndexStatus> {
       ollamaLargeMinAvailableMb: OLLAMA_LARGE_MIN_AVAILABLE_MB,
     },
     gaps,
-    job: getDisplayEmbeddingJob(),
-    pendingJobs: getPendingEmbeddingJobs(),
-    recentJobs: getRecentEmbeddingJobs(8),
+    job: await getDisplayEmbeddingJob(),
+    pendingJobs: await getPendingEmbeddingJobs(),
+    recentJobs: await getRecentEmbeddingJobs(8),
     cancelSupported: true,
   };
 }
@@ -353,7 +337,7 @@ const globalForStatus = globalThis as unknown as {
  */
 export async function getSearchIndexStatusForStream(): Promise<SearchIndexStatus> {
   await ensureJobRunner();
-  const active = getActiveEmbeddingJob();
+  const active = await getActiveEmbeddingJob();
   const now = Date.now();
   const cache = globalForStatus.__searchStatusStreamCache ?? null;
   const isActive = Boolean(active);
@@ -375,8 +359,8 @@ export async function getSearchIndexStatusForStream(): Promise<SearchIndexStatus
 
   return {
     ...cache.status,
-    job: getDisplayEmbeddingJob(),
-    pendingJobs: getPendingEmbeddingJobs(),
-    recentJobs: getRecentEmbeddingJobs(8),
+    job: await getDisplayEmbeddingJob(),
+    pendingJobs: await getPendingEmbeddingJobs(),
+    recentJobs: await getRecentEmbeddingJobs(8),
   };
 }

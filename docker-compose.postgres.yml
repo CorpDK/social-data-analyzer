@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: instagram_saves
+      POSTGRES_USER: instagram_saves
+      POSTGRES_PASSWORD: instagram_saves_dev
+    ports:
+      - "127.0.0.1:${INSTAGRAM_SAVES_POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U instagram_saves -d instagram_saves"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+    volumes:
+      - instagram-saves-postgres:/var/lib/postgresql/data
+
+volumes:
+  instagram-saves-postgres:

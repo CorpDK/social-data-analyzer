@@ -1,5 +1,4 @@
-import { and, eq } from "drizzle-orm";
-import { getDb, schema } from "../db";
+import { getStorage } from "../storage";
 import {
   buildImportLogFromItems,
   serializeImportLog,
@@ -15,11 +14,6 @@ import {
   hashZipSource,
 } from "./zip-extract";
 import {
-  applyLikedItems,
-  applyParsedItems,
-  persistImportSchemas,
-} from "./write-batches";
-import {
   catalogSchemasWithProgress,
   parseExportJsonFilesWithProgress,
   parseLikedExportJsonFilesWithProgress,
@@ -28,7 +22,6 @@ import {
 import {
   formatPartialImportMessage,
 } from "./partial-accounting";
-import { rollbackImportInserts } from "./rollback-partial";
 import { emitProgress, throwIfCancelled } from "./progress";
 import {
   processZipExportStreaming,
@@ -40,8 +33,6 @@ import {
   type ImportRunOptions,
   type ZipImportSource,
 } from "./types";
-
-const { imports } = schema;
 
 async function finishSuccessfulImport(args: {
   draftId: number;
@@ -67,17 +58,17 @@ async function finishSuccessfulImport(args: {
     priorId,
     options,
   } = args;
-  const db = getDb();
+  const { catalog } = await getStorage();
 
   try {
     const result =
       items.length > 0
-        ? await applyParsedItems(draftId, items, options)
+        ? await catalog.applyParsedItems(draftId, items, options)
         : { added: 0, updated: 0, skipped: 0, changedIds: [] as number[] };
 
-    const likesResult = await applyLikedItems(draftId, liked, options);
+    const likesResult = await catalog.applyLikedItems(draftId, liked, options);
 
-    persistImportSchemas(draftId, schemaCatalog);
+    await catalog.persistImportSchemas(draftId, schemaCatalog);
 
     const completedLog: ImportLog = {
       ...importLog,
@@ -97,16 +88,13 @@ async function finishSuccessfulImport(args: {
       ],
     };
 
-    db.update(imports)
-      .set({
+    await catalog.updateImport(draftId, {
         itemsAdded: result.added,
         itemsUpdated: result.updated,
         itemsSkipped: result.skipped,
         status: isDuplicate ? "duplicate" : "completed",
         notes: serializeImportLog(completedLog),
-      })
-      .where(eq(imports.id, draftId))
-      .run();
+      });
 
     const embeddingMessage =
       result.changedIds.length > 0
@@ -176,7 +164,7 @@ async function finishSuccessfulImport(args: {
   } catch (error) {
     // Batches commit as they go — roll back inserts so aborted imports do not
     // leave durable new catalog rows. Residual last_seen-only updates may remain.
-    const rollback = rollbackImportInserts(draftId);
+    const rollback = await catalog.rollbackImportInserts(draftId);
     const residual = rollback.after;
     const baseMessage =
       error instanceof ImportCancelledError
@@ -189,16 +177,13 @@ async function finishSuccessfulImport(args: {
       rolledBackLikes: rollback.likesDeleted,
     });
 
-    db.update(imports)
-      .set({
+    await catalog.updateImport(draftId, {
         status: "failed",
         error: message,
         itemsAdded: residual.itemsAdded,
         itemsUpdated: residual.itemsUpdated,
         itemsSkipped: 0,
-      })
-      .where(eq(imports.id, draftId))
-      .run();
+      });
 
     await emitProgress(options?.onProgress, {
       phase: "failed",
@@ -248,7 +233,7 @@ export async function importExportArchive(
   filename: string,
   options?: ImportRunOptions,
 ): Promise<ImportResult> {
-  const db = getDb();
+  const { catalog } = await getStorage();
   const contentHash =
     options?.contentHash ?? (await hashZipSource(source));
 
@@ -260,16 +245,7 @@ export async function importExportArchive(
   });
   throwIfCancelled(options?.shouldCancel);
 
-  const prior = db
-    .select()
-    .from(imports)
-    .where(
-      and(
-        eq(imports.contentHash, contentHash),
-        eq(imports.status, "completed"),
-      ),
-    )
-    .get();
+  const prior = await catalog.findCompletedImportByHash(contentHash);
 
   let streamed: StreamedZipExport;
   try {
@@ -278,16 +254,12 @@ export async function importExportArchive(
     if (error instanceof ImportCancelledError) throw error;
     const message =
       error instanceof Error ? error.message : "Failed to read zip archive";
-    const failed = db
-      .insert(imports)
-      .values({
+    const failed = await catalog.createImport({
         filename,
         contentHash,
         status: "failed",
         error: message,
-      })
-      .returning()
-      .get();
+      });
 
     await emitProgress(options?.onProgress, {
       phase: "failed",
@@ -330,22 +302,18 @@ export async function importExportArchive(
   );
 
   if (items.length === 0 && liked.length === 0) {
-    const failed = db
-      .insert(imports)
-      .values({
+    const failed = await catalog.createImport({
         filename,
         contentHash,
         status: "failed",
         error:
           "No saved or liked posts found. Ensure the zip is an Instagram data export (JSON) that includes saved and/or likes activity.",
         itemsFound: 0,
-      })
-      .returning()
-      .get();
+      });
 
     // Still keep schema catalog so the explorer can show what was in the zip.
     try {
-      persistImportSchemas(failed.id, schemaCatalog);
+      await catalog.persistImportSchemas(failed.id, schemaCatalog);
     } catch {
       // non-fatal
     }
@@ -380,17 +348,13 @@ export async function importExportArchive(
   }
 
   const isDuplicate = Boolean(prior);
-  const draft = db
-    .insert(imports)
-    .values({
+  const draft = await catalog.createImport({
       filename,
       contentHash,
       status: isDuplicate ? "duplicate" : "completed",
       itemsFound: items.length,
       notes: serializeImportLog(importLog),
-    })
-    .returning()
-    .get();
+    });
 
   return finishSuccessfulImport({
     draftId: draft.id,
@@ -413,7 +377,7 @@ export async function importExportJson(
 ): Promise<ImportResult> {
   const buffer = Buffer.from(content, "utf8");
   const contentHash = options?.contentHash ?? hashBuffer(buffer);
-  const db = getDb();
+  const { catalog } = await getStorage();
 
   await emitProgress(options?.onProgress, {
     phase: "received",
@@ -423,16 +387,7 @@ export async function importExportJson(
   });
   throwIfCancelled(options?.shouldCancel);
 
-  const prior = db
-    .select()
-    .from(imports)
-    .where(
-      and(
-        eq(imports.contentHash, contentHash),
-        eq(imports.status, "completed"),
-      ),
-    )
-    .get();
+  const prior = await catalog.findCompletedImportByHash(contentHash);
 
   const jsonFiles = [{ name: filename, content, byteSize: buffer.byteLength }];
   const schemaCatalog = await catalogSchemasWithProgress(jsonFiles, options);
@@ -456,19 +411,15 @@ export async function importExportJson(
   );
 
   if (items.length === 0 && liked.length === 0) {
-    const failed = db
-      .insert(imports)
-      .values({
+    const failed = await catalog.createImport({
         filename,
         contentHash,
         status: "failed",
         error: "No saved or liked posts found in JSON.",
-      })
-      .returning()
-      .get();
+      });
 
     try {
-      persistImportSchemas(failed.id, schemaCatalog);
+      await catalog.persistImportSchemas(failed.id, schemaCatalog);
     } catch {
       // non-fatal
     }
@@ -499,17 +450,13 @@ export async function importExportJson(
   }
 
   const isDuplicate = Boolean(prior);
-  const draft = db
-    .insert(imports)
-    .values({
+  const draft = await catalog.createImport({
       filename,
       contentHash,
       status: isDuplicate ? "duplicate" : "completed",
       itemsFound: items.length,
       notes: serializeImportLog(importLog),
-    })
-    .returning()
-    .get();
+    });
 
   return finishSuccessfulImport({
     draftId: draft.id,

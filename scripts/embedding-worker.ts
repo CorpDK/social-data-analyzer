@@ -48,7 +48,7 @@ async function main() {
     process.exit(2);
   }
 
-  // Must be set before the first getSqlite(): keeps this process from spawning
+  // Must be set before storage initialization: keeps this process from spawning
   // a child of its own and from reclaiming (re-queuing) its own job row.
   process.env.EMBEDDING_WORKER_INLINE = "1";
   process.env.EMBEDDING_WORKER_CHILD = "1";

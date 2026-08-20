@@ -23,9 +23,10 @@ import {
   allLikesSearchRows,
   allSavesSearchRows,
 } from "../../search/sync-rows";
-import { searchFts } from "../../search/hybrid";
 import { assessVectorIntegrity } from "../../search/vec-integrity";
-import { assessSearchIndexGaps } from "../../search/readiness";
+import { vectorTableName } from "../../search/library";
+import { embeddingToBuffer } from "../../search/embeddings";
+import { searchSqliteFts } from "./search-query";
 
 export function createSqliteSearchIndex(sqlite: Database.Database): SearchIndex {
   return {
@@ -67,15 +68,62 @@ export function createSqliteSearchIndex(sqlite: Database.Database): SearchIndex 
     writeEmbeddingChunk: async (library, index, generated, writeMode) => {
       writeEmbeddingChunk(library, index, generated, writeMode, sqlite);
     },
+    existingEmbeddingItemIds: async (library, index) => {
+      if (vectorTableDimensions(library, index, sqlite) === null) return new Set();
+      const rows = sqlite
+        .prepare(`SELECT item_id AS id FROM ${vectorTableName(library, index)}`)
+        .all() as Array<{ id: number | bigint }>;
+      return new Set(rows.map((row) => Number(row.id)));
+    },
 
     allSavesSearchRows: async (itemIds) => allSavesSearchRows(sqlite, itemIds),
     allLikesSearchRows: async (itemIds) => allLikesSearchRows(sqlite, itemIds),
 
     searchFts: async (library, query, limit = 200) =>
-      searchFts(library, query, limit, sqlite),
+      searchSqliteFts(sqlite, library, query, limit),
+    searchVector: async (library, index, embedding, limit) =>
+      sqlite
+        .prepare(
+          `SELECT item_id AS id, distance
+           FROM ${vectorTableName(library, index)}
+           WHERE embedding MATCH ? AND k = ?
+           ORDER BY distance`,
+        )
+        .all(embeddingToBuffer(embedding), limit) as Array<{
+        id: number;
+        distance: number;
+      }>,
 
     assessVectorIntegrity: async (library, index, options) =>
       assessVectorIntegrity(library, index, sqlite, options),
-    assessSearchIndexGaps: async () => assessSearchIndexGaps(),
+    assessSearchIndexGaps: async () => {
+      const count = (table: string) =>
+        (
+          sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
+            c: number;
+          }
+        ).c;
+      const savesItems = count("saved_items");
+      const likesItems = count("liked_items");
+      const savesFtsGap = Math.max(0, savesItems - ftsCount("saves", sqlite));
+      const likesFtsGap = Math.max(0, likesItems - ftsCount("likes", sqlite));
+      const savesLocal = vecCount("saves", "local", sqlite);
+      const likesLocal = vecCount("likes", "local", sqlite);
+      const savesLocalGap = savesItems > 0 && savesLocal < savesItems;
+      const likesLocalGap = likesItems > 0 && likesLocal < likesItems;
+      return {
+        savesItems,
+        likesItems,
+        savesFtsGap,
+        likesFtsGap,
+        savesLocalGap,
+        likesLocalGap,
+        degraded:
+          savesFtsGap > 0 ||
+          likesFtsGap > 0 ||
+          savesLocalGap ||
+          likesLocalGap,
+      };
+    },
   };
 }

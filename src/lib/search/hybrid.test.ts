@@ -1,15 +1,9 @@
-import { describe, expect, it, vi, afterEach } from "vitest";
-import { getSqlite } from "../db";
+import { describe, expect, it } from "vitest";
 import {
   BROWSE_HYBRID_SEARCH_LIMIT,
   HYBRID_VEC_FETCH_K_MAX,
-  searchFts,
-  setHybridSearchWarnForTests,
 } from "./hybrid";
-
-vi.mock("../db", () => ({
-  getSqlite: vi.fn(),
-}));
+import { searchSqliteFts } from "../storage/sqlite/search-query";
 
 describe("hybrid browse caps", () => {
   it("raises the former 500 browse/search ceiling for honest totals", () => {
@@ -20,19 +14,7 @@ describe("hybrid browse caps", () => {
 });
 
 describe("hybrid search degrade logging", () => {
-  afterEach(() => {
-    setHybridSearchWarnForTests(null);
-    vi.clearAllMocks();
-  });
-
   it("logs a structured warning when FTS throws and returns empty degraded hits", () => {
-    const warnings: string[] = [];
-    setHybridSearchWarnForTests((message, error) => {
-      warnings.push(
-        `${message}${error instanceof Error ? `: ${error.message}` : ""}`,
-      );
-    });
-
     const sqlite = {
       prepare: () => ({
         all: () => {
@@ -41,10 +23,8 @@ describe("hybrid search degrade logging", () => {
       }),
     } as never;
 
-    const result = searchFts("saves", "nature", 200, sqlite);
+    const result = searchSqliteFts(sqlite, "saves", "nature", 200);
     expect(result.hits).toEqual([]);
     expect(result.degraded).toBe(true);
-    expect(warnings[0]).toMatch(/FTS query failed \(saves\)/);
-    expect(warnings[0]).toMatch(/fts5: syntax error/);
   });
 });

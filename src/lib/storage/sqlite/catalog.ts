@@ -7,7 +7,6 @@ import {
   applyParsedItems,
   persistImportSchemas,
 } from "../../import/write-batches";
-import { appendImportNotes } from "../../import/run-helpers";
 import { countPersistedImportRows } from "../../import/partial-accounting";
 import {
   discardImportInserts,
@@ -20,7 +19,7 @@ import {
  * `sqlite` is retained so createSqliteStorage documents the bound handle.
  */
 export function createSqliteCatalogStore(
-  _sqlite: Database.Database,
+  sqlite: Database.Database,
 ): CatalogStore {
   return {
     getStats: async () => queries.getStats(),
@@ -47,12 +46,59 @@ export function createSqliteCatalogStore(
     applyLikedItems: (importId, items, options) =>
       applyLikedItems(importId, items, options),
     appendImportNotes: async (importId, extra) => {
-      appendImportNotes(importId, extra);
+      const row = sqlite
+        .prepare("SELECT notes FROM imports WHERE id = ?")
+        .get(importId) as { notes: string | null } | undefined;
+      sqlite
+        .prepare("UPDATE imports SET notes = ? WHERE id = ?")
+        .run(row?.notes ? `${row.notes}\n${extra}` : extra, importId);
     },
     countPersistedImportRows: async (importId) =>
       countPersistedImportRows(importId),
     rollbackImportInserts: async (importId) =>
       rollbackImportInserts(importId),
     discardImportInserts: async (importId) => discardImportInserts(importId),
+    findCompletedImportByHash: async (contentHash) => {
+      const row = sqlite
+        .prepare(
+          "SELECT id FROM imports WHERE content_hash = ? AND status = 'completed' LIMIT 1",
+        )
+        .get(contentHash) as { id: number } | undefined;
+      return row ?? null;
+    },
+    createImport: async (input) => {
+      const result = sqlite
+        .prepare(
+          `INSERT INTO imports(
+             filename, content_hash, status, error, items_found, notes
+           ) VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          input.filename,
+          input.contentHash,
+          input.status,
+          input.error ?? null,
+          input.itemsFound ?? 0,
+          input.notes ?? null,
+        );
+      return { id: Number(result.lastInsertRowid), error: input.error ?? null };
+    },
+    updateImport: async (id, patch) => {
+      const entries = Object.entries({
+        status: patch.status,
+        error: patch.error,
+        items_added: patch.itemsAdded,
+        items_updated: patch.itemsUpdated,
+        items_skipped: patch.itemsSkipped,
+        notes: patch.notes,
+      }).filter((entry) => entry[1] !== undefined);
+      if (entries.length === 0) return;
+      sqlite
+        .prepare(
+          `UPDATE imports SET ${entries.map(([column]) => `${column} = ?`).join(", ")}
+           WHERE id = ?`,
+        )
+        .run(...entries.map(([, value]) => value), id);
+    },
   };
 }

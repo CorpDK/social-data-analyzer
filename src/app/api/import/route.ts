@@ -55,7 +55,7 @@ export async function POST(request: Request) {
       ),
     });
 
-    const result = startImportJobFromSpool({
+    const result = await startImportJobFromSpool({
       filename: uploaded.filename,
       kind: uploaded.kind,
       spoolPath: uploaded.spool.spoolPath,

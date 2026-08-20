@@ -11,7 +11,10 @@ function formatDate(value: Date | null | undefined) {
 
 export async function OverviewDashboard() {
   const storage = await getStorage();
-  const stats = await storage.catalog.getStats();
+  const [stats, engine] = await Promise.all([
+    storage.catalog.getStats(),
+    storage.maintenance.engineInfo(),
+  ]);
 
   return (
     <div className="space-y-8">
@@ -20,7 +23,8 @@ export async function OverviewDashboard() {
           Library
         </p>
         <h1 className="max-w-2xl font-[family-name:var(--font-fraunces)] text-4xl leading-tight tracking-tight sm:text-5xl">
-          Your saved posts and reels, searchable offline with FTS5 + vectors.
+          Your saved posts and reels, searchable with {engine.searchTech.keyword}{" "}
+          + {engine.searchTech.vector}.
         </h1>
         <p className="max-w-2xl text-[var(--muted)]">
           Load periodic Instagram data exports. Each import merges new items,

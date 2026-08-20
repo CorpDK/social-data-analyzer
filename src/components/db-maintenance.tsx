@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { localMutatingHeaders } from "@/lib/local-mutating-headers";
 import type { DbMaintenanceAction } from "@/lib/settings/db-maintenance";
+import type { EngineInfo } from "@/lib/storage";
 
 type MaintenanceResponse = {
   ok?: boolean;
@@ -33,7 +34,7 @@ function formatResult(json: MaintenanceResponse): string {
   return "Maintenance finished.";
 }
 
-export function DbMaintenance() {
+export function DbMaintenance({ engine }: { engine: EngineInfo }) {
   const [pending, setPending] = useState<DbMaintenanceAction | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -83,9 +84,11 @@ export function DbMaintenance() {
           Database maintenance
         </h2>
         <p className="max-w-2xl text-sm text-[var(--muted)]">
-          Optional housekeeping for a long-lived local SQLite library. WAL
-          checkpoint flushes the write-ahead log into the main file; VACUUM
-          rebuilds the database file and can reclaim free pages. Both refuse
+          Optional housekeeping for a long-lived {engine.displayName} library.{" "}
+          {engine.supportsWalCheckpoint
+            ? "WAL checkpoint flushes the write-ahead log into the main file. "
+            : ""}
+          VACUUM reclaims or analyzes storage as supported by the engine. Actions refuse
           (HTTP 409) while an import or reindex is pending or running — cancel
           those jobs first. VACUUM may take a while on large libraries.
         </p>
@@ -105,14 +108,16 @@ export function DbMaintenance() {
           ) : null}
         </div>
         <div className="flex shrink-0 flex-wrap gap-2">
-          <button
-            type="button"
-            className={secondaryButton}
-            disabled={pending !== null}
-            onClick={() => void run("checkpoint")}
-          >
-            {pending === "checkpoint" ? "Checkpointing…" : "WAL checkpoint"}
-          </button>
+          {engine.maintenanceActions.includes("checkpoint") ? (
+            <button
+              type="button"
+              className={secondaryButton}
+              disabled={pending !== null}
+              onClick={() => void run("checkpoint")}
+            >
+              {pending === "checkpoint" ? "Checkpointing…" : "WAL checkpoint"}
+            </button>
+          ) : null}
           <button
             type="button"
             className={primaryButton}

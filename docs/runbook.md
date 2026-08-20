@@ -45,6 +45,44 @@ pnpm db:generate
 Use `pnpm db:generate:sqlite` or `pnpm db:generate:postgres` when changing only
 one dialect. Do not run generated SQL manually against the SQLite app database.
 
+## Optional Postgres backend (ME-4)
+
+SQLite remains the default. To start the local pgvector recipe:
+
+```bash
+docker compose -f docker-compose.postgres.yml up -d --wait
+export INSTAGRAM_SAVES_DATABASE_URL='postgres://instagram_saves:instagram_saves_dev@127.0.0.1:5432/instagram_saves'
+pnpm dev
+```
+
+Use `INSTAGRAM_SAVES_POSTGRES_PORT=55432` (both for Compose and in the URL) when
+port 5432 is occupied. Storage startup applies `drizzle/postgres/` automatically,
+including the `vector` extension, generated `tsvector` documents, and indexes.
+Unset `INSTAGRAM_SAVES_DATABASE_URL` to return to SQLite.
+
+The ME-4 adapter implements all five storage ports and has a Docker migration /
+empty-library smoke path. Some import and embedding queue runner internals still
+resolve the legacy SQLite singleton directly; those paths must be moved fully
+behind the ports before Postgres can be called feature-complete. Until then,
+use Postgres for adapter development and read/search/maintenance validation, not
+as the only copy of an imported library.
+
+Back up a Postgres library with:
+
+```bash
+pg_dump "$INSTAGRAM_SAVES_DATABASE_URL" --format=custom --file=instagram-saves.dump
+```
+
+Restore into a fresh database with `pg_restore --clean --if-exists`. The app
+does not run PostgreSQL tests in normal CI; a local smoke uses the Compose
+recipe, starts the app (or constructs `createPostgresStorage`), and verifies all
+five ports after migrations.
+
+Postgres uses pgvector cosine distance. Embeddings are L2-normalized before
+storage, so ordering is equivalent to SQLite's L2 metric and thresholds convert
+with `cosine_distance = l2_distance² / 2`; the default SQLite cutoff `1.22`
+therefore corresponds to cosine distance `0.7442`.
+
 ## Shortcode / media_key identity
 
 Instagram shortcodes are **case-sensitive**. `mediaKeyFromHref` preserves shortcode

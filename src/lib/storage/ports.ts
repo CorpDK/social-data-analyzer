@@ -132,6 +132,26 @@ export interface CatalogStore {
   countPersistedImportRows(importId: number): Promise<PersistedImportCounts>;
   rollbackImportInserts(importId: number): Promise<ImportRollbackResult>;
   discardImportInserts(importId: number): Promise<ImportRollbackResult>;
+  findCompletedImportByHash(contentHash: string): Promise<{ id: number } | null>;
+  createImport(input: {
+    filename: string;
+    contentHash: string;
+    status: "completed" | "duplicate" | "failed";
+    error?: string | null;
+    itemsFound?: number;
+    notes?: string | null;
+  }): Promise<{ id: number; error: string | null }>;
+  updateImport(
+    id: number,
+    patch: {
+      status?: "completed" | "duplicate" | "failed";
+      error?: string | null;
+      itemsAdded?: number;
+      itemsUpdated?: number;
+      itemsSkipped?: number;
+      notes?: string | null;
+    },
+  ): Promise<void>;
 }
 
 /**
@@ -191,6 +211,10 @@ export interface SearchIndex {
     generated: Array<{ id: number; embedding: Float32Array }>,
     writeMode: EmbeddingWriteMode,
   ): Promise<void>;
+  existingEmbeddingItemIds(
+    library: SearchLibrary,
+    index: VectorIndexName,
+  ): Promise<Set<number>>;
 
   allSavesSearchRows(itemIds?: number[]): Promise<SavesSearchRow[]>;
   allLikesSearchRows(itemIds?: number[]): Promise<LikesSearchRow[]>;
@@ -200,6 +224,12 @@ export interface SearchIndex {
     query: string,
     limit?: number,
   ): Promise<{ hits: Array<{ id: number; rank: number }>; degraded: boolean }>;
+  searchVector(
+    library: SearchLibrary,
+    index: VectorIndexName,
+    embedding: Float32Array,
+    limit: number,
+  ): Promise<Array<{ id: number; distance: number }>>;
 
   assessVectorIntegrity(
     library: SearchLibrary,
@@ -244,6 +274,51 @@ export interface JobStore {
 
   reclaimOrphanedEmbeddingJobs(): Promise<EmbeddingReclaimResult>;
   reclaimOrphanedImportJobs(): Promise<ImportReclaimResult>;
+  createEmbeddingJob(input: {
+    target: EmbeddingJobTarget;
+    total: number;
+    message: string;
+  }): Promise<EmbeddingJobRecord>;
+  updateEmbeddingJob(
+    id: number,
+    patch: Partial<{
+      state: import("../search/jobs-records").EmbeddingJobState;
+      phase: import("../search/jobs-records").EmbeddingJobPhase;
+      processed: number;
+      total: number;
+      currentProvider: import("../search/embeddings").EmbeddingProvider | null;
+      error: string | null;
+      message: string | null;
+      cancelRequested: boolean;
+      finished: boolean;
+      workerPid: number | null;
+      refreshLease: boolean;
+    }>,
+  ): Promise<void>;
+  createImportJob(input: {
+    filename: string;
+    contentHash: string;
+    spoolPath: string;
+    kind: import("../import/jobs").ImportJobKind;
+    message: string;
+  }): Promise<ImportJobRecord>;
+  updateImportJob(
+    id: number,
+    patch: Partial<{
+      state: import("../import/jobs").ImportJobState;
+      phase: ImportJobRecord["phase"];
+      processed: number;
+      total: number;
+      message: string | null;
+      error: string | null;
+      details: import("../import-export").ImportProgressDetails | null;
+      result: import("../import-export").ImportResult | null;
+      importId: number | null;
+      contentHash: string | null;
+      cancelRequested: boolean;
+      finished: boolean;
+    }>,
+  ): Promise<void>;
 }
 
 /**

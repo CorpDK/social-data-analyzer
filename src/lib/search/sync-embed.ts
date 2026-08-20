@@ -2,7 +2,7 @@
  * Chunked embedding generate/store path (resume-safe).
  * Extracted from sync.ts; rebuild / incremental sync orchestration stays there.
  */
-import type Database from "better-sqlite3";
+import type { SearchIndex } from "../storage";
 import {
   buildLikedSearchDocument,
   buildSearchDocument,
@@ -12,19 +12,9 @@ import {
   embedTexts,
   type EmbeddingConfig,
 } from "./embeddings";
-import {
-  type SearchLibrary,
-  type VectorIndexName,
-  vectorTableName,
-} from "./library";
+import { type SearchLibrary, type VectorIndexName } from "./library";
 import {
   embeddingProfilesMatch,
-  getIndexedEmbeddingProfile,
-  recreateVectorTable,
-  vecCount,
-  vectorTableDimensions,
-  writeEmbeddingChunk,
-  writeEmbeddingProfile,
   type EmbeddingWriteMode,
 } from "./sync-vec-store";
 import type { LikesSearchRow, SavesSearchRow } from "./sync-rows";
@@ -59,18 +49,12 @@ function chunkRows<T>(rows: T[], size = EMBEDDING_SYNC_CHUNK_SIZE): T[][] {
   return chunks;
 }
 
-export function existingEmbeddingItemIds(
+export async function existingEmbeddingItemIds(
   library: SearchLibrary,
   index: VectorIndexName,
-  sqlite: Database.Database,
-): Set<number> {
-  if (vectorTableDimensions(library, index, sqlite) === null) return new Set();
-  const rows = sqlite
-    .prepare(
-      `SELECT item_id AS id FROM ${vectorTableName(library, index)}`,
-    )
-    .all() as Array<{ id: number | bigint }>;
-  return new Set(rows.map((row) => Number(row.id)));
+  search: SearchIndex,
+): Promise<Set<number>> {
+  return search.existingEmbeddingItemIds(library, index);
 }
 
 /**
@@ -78,20 +62,20 @@ export function existingEmbeddingItemIds(
  * and any stored profile still agrees with Settings. A missing profile is OK
  * (first build crashed before the end-of-job profile write).
  */
-export function canResumeVectorRebuild(
+export async function canResumeVectorRebuild(
   library: SearchLibrary,
   index: VectorIndexName,
   config: EmbeddingConfig,
-  sqlite: Database.Database,
-): boolean {
+  search: SearchIndex,
+): Promise<boolean> {
   if (
-    vectorTableDimensions(library, index, sqlite) !==
+    (await search.vectorTableDimensions(library, index)) !==
     config.profile.dimensions
   ) {
     return false;
   }
-  if (vecCount(library, index, sqlite) <= 0) return false;
-  const indexed = getIndexedEmbeddingProfile(library, index, sqlite);
+  if ((await search.vecCount(library, index)) <= 0) return false;
+  const indexed = await search.getIndexedEmbeddingProfile(library, index);
   if (indexed && !embeddingProfilesMatch(indexed, config.profile)) {
     return false;
   }
@@ -124,22 +108,22 @@ async function generateLikesEmbeddingsChunk(
   }));
 }
 
-function prepareVectorTableForStore(
+async function prepareVectorTableForStore(
   library: SearchLibrary,
   index: VectorIndexName,
   config: EmbeddingConfig,
   replace: boolean,
-  sqlite: Database.Database,
-): { writeMode: EmbeddingWriteMode } {
+  search: SearchIndex,
+): Promise<{ writeMode: EmbeddingWriteMode }> {
   const needsRecreate =
     replace ||
-    vectorTableDimensions(library, index, sqlite) !==
+    (await search.vectorTableDimensions(library, index)) !==
       config.profile.dimensions;
   if (needsRecreate) {
-    recreateVectorTable(library, index, config.profile.dimensions, sqlite);
+    await search.recreateVectorTable(library, index, config.profile.dimensions);
     // Write profile immediately so a mid-rebuild crash can resume with a
     // matching provenance check (final write at end still refreshes updated_at).
-    writeEmbeddingProfile(library, index, config.profile, sqlite);
+    await search.writeEmbeddingProfile(library, index, config.profile);
     return { writeMode: "insert-only" };
   }
   // Extending an existing table: upsert (DELETE + INSERT) per row.
@@ -160,7 +144,7 @@ export async function storeEmbeddingsChunked(
   rows: SavesSearchRow[] | LikesSearchRow[],
   config: EmbeddingConfig,
   replace: boolean,
-  sqlite: Database.Database,
+  search: SearchIndex,
   options?: {
     resume?: boolean;
     onChunk?: (processed: number, total: number) => void | Promise<void>;
@@ -172,14 +156,14 @@ export async function storeEmbeddingsChunked(
   // The caller's resume hint (job.processed > 0) is never trusted on its own:
   // the vec table itself decides whether a resume is possible.
   const resumeOk =
-    wantResume && canResumeVectorRebuild(library, index, config, sqlite);
+    wantResume && (await canResumeVectorRebuild(library, index, config, search));
 
   let workRows = rows;
   let alreadyDone = 0;
   let writeMode: EmbeddingWriteMode;
 
   if (resumeOk) {
-    const existing = existingEmbeddingItemIds(library, index, sqlite);
+    const existing = await existingEmbeddingItemIds(library, index, search);
     // Count only ids we would otherwise embed, so progress can't exceed total
     // when the table holds vectors for since-deleted items.
     alreadyDone = (rows as Array<{ id: number }>).filter((row) =>
@@ -193,13 +177,13 @@ export async function storeEmbeddingsChunked(
     // would otherwise fail the whole job on a primary-key conflict.
     writeMode = "upsert";
   } else {
-    writeMode = prepareVectorTableForStore(
+    writeMode = (await prepareVectorTableForStore(
       library,
       index,
       config,
       replace || wantResume,
-      sqlite,
-    ).writeMode;
+      search,
+    )).writeMode;
   }
 
   let processed = alreadyDone;
@@ -211,7 +195,7 @@ export async function storeEmbeddingsChunked(
       throwIfCancelled(options?.shouldCancel);
       const generated = await generateSavesEmbeddingsChunk(chunk, config);
       throwIfCancelled(options?.shouldCancel);
-      writeEmbeddingChunk(library, index, generated, writeMode, sqlite);
+      await search.writeEmbeddingChunk(library, index, generated, writeMode);
       processed += chunk.length;
       await options?.onChunk?.(processed, total);
       await yieldToEventLoop();
@@ -222,30 +206,30 @@ export async function storeEmbeddingsChunked(
       throwIfCancelled(options?.shouldCancel);
       const generated = await generateLikesEmbeddingsChunk(chunk, config);
       throwIfCancelled(options?.shouldCancel);
-      writeEmbeddingChunk(library, index, generated, writeMode, sqlite);
+      await search.writeEmbeddingChunk(library, index, generated, writeMode);
       processed += chunk.length;
       await options?.onChunk?.(processed, total);
       await yieldToEventLoop();
     }
   }
 
-  writeEmbeddingProfile(library, index, config.profile, sqlite);
+  await search.writeEmbeddingProfile(library, index, config.profile);
 }
 
 /** Local-only chunked backfill (sync, no network). */
-export function storeLocalEmbeddingsChunked(
+export async function storeLocalEmbeddingsChunked(
   library: SearchLibrary,
   rows: SavesSearchRow[] | LikesSearchRow[],
   config: EmbeddingConfig,
-  sqlite: Database.Database,
+  search: SearchIndex,
 ) {
   // replace=true always recreates the table, so insert-only is safe here.
-  const { writeMode } = prepareVectorTableForStore(
+  const { writeMode } = await prepareVectorTableForStore(
     library,
     "local",
     config,
     true,
-    sqlite,
+    search,
   );
   if (library === "saves") {
     for (const chunk of chunkRows(rows as SavesSearchRow[])) {
@@ -256,7 +240,7 @@ export function storeLocalEmbeddingsChunked(
           config.profile.dimensions,
         ),
       }));
-      writeEmbeddingChunk(library, "local", generated, writeMode, sqlite);
+      await search.writeEmbeddingChunk(library, "local", generated, writeMode);
     }
   } else {
     for (const chunk of chunkRows(rows as LikesSearchRow[])) {
@@ -267,9 +251,9 @@ export function storeLocalEmbeddingsChunked(
           config.profile.dimensions,
         ),
       }));
-      writeEmbeddingChunk(library, "local", generated, writeMode, sqlite);
+      await search.writeEmbeddingChunk(library, "local", generated, writeMode);
     }
   }
-  writeEmbeddingProfile(library, "local", config.profile, sqlite);
+  await search.writeEmbeddingProfile(library, "local", config.profile);
 }
 

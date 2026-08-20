@@ -1,5 +1,5 @@
 import type { ChildProcess } from "node:child_process";
-import { getSqlite } from "../db";
+import { getStorage } from "../storage";
 import {
   type EmbeddingProvider,
 } from "./embeddings";
@@ -31,14 +31,8 @@ import {
 } from "./sync";
 import { configuredProviders, isProviderConfigured } from "./providers";
 import {
-  isJobCancelRequested,
-  reclaimOrphanedEmbeddingJobRows,
   runnerOwnsWork,
-  createJobSqlSet,
-  setJobColumn,
-  setJobFinishedAt,
   withPumpGuard,
-  EMBEDDING_JOB_LEASE_TTL_SECONDS,
 } from "../job-queue";
 import { jobLog } from "../job-log";
 import { SEARCH_STATUS_CHANNEL, publishJobEvent } from "../sse";
@@ -49,17 +43,7 @@ import {
   planWorkerRetry,
 } from "./worker-policy";
 import {
-  getActiveEmbeddingJob,
-  getDisplayEmbeddingJob,
-  getEmbeddingJob,
-  getLatestEmbeddingJob,
-  getLatestFinishedEmbeddingJob,
-  getOpenJobForTarget,
-  getPendingEmbeddingJobs,
-  getRecentEmbeddingJobs,
-  listEmbeddingJobs,
   parseReindexTarget,
-  hasOpenEmbeddingJobForTarget,
   type EmbeddingJobPhase,
   type EmbeddingJobRecord,
   type EmbeddingJobState,
@@ -86,17 +70,39 @@ export type {
   EmbeddingJobTarget,
 };
 export {
-  getActiveEmbeddingJob,
-  getDisplayEmbeddingJob,
-  getEmbeddingJob,
-  getLatestEmbeddingJob,
-  getLatestFinishedEmbeddingJob,
-  getPendingEmbeddingJobs,
-  getRecentEmbeddingJobs,
-  listEmbeddingJobs,
   parseReindexTarget,
-  hasOpenEmbeddingJobForTarget,
 };
+
+export async function getEmbeddingJob(id: number) {
+  return (await getStorage()).jobs.getEmbeddingJob(id);
+}
+export async function getLatestEmbeddingJob() {
+  return (await getStorage()).jobs.getLatestEmbeddingJob();
+}
+export async function getLatestFinishedEmbeddingJob() {
+  return (await getStorage()).jobs.getLatestFinishedEmbeddingJob();
+}
+export async function getActiveEmbeddingJob() {
+  return (await getStorage()).jobs.getActiveEmbeddingJob();
+}
+export async function getPendingEmbeddingJobs() {
+  return (await getStorage()).jobs.getPendingEmbeddingJobs();
+}
+export async function getRecentEmbeddingJobs(limit?: number) {
+  return (await getStorage()).jobs.getRecentEmbeddingJobs(limit);
+}
+export async function listEmbeddingJobs(options?: { limit?: number; offset?: number }) {
+  return (await getStorage()).jobs.listEmbeddingJobs(options);
+}
+export async function getDisplayEmbeddingJob() {
+  return (await getStorage()).jobs.getDisplayEmbeddingJob();
+}
+export async function getOpenJobForTarget(target: EmbeddingJobTarget) {
+  return (await getStorage()).jobs.getOpenJobForTarget(target);
+}
+export async function hasOpenEmbeddingJobForTarget(target: EmbeddingJobTarget) {
+  return (await getStorage()).jobs.hasOpenEmbeddingJobForTarget(target);
+}
 
 type JobRunnerState = {
   activeJobId: number | null;
@@ -192,7 +198,7 @@ function reclaimOrphanedJobs() {
 
 /** Caller must have verified that no job is owned by this process. */
 async function reclaimOrphanedJobRows() {
-  const result = await reclaimOrphanedEmbeddingJobRows(getSqlite());
+  const result = await (await getStorage()).jobs.reclaimOrphanedEmbeddingJobs();
   if (
     result.cancelled > 0 ||
     result.resumed > 0 ||
@@ -209,7 +215,7 @@ async function reclaimOrphanedJobRows() {
 
 const jobProgressThrottle = new Map<number, JobProgressThrottle>();
 
-function updateJob(
+async function updateJob(
   id: number,
   patch: {
     state?: EmbeddingJobState;
@@ -225,42 +231,7 @@ function updateJob(
     refreshLease?: boolean;
   },
 ) {
-  const sql = createJobSqlSet();
-
-  setJobColumn(sql, "state", patch.state);
-  setJobColumn(sql, "phase", patch.phase);
-  setJobColumn(sql, "processed", patch.processed);
-  setJobColumn(sql, "total", patch.total);
-  setJobColumn(sql, "current_provider", patch.currentProvider);
-  setJobColumn(sql, "error", patch.error);
-  setJobColumn(sql, "message", patch.message);
-  setJobColumn(sql, "worker_pid", patch.workerPid);
-  if (patch.finished) {
-    setJobFinishedAt(sql);
-    // Terminal rows must not keep a stale PID for the next reclaim pass.
-    if (patch.workerPid === undefined) {
-      sql.sets.push("worker_pid = NULL");
-    }
-    sql.sets.push("lease_expires_at = NULL");
-  } else {
-    const shouldRefresh =
-      patch.refreshLease !== false &&
-      (patch.state === "running" ||
-        patch.workerPid !== undefined ||
-        patch.processed !== undefined ||
-        patch.phase !== undefined ||
-        patch.refreshLease === true);
-    if (shouldRefresh || patch.state === "running") {
-      sql.sets.push(
-        `lease_expires_at = unixepoch() + ${EMBEDDING_JOB_LEASE_TTL_SECONDS}`,
-      );
-    }
-  }
-
-  sql.values.push(id);
-  getSqlite()
-    .prepare(`UPDATE embedding_jobs SET ${sql.sets.join(", ")} WHERE id = ?`)
-    .run(...sql.values);
+  await (await getStorage()).jobs.updateEmbeddingJob(id, patch);
 
   const immediate = Boolean(
     patch.state !== undefined || patch.finished === true,
@@ -268,8 +239,8 @@ function updateJob(
   publishJobEvent(SEARCH_STATUS_CHANNEL, immediate);
 }
 
-function setEmbeddingJobWorkerPid(jobId: number, pid: number | null) {
-  updateJob(jobId, { workerPid: pid });
+async function setEmbeddingJobWorkerPid(jobId: number, pid: number | null) {
+  await updateJob(jobId, { workerPid: pid });
 }
 
 function progressToPhase(phase: RebuildProgress["phase"]): EmbeddingJobPhase {
@@ -303,7 +274,7 @@ async function applyProgress(
     message: progress.message ?? progress.currentProvider ?? undefined,
   });
 
-  updateJob(jobId, {
+  await updateJob(jobId, {
     phase: progressToPhase(progress.phase),
     processed: progress.processed,
     total: progress.total,
@@ -317,65 +288,40 @@ function clearJobProgressThrottle(jobId: number) {
 }
 
 function shouldCancel(jobId: number): boolean {
-  return isJobCancelRequested(
-    getSqlite(),
-    "embedding_jobs",
-    jobId,
-    runner().cancelFlags,
-  );
+  return runner().cancelFlags.get(jobId) === true;
 }
 
-function insertPendingJob(
+async function insertPendingJob(
   library: SearchLibrary,
   provider: EmbeddingProvider,
-): EmbeddingJobRecord {
-  const sqlite = getSqlite();
-  const table = library === "saves" ? "saved_items" : "liked_items";
-  const totalItems = (
-    sqlite.prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
-      c: number;
-    }
-  ).c;
+): Promise<EmbeddingJobRecord> {
+  const storage = await getStorage();
+  const totalItems =
+    library === "saves"
+      ? (await storage.search.allSavesSearchRows()).length
+      : (await storage.search.allLikesSearchRows()).length;
   const target = formatJobTarget(library, provider);
 
-  const info = sqlite
-    .prepare(
-      `INSERT INTO embedding_jobs(
-        target, state, phase, processed, total, current_provider, message
-      ) VALUES (?, 'pending', 'queued', 0, ?, NULL, ?)`,
-    )
-    .run(target, totalItems, `Queued rebuild for ${target}`);
-
-  const job = getEmbeddingJob(Number(info.lastInsertRowid));
-  if (!job) throw new Error("Failed to create embedding job");
+  const job = await storage.jobs.createEmbeddingJob({
+    target,
+    total: totalItems,
+    message: `Queued rebuild for ${target}`,
+  });
   publishJobEvent(SEARCH_STATUS_CHANNEL, true);
   return job;
 }
 
-function insertPendingFtsJob(): EmbeddingJobRecord {
-  const sqlite = getSqlite();
-  const saves = (
-    sqlite.prepare(`SELECT count(*) AS c FROM saved_items`).get() as {
-      c: number;
-    }
-  ).c;
-  const likes = (
-    sqlite.prepare(`SELECT count(*) AS c FROM liked_items`).get() as {
-      c: number;
-    }
-  ).c;
+async function insertPendingFtsJob(): Promise<EmbeddingJobRecord> {
+  const storage = await getStorage();
+  const saves = (await storage.search.allSavesSearchRows()).length;
+  const likes = (await storage.search.allLikesSearchRows()).length;
   const totalItems = saves + likes;
 
-  const info = sqlite
-    .prepare(
-      `INSERT INTO embedding_jobs(
-        target, state, phase, processed, total, current_provider, message
-      ) VALUES ('fts', 'pending', 'queued', 0, ?, NULL, ?)`,
-    )
-    .run(totalItems, "Queued keyword (FTS) index backfill");
-
-  const job = getEmbeddingJob(Number(info.lastInsertRowid));
-  if (!job) throw new Error("Failed to create FTS embedding job");
+  const job = await storage.jobs.createEmbeddingJob({
+    target: "fts",
+    total: totalItems,
+    message: "Queued keyword (FTS) index backfill",
+  });
   publishJobEvent(SEARCH_STATUS_CHANNEL, true);
   return job;
 }
@@ -387,19 +333,17 @@ function insertPendingFtsJob(): EmbeddingJobRecord {
  */
 export async function enqueueFtsBackfillJob(): Promise<EmbeddingJobRecord | null> {
   await ensureJobRunner();
-  if (getOpenJobForTarget("fts")) return null;
-  const job = insertPendingFtsJob();
-  pumpQueue();
-  return getEmbeddingJob(job.id) ?? job;
+  if (await getOpenJobForTarget("fts")) return null;
+  const job = await insertPendingFtsJob();
+  void pumpQueue();
+  return (await getEmbeddingJob(job.id)) ?? job;
 }
 
-function libraryItemCount(library: SearchLibrary): number {
-  const table = library === "saves" ? "saved_items" : "liked_items";
-  return (
-    getSqlite().prepare(`SELECT count(*) AS c FROM ${table}`).get() as {
-      c: number;
-    }
-  ).c;
+async function libraryItemCount(library: SearchLibrary): Promise<number> {
+  const search = (await getStorage()).search;
+  return library === "saves"
+    ? (await search.allSavesSearchRows()).length
+    : (await search.allLikesSearchRows()).length;
 }
 
 /**
@@ -407,14 +351,14 @@ function libraryItemCount(library: SearchLibrary): number {
  * a large library is below that provider's MemAvailable floor. Soft warnings
  * are logged separately.
  */
-function refuseReindexIfNeeded(
+async function refuseReindexIfNeeded(
   library: SearchLibrary,
   provider: EmbeddingProvider,
-): string | null {
+): Promise<string | null> {
   const assessment = assessReindexMemory(
     library,
     provider,
-    libraryItemCount(library),
+    await libraryItemCount(library),
   );
   logReindexMemoryWarning(assessment);
   if (assessment.refuse) return assessment.refuseReason;
@@ -429,7 +373,7 @@ async function runEmbeddingJobInline(
   const onProgress = (progress: RebuildProgress) =>
     applyProgress(jobId, progress);
   const cancel = () => shouldCancel(jobId);
-  const job = getEmbeddingJob(jobId);
+  const job = await getEmbeddingJob(jobId);
   const resume = Boolean(job && job.processed > 0);
 
   const parsed = parseLibraryJobTarget(target);
@@ -441,7 +385,7 @@ async function runEmbeddingJobInline(
       shouldCancel: cancel,
     });
     clearJobProgressThrottle(jobId);
-    updateJob(jobId, {
+    await updateJob(jobId, {
       state: "completed",
       phase: "done",
       processed: result.items,
@@ -457,7 +401,7 @@ async function runEmbeddingJobInline(
     });
     const total = result.saves + result.likes;
     clearJobProgressThrottle(jobId);
-    updateJob(jobId, {
+    await updateJob(jobId, {
       state: "completed",
       phase: "done",
       processed: total,
@@ -479,7 +423,7 @@ async function runEmbeddingJobInline(
       },
     );
     clearJobProgressThrottle(jobId);
-    updateJob(jobId, {
+    await updateJob(jobId, {
       state: "completed",
       phase: "done",
       processed: result.items,
@@ -491,19 +435,19 @@ async function runEmbeddingJobInline(
   }
 }
 
-function jobTargetBlockReason(target: EmbeddingJobTarget): string | null {
+async function jobTargetBlockReason(target: EmbeddingJobTarget): Promise<string | null> {
   const parsed = parseLibraryJobTarget(target);
   if (!parsed) return `Unknown reindex target "${target}"`;
   if (parsed.kind === "all-configured") {
-    const anyConfigured = SEARCH_LIBRARIES.some(
-      (library) => configuredProviders(library).length > 0,
-    );
+    const anyConfigured = (
+      await Promise.all(SEARCH_LIBRARIES.map(configuredProviders))
+    ).some((providers) => providers.length > 0);
     return anyConfigured
       ? null
       : "No providers are enabled (and credentialed where required)";
   }
   if (parsed.kind === "fts") return null;
-  if (!isProviderConfigured(parsed.provider, parsed.library)) {
+  if (!(await isProviderConfigured(parsed.provider, parsed.library))) {
     return `${parsed.provider} is not enabled for ${parsed.library} — turn it on in Settings (and add credentials if needed) before reindexing`;
   }
   return null;
@@ -515,8 +459,8 @@ function jobTargetBlockReason(target: EmbeddingJobTarget): string | null {
  * terminal row or a provider that was disabled after enqueue can never produce
  * a doomed child process.
  */
-export function embeddingJobSpawnBlockReason(jobId: number): string | null {
-  const job = getEmbeddingJob(jobId);
+export async function embeddingJobSpawnBlockReason(jobId: number): Promise<string | null> {
+  const job = await getEmbeddingJob(jobId);
   if (!job) return `Embedding job ${jobId} no longer exists`;
   if (isTerminalJobState(job.state)) {
     return `Embedding job ${jobId} is ${job.state}; refusing to start a worker`;
@@ -543,8 +487,8 @@ function logJobFailure(jobId: number, message: string) {
   jobLog("search", { jobId, message, level: "error" });
 }
 
-function failJob(jobId: number, error: string) {
-  updateJob(jobId, {
+async function failJob(jobId: number, error: string) {
+  await updateJob(jobId, {
     state: "failed",
     message: "Reindex failed",
     error,
@@ -562,7 +506,7 @@ function failJob(jobId: number, error: string) {
  * the parent when child workers are disabled.
  */
 export async function runEmbeddingJobById(jobId: number): Promise<void> {
-  const job = getEmbeddingJob(jobId);
+  const job = await getEmbeddingJob(jobId);
   if (!job) throw new PermanentEmbeddingJobError(`Embedding job ${jobId} not found`);
   if (job.state !== "running" && job.state !== "pending") {
     throw new PermanentEmbeddingJobError(
@@ -572,9 +516,9 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
 
   // Last-resort guard: the queue validates this before spawning, but a provider
   // can be disabled between enqueue and start. Terminal failure, never a retry.
-  const blocked = jobTargetBlockReason(job.target);
+  const blocked = await jobTargetBlockReason(job.target);
   if (blocked) {
-    updateJob(jobId, {
+    await updateJob(jobId, {
       state: "failed",
       message: "Reindex failed",
       error: blocked,
@@ -585,7 +529,7 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
 
   // Worker may be started while the row is still pending (CLI) — promote.
   if (job.state === "pending") {
-    updateJob(jobId, {
+    await updateJob(jobId, {
       state: "running",
       phase: "queued",
       message: `Starting rebuild for ${job.target}`,
@@ -594,7 +538,7 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
 
   try {
     await runEmbeddingJobInline(jobId, job.target);
-    const after = getEmbeddingJob(jobId);
+    const after = await getEmbeddingJob(jobId);
     if (after && after.state === "completed") {
       jobLog("search", {
         jobId,
@@ -607,7 +551,7 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
   } catch (error) {
     clearJobProgressThrottle(jobId);
     if (error instanceof RebuildCancelledError || shouldCancel(jobId)) {
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "cancelled",
         phase: "done",
         message: "Reindex cancelled",
@@ -621,7 +565,7 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
         level: "warn",
       });
     } else {
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "failed",
         message: "Reindex failed",
         error: error instanceof Error ? error.message : "unknown error",
@@ -639,7 +583,7 @@ export async function runEmbeddingJobById(jobId: number): Promise<void> {
  * held out of the queue until the backoff expires, so no code path can respawn
  * a worker immediately after a failure.
  */
-function scheduleWorkerRetry(
+async function scheduleWorkerRetry(
   jobId: number,
   attempt: number,
   delayMs: number,
@@ -651,7 +595,7 @@ function scheduleWorkerRetry(
   const existingTimer = state.retryTimers.get(jobId);
   if (existingTimer) clearTimeout(existingTimer);
 
-  updateJob(jobId, {
+  await updateJob(jobId, {
     state: "pending",
     phase: "queued",
     error: null,
@@ -675,32 +619,34 @@ async function runJobViaChild(jobId: number): Promise<boolean> {
   const attempt = (state.attempts.get(jobId) ?? 0) + 1;
   state.attempts.set(jobId, attempt);
 
-  const blocked = embeddingJobSpawnBlockReason(jobId);
+  const blocked = await embeddingJobSpawnBlockReason(jobId);
   if (blocked) {
-    const job = getEmbeddingJob(jobId);
+    const job = await getEmbeddingJob(jobId);
     // A terminal row needs no further writes — just refuse to spawn.
-    if (job && !isTerminalJobState(job.state)) failJob(jobId, blocked);
+    if (job && !isTerminalJobState(job.state)) await failJob(jobId, blocked);
     else logJobFailure(jobId, blocked);
     return false;
   }
 
   const exit = await spawnEmbeddingWorker(runner(), jobId, {
-    onSpawned: (pid) => setEmbeddingJobWorkerPid(jobId, pid),
+    onSpawned: (pid) => {
+      void setEmbeddingJobWorkerPid(jobId, pid);
+    },
   });
   const cancelRequested = shouldCancel(jobId);
   const classification = classifyWorkerExit({ ...exit, cancelRequested });
-  const after = getEmbeddingJob(jobId);
+  const after = await getEmbeddingJob(jobId);
 
   if (classification === "ok") {
     if (after && !isTerminalJobState(after.state)) {
-      failJob(jobId, "Embedding worker exited without finalizing the job");
+      await failJob(jobId, "Embedding worker exited without finalizing the job");
     }
     return false;
   }
 
   if (classification === "cancelled") {
     if (after && !isTerminalJobState(after.state)) {
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "cancelled",
         phase: "done",
         message: "Reindex cancelled",
@@ -720,14 +666,14 @@ async function runJobViaChild(jobId: number): Promise<boolean> {
 
   const plan = planWorkerRetry(attempt, classification);
   if (!plan.retry) {
-    failJob(
+    await failJob(
       jobId,
       `${exit.message} (gave up after ${attempt} attempt${attempt === 1 ? "" : "s"})`,
     );
     return false;
   }
 
-  scheduleWorkerRetry(jobId, attempt, plan.delayMs, exit.message);
+  await scheduleWorkerRetry(jobId, attempt, plan.delayMs, exit.message);
   return true;
 }
 
@@ -739,13 +685,13 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
       retryScheduled = await runJobViaChild(jobId);
     } else {
       // Inline / test worker: record this process so a foreign reclaim can see ownership.
-      setEmbeddingJobWorkerPid(jobId, process.pid);
+      await setEmbeddingJobWorkerPid(jobId, process.pid);
       try {
         await runEmbeddingJobInline(jobId, target);
       } catch (error) {
         clearJobProgressThrottle(jobId);
         if (error instanceof RebuildCancelledError || shouldCancel(jobId)) {
-          updateJob(jobId, {
+          await updateJob(jobId, {
             state: "cancelled",
             phase: "done",
             message: "Reindex cancelled",
@@ -753,7 +699,7 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
             finished: true,
           });
         } else {
-          failJob(
+          await failJob(
             jobId,
             error instanceof Error ? error.message : "unknown error",
           );
@@ -779,14 +725,14 @@ async function executeJob(jobId: number, target: EmbeddingJobTarget) {
 }
 
 /** Fail queued jobs whose provider is no longer enabled/credentialed. */
-function failBlockedPendingJobs() {
-  for (const job of getPendingEmbeddingJobs()) {
-    const reason = jobTargetBlockReason(job.target);
-    if (reason) failJob(job.id, reason);
+async function failBlockedPendingJobs() {
+  for (const job of await getPendingEmbeddingJobs()) {
+    const reason = await jobTargetBlockReason(job.target);
+    if (reason) await failJob(job.id, reason);
   }
 }
 
-function startJob(state: JobRunnerState, job: EmbeddingJobRecord) {
+async function startJob(state: JobRunnerState, job: EmbeddingJobRecord) {
   // Claim the job *before* writing the row: `updateJob` notifies SSE listeners
   // synchronously, those snapshots call `ensureJobRunner()`, and an unclaimed
   // runner would re-queue this row and spawn another worker for it.
@@ -794,7 +740,7 @@ function startJob(state: JobRunnerState, job: EmbeddingJobRecord) {
   state.cancelFlags.set(job.id, false);
   state.deferredUntil.delete(job.id);
 
-  updateJob(job.id, {
+  await updateJob(job.id, {
     state: "running",
     phase: "queued",
     message:
@@ -817,31 +763,34 @@ function startJob(state: JobRunnerState, job: EmbeddingJobRecord) {
 }
 
 /** Promote the oldest startable pending job to running when the runner is idle. */
-function pumpQueue() {
+async function pumpQueue() {
   const state = runner();
-  withPumpGuard(state, () => {
+  if (state.pumping) return;
+  state.pumping = true;
+  try {
     if (state.activeJobId !== null) return;
     // One worker child at a time, no matter how many callers pump the queue.
     if (state.activeChild) return;
 
     // DB may still say "running" after a crash — reclaim before starting another.
     // Ownership was just checked above, so reclaim the rows directly.
-    if (getActiveEmbeddingJob()) {
-      void reclaimOrphanedJobRows().then(() => {
-        pumpQueue();
-      });
+    if (await getActiveEmbeddingJob()) {
+      await reclaimOrphanedJobRows();
+      void pumpQueue();
       return;
     }
-    failBlockedPendingJobs();
+    await failBlockedPendingJobs();
 
     const now = Date.now();
-    const next = getPendingEmbeddingJobs().find(
+    const next = (await getPendingEmbeddingJobs()).find(
       (job) => (state.deferredUntil.get(job.id) ?? 0) <= now,
     );
     if (!next) return;
 
-    startJob(state, next);
-  });
+    await startJob(state, next);
+  } finally {
+    state.pumping = false;
+  }
 }
 
 /**
@@ -852,7 +801,7 @@ export async function ensureJobRunner() {
   const state = runner();
   if (runnerOwnsWork(state)) return;
   await reclaimOrphanedJobRows();
-  pumpQueue();
+  await pumpQueue();
 }
 
 export type StartReindexResult =
@@ -872,7 +821,7 @@ export async function startReindexJob(target: EmbeddingJobTarget): Promise<Start
     const pairs: Array<{ library: SearchLibrary; provider: EmbeddingProvider }> =
       [];
     for (const library of SEARCH_LIBRARIES) {
-      for (const provider of configuredProviders(library)) {
+      for (const provider of await configuredProviders(library)) {
         pairs.push({ library, provider });
       }
     }
@@ -890,17 +839,17 @@ export async function startReindexJob(target: EmbeddingJobTarget): Promise<Start
 
     for (const { library, provider } of pairs) {
       const concrete = formatJobTarget(library, provider);
-      const open = getOpenJobForTarget(concrete);
+      const open = await getOpenJobForTarget(concrete);
       if (open) {
         alreadyOpen.push(open);
         continue;
       }
-      const refuse = refuseReindexIfNeeded(library, provider);
+      const refuse = await refuseReindexIfNeeded(library, provider);
       if (refuse) {
         refused.push(refuse);
         continue;
       }
-      enqueued.push(insertPendingJob(library, provider));
+      enqueued.push(await insertPendingJob(library, provider));
     }
 
     if (enqueued.length === 0) {
@@ -916,24 +865,26 @@ export async function startReindexJob(target: EmbeddingJobTarget): Promise<Start
         error:
           "All configured providers already have a pending or running reindex job for saves and likes",
         status: 409,
-        job: getActiveEmbeddingJob() ?? alreadyOpen[0],
+        job: (await getActiveEmbeddingJob()) ?? alreadyOpen[0],
         jobs: alreadyOpen,
       };
     }
 
-    pumpQueue();
+    await pumpQueue();
 
     const jobs = [...enqueued];
-    const active = getActiveEmbeddingJob();
+    const active = await getActiveEmbeddingJob();
     const job =
       active && jobs.some((j) => j.id === active.id)
         ? active
-        : (getEmbeddingJob(enqueued[0]!.id) ?? enqueued[0]!);
+        : ((await getEmbeddingJob(enqueued[0]!.id)) ?? enqueued[0]!);
 
     return {
       ok: true,
       job,
-      jobs: jobs.map((j) => getEmbeddingJob(j.id) ?? j),
+      jobs: await Promise.all(
+        jobs.map(async (j) => (await getEmbeddingJob(j.id)) ?? j),
+      ),
     };
   }
 
@@ -947,7 +898,7 @@ export async function startReindexJob(target: EmbeddingJobTarget): Promise<Start
     };
   }
 
-  if (!isProviderConfigured(parsed.provider, parsed.library)) {
+  if (!(await isProviderConfigured(parsed.provider, parsed.library))) {
     return {
       ok: false,
       error: `${parsed.provider} is not enabled for ${parsed.library} — turn it on in Settings (and add credentials if needed)`,
@@ -955,13 +906,13 @@ export async function startReindexJob(target: EmbeddingJobTarget): Promise<Start
     };
   }
 
-  const refuse = refuseReindexIfNeeded(parsed.library, parsed.provider);
+  const refuse = await refuseReindexIfNeeded(parsed.library, parsed.provider);
   if (refuse) {
     return { ok: false, error: refuse, status: 503 };
   }
 
   const concrete = formatJobTarget(parsed.library, parsed.provider);
-  const open = getOpenJobForTarget(concrete);
+  const open = await getOpenJobForTarget(concrete);
   if (open) {
     return {
       ok: false,
@@ -975,9 +926,9 @@ export async function startReindexJob(target: EmbeddingJobTarget): Promise<Start
     };
   }
 
-  const created = insertPendingJob(parsed.library, parsed.provider);
-  pumpQueue();
-  const job = getEmbeddingJob(created.id) ?? created;
+  const created = await insertPendingJob(parsed.library, parsed.provider);
+  await pumpQueue();
+  const job = (await getEmbeddingJob(created.id)) ?? created;
   return { ok: true, job, jobs: [job] };
 }
 
@@ -993,7 +944,7 @@ export async function cancelReindexJob(jobId?: number): Promise<CancelReindexRes
   await ensureJobRunner();
 
   const state = runner();
-  const active = jobId ? getEmbeddingJob(jobId) : getActiveEmbeddingJob();
+  const active = jobId ? await getEmbeddingJob(jobId) : await getActiveEmbeddingJob();
 
   // A job waiting on retry backoff is still ours; cancel it outright.
   if (active && active.state === "pending" && state.deferredUntil.has(active.id)) {
@@ -1002,14 +953,14 @@ export async function cancelReindexJob(jobId?: number): Promise<CancelReindexRes
     state.retryTimers.delete(active.id);
     state.deferredUntil.delete(active.id);
     state.attempts.delete(active.id);
-    updateJob(active.id, {
+    await updateJob(active.id, {
       state: "cancelled",
       phase: "done",
       message: "Reindex cancelled",
       error: null,
       finished: true,
     });
-    const job = getEmbeddingJob(active.id);
+    const job = await getEmbeddingJob(active.id);
     return job
       ? { ok: true, job }
       : { ok: false, error: "Job disappeared", status: 500 };
@@ -1024,22 +975,17 @@ export async function cancelReindexJob(jobId?: number): Promise<CancelReindexRes
     };
   }
 
-  getSqlite()
-    .prepare(
-      `UPDATE embedding_jobs
-       SET cancel_requested = 1,
-           message = 'Cancel requested…',
-           updated_at = unixepoch()
-       WHERE id = ?`,
-    )
-    .run(active.id);
+  await (await getStorage()).jobs.updateEmbeddingJob(active.id, {
+    cancelRequested: true,
+    message: "Cancel requested…",
+  });
 
   state.cancelFlags.set(active.id, true);
   // Cooperative cancel first (clean partial state), signals if it hangs.
   scheduleEmbeddingChildTermination(runner(), active.id);
   publishJobEvent(SEARCH_STATUS_CHANNEL, true);
 
-  const job = getEmbeddingJob(active.id);
+  const job = await getEmbeddingJob(active.id);
   if (!job) {
     return { ok: false, error: "Job disappeared", status: 500 };
   }
@@ -1053,8 +999,8 @@ export async function waitForIdleJob(
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
     await ensureJobRunner();
-    const active = getActiveEmbeddingJob();
-    const pending = getPendingEmbeddingJobs();
+    const active = await getActiveEmbeddingJob();
+    const pending = await getPendingEmbeddingJobs();
     if (!active && pending.length === 0) return getLatestEmbeddingJob();
     await new Promise((resolve) => setTimeout(resolve, 25));
   }

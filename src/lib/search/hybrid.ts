@@ -1,9 +1,8 @@
-import { getSqlite } from "../db";
+import { getStorage } from "../storage";
 import { jobLog } from "../job-log";
 import {
   embedText,
   embeddingConfigForProvider,
-  embeddingToBuffer,
   localEmbeddingConfig,
   type EmbeddingConfig,
   type EmbeddingProvider,
@@ -14,7 +13,6 @@ import {
   type SearchLibrary,
   type VectorIndexName,
 } from "./sync";
-import { vectorTableName } from "./library";
 
 export type SearchMode =
   | "hybrid"
@@ -125,32 +123,6 @@ function rrfMerge(
     .sort((a, b) => b.score - a.score);
 }
 
-export function searchFts(
-  library: SearchLibrary,
-  query: string,
-  limit: number,
-  sqlite: import("better-sqlite3").Database,
-): { hits: Array<{ id: number; rank: number }>; degraded: boolean } {
-  const match = buildFtsQuery(query);
-  if (!match) return { hits: [], degraded: false };
-  const table = library === "saves" ? "saved_items_fts" : "liked_items_fts";
-  try {
-    const hits = sqlite
-      .prepare(
-        `SELECT rowid AS id, rank
-         FROM ${table}
-         WHERE ${table} MATCH ?
-         ORDER BY rank
-         LIMIT ?`,
-      )
-      .all(match, limit) as Array<{ id: number; rank: number }>;
-    return { hits, degraded: false };
-  } catch (error) {
-    searchWarn(`FTS query failed (${library})`, error);
-    return { hits: [], degraded: true };
-  }
-}
-
 type VecSearchResult = {
   hits: Array<{ id: number; distance: number }>;
   status: "ok" | "unavailable" | "failed";
@@ -163,27 +135,20 @@ async function searchVectorIndex(
   query: string,
   limit: number,
 ): Promise<VecSearchResult> {
-  const sqlite = getSqlite();
-  if (!vectorIndexMatchesConfig(library, index, config, sqlite)) {
+  const { search } = await getStorage();
+  if (!(await search.vectorIndexMatchesConfig(library, index, config))) {
     return { hits: [], status: "unavailable" };
   }
 
-  const table = vectorTableName(library, index);
   const fetchK = Math.min(Math.max(limit * 2, 32), HYBRID_VEC_FETCH_K_MAX);
   try {
     const embedding = await embedText(query, config, "query");
-    const rows = sqlite
-      .prepare(
-        `SELECT item_id AS id, distance
-         FROM ${table}
-         WHERE embedding MATCH ?
-           AND k = ?
-         ORDER BY distance`,
-      )
-      .all(embeddingToBuffer(embedding), fetchK) as Array<{
-      id: number;
-      distance: number;
-    }>;
+    const rows = await search.searchVector(
+      library,
+      index,
+      embedding,
+      fetchK,
+    );
     if (rows.length === 0) return { hits: [], status: "ok" };
 
     const best = rows[0].distance;
@@ -223,8 +188,12 @@ async function hybridSearchIdsForLibrary(
   limit = 200,
   requestedProvider?: EmbeddingProvider | null,
 ): Promise<HybridSearchResult> {
-  const resolved = resolveSearchProvider(requestedProvider ?? null, library);
-  const ftsResult = searchFts(library, query, limit, getSqlite());
+  const resolved = await resolveSearchProvider(requestedProvider ?? null, library);
+  const ftsResult = await (await getStorage()).search.searchFts(
+    library,
+    query,
+    limit,
+  );
   const ftsHits = ftsResult.hits;
   const ftsDegraded = ftsResult.degraded;
   let vecResult: VecSearchResult;
@@ -242,7 +211,7 @@ async function hybridSearchIdsForLibrary(
     );
     if (vecResult.status === "failed") vecDegraded = true;
   } else {
-    const remoteConfig = embeddingConfigForProvider(resolved.provider);
+    const remoteConfig = await embeddingConfigForProvider(resolved.provider);
     vecResult = await searchVectorIndex(
       library,
       resolved.provider,

@@ -1,5 +1,4 @@
-import { eq } from "drizzle-orm";
-import { getDb, schema } from "../db";
+import { getStorage } from "../storage";
 import {
   inferFileSchema,
   type FileSchemaCatalogEntry,
@@ -15,20 +14,9 @@ import {
 import { emitProgress, throwIfCancelled, yieldToEventLoop } from "./progress";
 import type { ImportRunOptions } from "./types";
 
-const { imports } = schema;
-
-export function appendImportNotes(importId: number, extra: string) {
-  const row = getDb()
-    .select({ notes: imports.notes })
-    .from(imports)
-    .where(eq(imports.id, importId))
-    .get();
-  const next = row?.notes ? `${row.notes}\n${extra}` : extra;
-  getDb()
-    .update(imports)
-    .set({ notes: next })
-    .where(eq(imports.id, importId))
-    .run();
+export async function appendImportNotes(importId: number, extra: string) {
+  const { catalog } = await getStorage();
+  await catalog.appendImportNotes(importId, extra);
 }
 
 export async function syncEmbeddingsAfterImport(
@@ -68,7 +56,7 @@ export async function syncEmbeddingsAfterImport(
     const message = `Semantic indexing failed; imported data and keyword search are available. ${
       error instanceof Error ? error.message : "Unknown embedding error"
     }`;
-    appendImportNotes(importId, message);
+    await appendImportNotes(importId, message);
     return message;
   }
 }

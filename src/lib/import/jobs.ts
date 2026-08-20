@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
-import { getSqlite } from "../db";
+import { getStorage } from "../storage";
 import {
   ImportCancelledError,
   importExportArchive,
@@ -22,13 +22,8 @@ import {
 } from "./spool";
 import { IMPORT_JOBS_CHANNEL, publishJobEvent } from "../sse";
 import {
-  isJobCancelRequested,
   jobProgressPercent,
-  reclaimOrphanedImportJobRows,
   runnerOwnsWork,
-  createJobSqlSet,
-  setJobColumn,
-  setJobFinishedAt,
   withPumpGuard,
 } from "../job-queue";
 import { jobLog } from "../job-log";
@@ -181,15 +176,15 @@ const JOB_SELECT = `SELECT id, filename, content_hash, spool_path, kind, state, 
        FROM import_jobs`;
 
 /** Mark orphaned running rows: re-queue if spool exists, else fail. */
-function reclaimOrphanedJobs() {
+async function reclaimOrphanedJobs() {
   const state = runner();
   if (runnerOwnsWork(state)) return;
-  reclaimOrphanedJobRows();
+  await reclaimOrphanedJobRows();
 }
 
 /** Caller must have verified that no job is owned by this process. */
-function reclaimOrphanedJobRows() {
-  const result = reclaimOrphanedImportJobRows(getSqlite());
+async function reclaimOrphanedJobRows() {
+  const result = await (await getStorage()).jobs.reclaimOrphanedImportJobs();
   if (result.requeued > 0 || result.failed > 0) {
     jobLog("import", {
       message: `reclaim requeued=${result.requeued} failed=${result.failed}`,
@@ -199,83 +194,44 @@ function reclaimOrphanedJobRows() {
   }
 }
 
-export function getImportJob(id: number): ImportJobRecord | null {
-  const row = getSqlite()
-    .prepare(`${JOB_SELECT} WHERE id = ?`)
-    .get(id) as Parameters<typeof mapJobRow>[0] | undefined;
-  return row ? mapJobRow(row) : null;
+export async function getImportJob(id: number): Promise<ImportJobRecord | null> {
+  return (await getStorage()).jobs.getImportJob(id);
 }
 
-export function getActiveImportJob(): ImportJobRecord | null {
-  const row = getSqlite()
-    .prepare(
-      `${JOB_SELECT}
-       WHERE state = 'running'
-       ORDER BY id ASC
-       LIMIT 1`,
-    )
-    .get() as Parameters<typeof mapJobRow>[0] | undefined;
-  return row ? mapJobRow(row) : null;
+export async function getActiveImportJob(): Promise<ImportJobRecord | null> {
+  return (await getStorage()).jobs.getActiveImportJob();
 }
 
-export function getPendingImportJobs(): ImportJobRecord[] {
-  const rows = getSqlite()
-    .prepare(
-      `${JOB_SELECT}
-       WHERE state = 'pending'
-       ORDER BY id ASC`,
-    )
-    .all() as Parameters<typeof mapJobRow>[0][];
-  return rows.map(mapJobRow);
+export async function getPendingImportJobs(): Promise<ImportJobRecord[]> {
+  return (await getStorage()).jobs.getPendingImportJobs();
 }
 
-export function getLatestFinishedImportJob(): ImportJobRecord | null {
-  const row = getSqlite()
-    .prepare(
-      `${JOB_SELECT}
-       WHERE state IN ('completed', 'failed', 'cancelled')
-       ORDER BY id DESC
-       LIMIT 1`,
-    )
-    .get() as Parameters<typeof mapJobRow>[0] | undefined;
-  return row ? mapJobRow(row) : null;
+export async function getLatestFinishedImportJob(): Promise<ImportJobRecord | null> {
+  return (await getStorage()).jobs.getLatestFinishedImportJob();
 }
 
 /** Active running job for the progress panel (pending listed separately). */
-export function getDisplayImportJob(): ImportJobRecord | null {
+export async function getDisplayImportJob(): Promise<ImportJobRecord | null> {
   return getActiveImportJob();
 }
 
-export function getRecentImportJobs(limit = 8): ImportJobRecord[] {
-  const rows = getSqlite()
-    .prepare(
-      `${JOB_SELECT}
-       WHERE state IN ('completed', 'failed', 'cancelled')
-       ORDER BY id DESC
-       LIMIT ?`,
-    )
-    .all(limit) as Parameters<typeof mapJobRow>[0][];
-  return rows.map(mapJobRow);
+export async function getRecentImportJobs(limit = 8): Promise<ImportJobRecord[]> {
+  return (await getStorage()).jobs.getRecentImportJobs(limit);
 }
 
 export type ImportJobsStatus = ImportJobsStatusDto;
 
 /** Snapshot for GET /api/import/jobs and the SSE stream. */
-export function getImportJobsStatus(): ImportJobsStatus {
-  ensureImportJobRunner();
-  return {
-    job: getActiveImportJob(),
-    pendingJobs: getPendingImportJobs(),
-    recentJobs: getRecentImportJobs(5),
-    cancelSupported: true,
-  };
+export async function getImportJobsStatus(): Promise<ImportJobsStatus> {
+  await ensureImportJobRunner();
+  return (await getStorage()).jobs.getImportJobsStatus();
 }
 
 export function isImportQueueIdle(status: ImportJobsStatus): boolean {
   return status.job == null && status.pendingJobs.length === 0;
 }
 
-function updateJob(
+async function updateJob(
   id: number,
   patch: {
     state?: ImportJobState;
@@ -291,38 +247,7 @@ function updateJob(
     finished?: boolean;
   },
 ) {
-  const sql = createJobSqlSet();
-
-  setJobColumn(sql, "state", patch.state);
-  setJobColumn(sql, "phase", patch.phase);
-  setJobColumn(sql, "processed", patch.processed);
-  setJobColumn(sql, "total", patch.total);
-  setJobColumn(sql, "message", patch.message);
-  setJobColumn(sql, "error", patch.error);
-  if (patch.details !== undefined) {
-    setJobColumn(
-      sql,
-      "details",
-      patch.details ? JSON.stringify(patch.details) : null,
-    );
-  }
-  if (patch.result !== undefined) {
-    setJobColumn(
-      sql,
-      "result",
-      patch.result ? JSON.stringify(patch.result) : null,
-    );
-  }
-  setJobColumn(sql, "import_id", patch.importId);
-  setJobColumn(sql, "content_hash", patch.contentHash);
-  if (patch.finished) {
-    setJobFinishedAt(sql);
-  }
-
-  sql.values.push(id);
-  getSqlite()
-    .prepare(`UPDATE import_jobs SET ${sql.sets.join(", ")} WHERE id = ?`)
-    .run(...sql.values);
+  await (await getStorage()).jobs.updateImportJob(id, patch);
 
   const immediate = Boolean(
     patch.state !== undefined || patch.finished === true,
@@ -352,7 +277,7 @@ async function applyProgress(jobId: number, progress: ImportProgress) {
     message: progress.message,
   });
 
-  updateJob(jobId, {
+  await updateJob(jobId, {
     phase: progress.phase,
     processed: progress.processed,
     total: progress.total,
@@ -363,22 +288,17 @@ async function applyProgress(jobId: number, progress: ImportProgress) {
 }
 
 function shouldCancel(jobId: number): boolean {
-  return isJobCancelRequested(
-    getSqlite(),
-    "import_jobs",
-    jobId,
-    runner().cancelFlags,
-  );
+  return runner().cancelFlags.get(jobId) === true;
 }
 
 async function executeJob(jobId: number) {
   const state = runner();
-  const job = getImportJob(jobId);
+  const job = await getImportJob(jobId);
   if (!job) {
     state.cancelFlags.delete(jobId);
     if (state.activeJobId === jobId) state.activeJobId = null;
     clearImportProgressThrottle(jobId);
-    pumpQueue();
+    void pumpQueue();
     return;
   }
 
@@ -387,7 +307,7 @@ async function executeJob(jobId: number) {
       throw new Error("Upload spool file is missing; re-upload the export.");
     }
 
-    updateJob(jobId, {
+    await updateJob(jobId, {
       phase: "received",
       message: `Reading ${job.filename}…`,
     });
@@ -434,7 +354,7 @@ async function executeJob(jobId: number) {
     }
 
     if (shouldCancel(jobId)) {
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "cancelled",
         phase: "failed",
         message: "Import cancelled",
@@ -450,7 +370,7 @@ async function executeJob(jobId: number) {
         level: "warn",
       });
     } else if (result.status === "failed") {
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "failed",
         phase: "failed",
         message: result.message,
@@ -466,7 +386,7 @@ async function executeJob(jobId: number) {
         level: "error",
       });
     } else {
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "completed",
         phase: "completed",
         processed: result.itemsFound + result.likesFound,
@@ -502,7 +422,7 @@ async function executeJob(jobId: number) {
         error instanceof ImportCancelledError
           ? error.message
           : "Import cancelled";
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "cancelled",
         phase: "failed",
         message: cancelMessage,
@@ -517,7 +437,7 @@ async function executeJob(jobId: number) {
       });
     } else {
       const errMsg = error instanceof Error ? error.message : "unknown error";
-      updateJob(jobId, {
+      await updateJob(jobId, {
         state: "failed",
         phase: "failed",
         message: errMsg,
@@ -532,7 +452,7 @@ async function executeJob(jobId: number) {
       });
     }
   } finally {
-    const finished = getImportJob(jobId);
+    const finished = await getImportJob(jobId);
     if (
       finished &&
       (finished.state === "completed" ||
@@ -545,21 +465,23 @@ async function executeJob(jobId: number) {
     state.cancelFlags.delete(jobId);
     if (state.activeJobId === jobId) state.activeJobId = null;
     clearImportProgressThrottle(jobId);
-    pumpQueue();
+    void pumpQueue();
   }
 }
 
-function pumpQueue() {
+async function pumpQueue() {
   const state = runner();
-  withPumpGuard(state, () => {
+  if (state.pumping) return;
+  state.pumping = true;
+  try {
     if (state.activeJobId !== null) return;
 
-    const dbActive = getActiveImportJob();
+    const dbActive = await getActiveImportJob();
     if (dbActive) {
-      reclaimOrphanedJobRows();
+      await reclaimOrphanedJobRows();
     }
 
-    const next = getPendingImportJobs()[0];
+    const next = (await getPendingImportJobs())[0];
     if (!next) return;
 
     // Claim before writing: `updateJob` notifies SSE listeners synchronously and
@@ -568,56 +490,46 @@ function pumpQueue() {
     state.activeJobId = next.id;
     state.cancelFlags.set(next.id, false);
 
-    updateJob(next.id, {
+    await updateJob(next.id, {
       state: "running",
       phase: "queued",
       message: `Starting import of ${next.filename}`,
     });
 
     void executeJob(next.id);
-  });
+  } finally {
+    state.pumping = false;
+  }
 }
 
 /**
  * Reclaim orphaned running rows and resume the pending queue after restart/HMR.
  * Safe to call from status polls.
  */
-export function ensureImportJobRunner() {
+export async function ensureImportJobRunner() {
   const state = runner();
   if (runnerOwnsWork(state)) return;
-  reclaimOrphanedJobs();
-  pumpQueue();
+  await reclaimOrphanedJobs();
+  await pumpQueue();
 }
 
 export type StartImportResult =
   | { ok: true; job: ImportJobRecord }
   | { ok: false; error: string; status: number };
 
-function enqueueImportFromSpool(args: {
+async function enqueueImportFromSpool(args: {
   filename: string;
   kind: ImportJobKind;
   spoolPath: string;
   contentHash: string;
-}): StartImportResult {
-  ensureImportJobRunner();
-  const sqlite = getSqlite();
-  let jobId: number;
+}): Promise<StartImportResult> {
+  await ensureImportJobRunner();
+  let created: ImportJobRecord;
   try {
-    const info = sqlite
-      .prepare(
-        `INSERT INTO import_jobs(
-          filename, content_hash, spool_path, kind, state, phase,
-          processed, total, message
-        ) VALUES (?, ?, ?, ?, 'pending', 'queued', 0, 0, ?)`,
-      )
-      .run(
-        args.filename,
-        args.contentHash,
-        args.spoolPath,
-        args.kind,
-        `Queued import of ${args.filename}`,
-      );
-    jobId = Number(info.lastInsertRowid);
+    created = await (await getStorage()).jobs.createImportJob({
+      ...args,
+      message: `Queued import of ${args.filename}`,
+    });
   } catch (error) {
     deleteSpoolFile(args.spoolPath);
     return {
@@ -629,8 +541,8 @@ function enqueueImportFromSpool(args: {
   }
 
   publishJobEvent(IMPORT_JOBS_CHANNEL, true);
-  pumpQueue();
-  const job = getImportJob(jobId);
+  await pumpQueue();
+  const job = await getImportJob(created.id);
   if (!job) {
     return { ok: false, error: "Failed to create import job", status: 500 };
   }
@@ -638,13 +550,13 @@ function enqueueImportFromSpool(args: {
 }
 
 /** Enqueue after a streaming multipart spool (preferred upload path). */
-export function startImportJobFromSpool(args: {
+export async function startImportJobFromSpool(args: {
   filename: string;
   kind: ImportJobKind;
   spoolPath: string;
   contentHash: string;
   byteLength: number;
-}): StartImportResult {
+}): Promise<StartImportResult> {
   const maxBytes = importMaxBytesForKind(args.kind);
   if (args.byteLength > maxBytes) {
     deleteSpoolFile(args.spoolPath);
@@ -705,31 +617,26 @@ export type CancelImportResult =
  * Cooperative cancel for a running job (or the active one). Pending jobs can
  * be cancelled by deleting them from the queue before they start.
  */
-export function cancelImportJob(jobId?: number): CancelImportResult {
-  ensureImportJobRunner();
+export async function cancelImportJob(jobId?: number): Promise<CancelImportResult> {
+  await ensureImportJobRunner();
 
-  const target = jobId ? getImportJob(jobId) : getActiveImportJob();
+  const target = jobId ? await getImportJob(jobId) : await getActiveImportJob();
   if (!target) {
     return { ok: false, error: "No import job to cancel", status: 404 };
   }
 
   if (target.state === "pending") {
-    getSqlite()
-      .prepare(
-        `UPDATE import_jobs
-         SET state = 'cancelled',
-             phase = 'failed',
-             message = 'Import cancelled before start',
-             finished_at = unixepoch(),
-             updated_at = unixepoch()
-         WHERE id = ?`,
-      )
-      .run(target.id);
+    await updateJob(target.id, {
+      state: "cancelled",
+      phase: "failed",
+      message: "Import cancelled before start",
+      finished: true,
+    });
     deleteSpoolFile(target.spoolPath);
     publishJobEvent(IMPORT_JOBS_CHANNEL, true);
-    const job = getImportJob(target.id);
+    const job = await getImportJob(target.id);
     if (!job) return { ok: false, error: "Job disappeared", status: 500 };
-    pumpQueue();
+    await pumpQueue();
     return { ok: true, job };
   }
 
@@ -742,20 +649,15 @@ export function cancelImportJob(jobId?: number): CancelImportResult {
     };
   }
 
-  getSqlite()
-    .prepare(
-      `UPDATE import_jobs
-       SET cancel_requested = 1,
-           message = 'Cancel requested…',
-           updated_at = unixepoch()
-       WHERE id = ?`,
-    )
-    .run(target.id);
+  await (await getStorage()).jobs.updateImportJob(target.id, {
+    cancelRequested: true,
+    message: "Cancel requested…",
+  });
 
   runner().cancelFlags.set(target.id, true);
   publishJobEvent(IMPORT_JOBS_CHANNEL, true);
 
-  const job = getImportJob(target.id);
+  const job = await getImportJob(target.id);
   if (!job) return { ok: false, error: "Job disappeared", status: 500 };
   return { ok: true, job };
 }
@@ -766,9 +668,9 @@ export async function waitForIdleImportJob(
 ): Promise<ImportJobRecord | null> {
   const started = Date.now();
   while (Date.now() - started < timeoutMs) {
-    ensureImportJobRunner();
-    const active = getActiveImportJob();
-    const pending = getPendingImportJobs();
+    await ensureImportJobRunner();
+    const active = await getActiveImportJob();
+    const pending = await getPendingImportJobs();
     if (!active && pending.length === 0) {
       return getLatestFinishedImportJob();
     }

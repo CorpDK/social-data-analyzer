@@ -1,8 +1,8 @@
 /**
  * App-wide storage entry (`getStorage`).
  *
- * ME-2: lazy cached init promise — schema via getSqlite(), then async orphan
- * reclaim, then SQLite ports. Engine selection arrives in ME-4.
+ * SQLite remains the default. A postgres:// INSTAGRAM_SAVES_DATABASE_URL
+ * selects the Postgres Pool + Drizzle migration backend.
  *
  * Import from `@/lib/storage` (not `@/lib/db`) to avoid cycles with catalog
  * adapters that still call into queries → getSqlite.
@@ -10,6 +10,12 @@
 import type { Storage } from "./ports";
 import { closeSqlite, getSqlite } from "./sqlite/connection";
 import { createSqliteStorage } from "./sqlite/create";
+import {
+  closePostgres,
+  getPostgresPool,
+  isPostgresConfigured,
+} from "./postgres/connection";
+import { createPostgresStorage } from "./postgres/create";
 import {
   reclaimOrphanedEmbeddingJobRows,
   reclaimOrphanedImportJobRows,
@@ -25,6 +31,12 @@ export type {
 } from "./ports";
 
 export { createSqliteStorage } from "./sqlite/create";
+export { createPostgresStorage } from "./postgres/create";
+export {
+  createPostgresPool,
+  getPostgresPool,
+  isPostgresConfigured,
+} from "./postgres/connection";
 export {
   installSqliteConnectionForTests,
   resetDrizzleForTests,
@@ -56,6 +68,14 @@ async function reclaimJobsAfterProcessRestart(sqlite: ReturnType<typeof getSqlit
 }
 
 async function initStorage(): Promise<Storage> {
+  if (isPostgresConfigured()) {
+    const storage = createPostgresStorage(await getPostgresPool());
+    if (!isJobWorkerProcess()) {
+      await storage.jobs.reclaimOrphanedEmbeddingJobs();
+      await storage.jobs.reclaimOrphanedImportJobs();
+    }
+    return storage;
+  }
   const sqlite = getSqlite();
   await reclaimJobsAfterProcessRestart(sqlite);
   return createSqliteStorage(sqlite);
@@ -89,8 +109,12 @@ export function clearStorageCache() {
   globalForStorage.instagramSavesStorageInit = undefined;
 }
 
-/** Close SQLite and drop the Storage cache. */
+/** Close the selected engine and drop the Storage cache. */
 export function closeStorage() {
   clearStorageCache();
-  closeSqlite();
+  if (isPostgresConfigured()) {
+    void closePostgres();
+  } else {
+    closeSqlite();
+  }
 }
