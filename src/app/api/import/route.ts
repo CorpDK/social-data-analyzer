@@ -11,6 +11,10 @@ import {
   spoolMultipartFileUpload,
 } from "@/lib/import/multipart-stream";
 import { rejectUnlessLocalMutating } from "@/lib/local-request-guard";
+import {
+  engineSwitchBusyMessage,
+  isEngineSwitchRunning,
+} from "@/lib/storage/engine-switch";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -29,6 +33,13 @@ const MULTIPART_OVERHEAD_BYTES = 64 * 1024;
 export async function POST(request: Request) {
   const rejected = rejectUnlessLocalMutating(request);
   if (rejected) return rejected;
+  if (isEngineSwitchRunning()) {
+    return jsonPublicError(
+      409,
+      "ENGINE_SWITCH_BUSY",
+      engineSwitchBusyMessage("start an import"),
+    );
+  }
 
   try {
     const { getStorage } = await import("@/lib/storage");

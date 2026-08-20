@@ -2,6 +2,8 @@ import path from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
+import { assertPostgresMigrationUsable } from "./engine-migration";
+import { readStorageEngineConfig } from "../engine-config";
 import * as schema from "./schema";
 
 export type PostgresPool = Pool;
@@ -18,7 +20,11 @@ const globalForPostgres = globalThis as unknown as {
 };
 
 function databaseUrl(): string {
-  const value = process.env.INSTAGRAM_SAVES_DATABASE_URL?.trim();
+  const configured = readStorageEngineConfig();
+  const value =
+    configured.engine === "postgres"
+      ? configured.postgresUrl
+      : process.env.INSTAGRAM_SAVES_DATABASE_URL?.trim();
   if (!value) {
     throw new Error(
       "INSTAGRAM_SAVES_DATABASE_URL is required when using the Postgres backend.",
@@ -34,7 +40,7 @@ function databaseUrl(): string {
 }
 
 export function isPostgresConfigured(): boolean {
-  return Boolean(process.env.INSTAGRAM_SAVES_DATABASE_URL?.trim());
+  return readStorageEngineConfig().engine === "postgres";
 }
 
 export async function createPostgresPool(
@@ -65,7 +71,13 @@ export async function getPostgresPool(): Promise<Pool> {
   }
   if (!globalForPostgres.instagramSavesPostgresInit) {
     globalForPostgres.instagramSavesPostgresInit = createPostgresPool()
-      .then((pool) => {
+      .then(async (pool) => {
+        try {
+          await assertPostgresMigrationUsable(pool);
+        } catch (error) {
+          await pool.end().catch(() => undefined);
+          throw error;
+        }
         globalForPostgres.instagramSavesPostgresPool = pool;
         return pool;
       })

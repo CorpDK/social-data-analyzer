@@ -37,6 +37,10 @@ import {
 import { jobLog } from "../job-log";
 import { SEARCH_STATUS_CHANNEL, publishJobEvent } from "../sse";
 import {
+  engineSwitchBusyMessage,
+  isEngineSwitchRunning,
+} from "../storage/engine-switch";
+import {
   classifyWorkerExit,
   MAX_EMBEDDING_WORKER_ATTEMPTS,
   PermanentEmbeddingJobError,
@@ -815,6 +819,13 @@ export type StartReindexResult =
     };
 
 export async function startReindexJob(target: EmbeddingJobTarget): Promise<StartReindexResult> {
+  if (isEngineSwitchRunning()) {
+    return {
+      ok: false,
+      error: engineSwitchBusyMessage("start a reindex"),
+      status: 409,
+    };
+  }
   await ensureJobRunner();
 
   if (target === "all-configured") {

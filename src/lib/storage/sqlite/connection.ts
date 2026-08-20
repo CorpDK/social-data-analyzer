@@ -16,6 +16,7 @@ import {
   SCHEMA_VERSION,
   ensureDatabaseSchema,
 } from "../../db/ddl";
+import { readStorageEngineConfig } from "../engine-config";
 import * as schema from "./schema";
 
 export {
@@ -27,18 +28,22 @@ export {
 
 export { schema };
 
-const dataDir = path.join(process.cwd(), "data");
-const dbPath =
-  process.env.INSTAGRAM_SAVES_DB ??
-  path.join(dataDir, "instagram-saves.db");
-
 const globalForDb = globalThis as unknown as {
   sqlite?: Database.Database;
+  sqlitePath?: string;
   db?: ReturnType<typeof drizzle<typeof schema>>;
   schemaVersion?: number;
 };
 
 function createDatabaseConnection() {
+  const configured = readStorageEngineConfig();
+  const dbPath =
+    configured.engine === "sqlite"
+      ? configured.sqlitePath
+      : path.resolve(
+          process.env.INSTAGRAM_SAVES_DB ??
+            path.join(process.cwd(), "data", "instagram-saves.db"),
+        );
   const dir = path.dirname(dbPath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
@@ -53,6 +58,7 @@ function createDatabaseConnection() {
   sqlite.pragma("foreign_keys = ON");
 
   sqliteVec.load(sqlite);
+  globalForDb.sqlitePath = dbPath;
 
   return sqlite;
 }
@@ -99,6 +105,7 @@ export function closeSqlite() {
   const sqlite = globalForDb.sqlite;
   if (!sqlite) return;
   globalForDb.sqlite = undefined;
+  globalForDb.sqlitePath = undefined;
   globalForDb.db = undefined;
   schemaEnsuredForModule = false;
   try {

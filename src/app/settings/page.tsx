@@ -1,12 +1,20 @@
 import { DangerZone } from "@/components/danger-zone";
 import { DbMaintenance } from "@/components/db-maintenance";
 import { SettingsForm } from "@/components/settings-form";
+import { StorageEngineSwitcher } from "@/components/storage-engine-switcher";
 import { getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
-  const engine = await (await getStorage()).maintenance.engineInfo();
+  let engine = null;
+  let storageError: string | null = null;
+  try {
+    engine = await (await getStorage()).maintenance.engineInfo();
+  } catch (error) {
+    storageError =
+      error instanceof Error ? error.message : "The selected storage engine is unavailable.";
+  }
   return (
     <div className="space-y-5">
       <section className="space-y-1.5">
@@ -22,9 +30,18 @@ export default async function SettingsPage() {
         </p>
       </section>
 
-      <SettingsForm />
-      <DbMaintenance engine={engine} />
-      <DangerZone />
+      <StorageEngineSwitcher />
+      {storageError ? (
+        <p className="rounded-xl border border-[var(--danger)]/40 bg-[var(--surface)] px-4 py-3 text-sm text-[var(--danger)]" role="alert">
+          The selected storage engine is blocked: {storageError}
+        </p>
+      ) : (
+        <>
+          <SettingsForm />
+          {engine ? <DbMaintenance engine={engine} /> : null}
+          <DangerZone />
+        </>
+      )}
     </div>
   );
 }

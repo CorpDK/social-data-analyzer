@@ -31,8 +31,14 @@ Shared helper: `createJobSseResponse`.
 
 Clients: `use-job-sse.ts` — backoff + `maxFailures`; close on `idle` when configured.
 
+Storage engine switching reuses the same SSE contract at
+`GET /api/settings/storage-engine/stream`. Snapshots report
+`preparing → copying → vectors → search → verifying → switching → complete`
+with percentage, status text, and copied-row count.
+
 **Idle policy (intentional asymmetry):**
 - Import stream: emits `idle` when the queue drains (upload form closes EventSource).
+- Engine-switch stream: emits `idle` when the one in-process switch job settles.
 - Search status stream: does **not** emit `idle` — Indexes UI keeps watching
   coverage/health while idle.
 
@@ -65,6 +71,10 @@ transaction (`IMPORT_WRITE_BATCH_SIZE`).
 Upload HTTP path: multipart is **streamed** to the spool (boundary parser; no
 `request.formData()` full-body buffer). Caps: **512 MB** zip / **512 MB**
 standalone JSON (JSON remains a UTF-8 string parse bound).
+
+Import and reindex enqueue paths return HTTP 409 while an engine switch is
+running. Engine migration marks itself busy before checking the existing
+import/reindex queues, then returns 409 if either queue is active.
 
 ## Embedding jobs (`embedding_jobs`)
 

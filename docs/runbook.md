@@ -115,6 +115,71 @@ synthetic library. Optional browser smoke can target Postgres by exporting the
 same URL before `pnpm test:e2e`; Playwright's isolated SQLite path is ignored
 when the Postgres URL is configured.
 
+## Switching database engines (ME-6)
+
+The default path is **Settings → Storage engine → Migrate library**:
+
+1. Keep a backup of the current library.
+2. Enter an unused SQLite file path or empty PostgreSQL database URL.
+3. Choose **Migrate library**. The app copies catalog rows, settings, embedding
+   profiles/vectors, rebuilds search documents, verifies integrity, and activates
+   the target only after the copy succeeds.
+4. Follow live phase, row, and percentage updates in Settings. Import and
+   reindex starts are blocked for the duration; migration itself refuses while
+   either queue already has pending/running work.
+
+**Switch empty / start fresh** is the optional secondary action. It requires the
+typed confirmation `SWITCH EMPTY` and an unused empty target; the existing source
+library is left untouched so an export can be imported later. The app does not
+dual-read old databases or treat Instagram zip re-import as the default switch.
+
+The selected engine is persisted in `data/storage-engine.json` (mode `0600`) after
+successful activation. Until Settings writes this file, environment selection
+continues to work as before. For the offline identity-preserving copy tool, stop
+every app and worker that can write either endpoint, back up the source, and use
+an empty target:
+
+```bash
+# SQLite -> Postgres
+pnpm migrate:engine -- \
+  --from=sqlite \
+  --to=postgres \
+  --sqlite=/absolute/path/to/instagram-saves.db \
+  --postgres-url='postgres://user:password@127.0.0.1:5432/instagram_saves_new'
+
+# Postgres -> SQLite
+pnpm migrate:engine -- \
+  --from=postgres \
+  --to=sqlite \
+  --sqlite=/absolute/path/to/new-instagram-saves.db \
+  --postgres-url='postgres://user:password@127.0.0.1:5432/instagram_saves'
+```
+
+The SQLite path and Postgres URL are always required (the URL may instead come
+from `INSTAGRAM_SAVES_DATABASE_URL`).
+The command refuses a non-empty target, preserves catalog/import identities,
+copies collections, import schemas, settings, embedding profiles and vectors,
+rebuilds FTS on the target, and runs an integrity check. Finished job history
+is operational metadata and is omitted by default; add `--include-jobs` only
+when you intentionally want it copied. Spool files referenced by imported job
+history are not moved.
+
+SQLite destinations are copied into a sibling `*.engine-migrate` file and
+renamed over the target only after integrity checks pass. An interrupted run
+leaves the destination unchanged (missing or still empty); leftover staging
+files are deleted on the next attempt. Postgres destinations record an
+`engine_migration` row as `in_progress` before copying. The app will not open
+that database until the copy is marked complete, and Settings surfaces this
+blocked state. Retry **Migrate** with the same target, or re-run the same
+`pnpm migrate:engine` command after a kill — either path wipes the in-progress
+target and starts over. You can also `DROP DATABASE` / create an empty database
+and retry.
+
+After a successful copy, configure the app for the target engine and compare
+the library counts before deleting either source or backup. If the target is
+a finished non-empty library, create a fresh target or use the wipe/reimport
+path; the tool will not merge libraries.
+
 Postgres uses pgvector cosine distance. Embeddings are L2-normalized before
 storage, so ordering is equivalent to SQLite's L2 metric and thresholds convert
 with `cosine_distance = l2_distance² / 2`; the default SQLite cutoff `1.22`

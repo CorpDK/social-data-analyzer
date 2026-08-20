@@ -48,6 +48,7 @@ next-env.d.ts
 # local sqlite + uploads
 /data/*.db
 /data/*.db-*
+/data/storage-engine.json
 /data/uploads/
 /data/imports/
 /data/spool/

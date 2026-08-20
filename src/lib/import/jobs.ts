@@ -39,6 +39,10 @@ import type {
   ImportJobState as ImportJobStateDto,
   ImportJobsStatusDto,
 } from "./jobs-dto";
+import {
+  engineSwitchBusyMessage,
+  isEngineSwitchRunning,
+} from "../storage/engine-switch";
 
 export type { ImportJobDetailsDto as ImportProgressDetailsWire } from "./jobs-dto";
 export type ImportJobState = ImportJobStateDto;
@@ -557,6 +561,14 @@ export async function startImportJobFromSpool(args: {
   contentHash: string;
   byteLength: number;
 }): Promise<StartImportResult> {
+  if (isEngineSwitchRunning()) {
+    deleteSpoolFile(args.spoolPath);
+    return {
+      ok: false,
+      error: engineSwitchBusyMessage("start an import"),
+      status: 409,
+    };
+  }
   const maxBytes = importMaxBytesForKind(args.kind);
   if (args.byteLength > maxBytes) {
     deleteSpoolFile(args.spoolPath);
@@ -570,6 +582,13 @@ export async function startImportJobFromSpool(args: {
 }
 
 export async function startImportJob(file: File): Promise<StartImportResult> {
+  if (isEngineSwitchRunning()) {
+    return {
+      ok: false,
+      error: engineSwitchBusyMessage("start an import"),
+      status: 409,
+    };
+  }
   const filename = file.name || "export.zip";
   const kind = importKindFromFilename(filename);
   if (!kind) {

@@ -1,9 +1,9 @@
 # Multi-Engine Database Support (SQLite default + Postgres)
 
-Status: **ME-5 complete — dual-engine storage contracts** (Aug 2026).
-SQLite contracts run in the default suite; Postgres runs from an available
-environment-provided test URL and skips clearly when unavailable. ME-6 has not
-started.
+Status: **ME-6 complete — migration-first engine switching** (Aug 2026). The
+multi-engine rewrite is complete. Settings migrates the existing library when
+switching engines by default; starting with an unused empty target is an
+explicit secondary action. `migrate:engine` remains available for offline ops.
 
 Goal: refactor from hard-wired better-sqlite3 to an async port-based storage
 layer with two full backends — SQLite (default, embedded) and Postgres
@@ -23,7 +23,7 @@ backend targets real servers only.
 - [x] Phase 3: Move all plain tables to Drizzle schemas per dialect with Drizzle Kit migrations; shrink hand-rolled DDL to FTS5/vec0 (SQLite) and journaled extension/tsvector/vector SQL (PG); stamp empty SQLite databases at v10 and reject legacy/non-empty unstamped files; rewrite `docs/db-boundary.md`
 - [x] Phase 4: Postgres Pool/migrations, all five adapter ports, tsvector/pgvector storage, lease reclaim, maintenance/reset, engine-aware UI, distance parity, docker-compose recipe, and port-routed import/embedding runners
 - [x] Phase 5: Shared port contracts against SQLite and optional environment-provided Postgres; Docker-free default tests, `test:pg`, engine-selectable soak, and documented optional Postgres browser smoke
-- [ ] Phase 6: Build `scripts/migrate-engine.ts` for bidirectional SQLite/Postgres library migration with identity preservation; document in runbook; fresh start remains default
+- [x] Phase 6: Bidirectional SQLite/Postgres library migration with identity preservation, empty-target refusal, Settings progress/status, and an optional explicit fresh switch
 
 ## Target architecture
 
@@ -200,14 +200,26 @@ run rather than adding Docker Compose to CI.
 
 ## Phase 6 — Engine-to-engine migration tool
 
-`scripts/migrate-engine.ts` (+ runbook docs): reads source storage, writes
-target through the ports with identity preservation — catalog rows (explicit
-IDs), collections, import history + schemas, `app_settings`,
-`embedding_index_profiles`, and embeddings (readable back from vec0 as
-float32 blobs → `vector` values, and vice versa); search docs rebuilt from
-catalog on the target; job history optionally copied. Refuses to run into a
-non-empty target. Fresh start remains the default path — the tool is opt-in;
-both engines bootstrap empty databases automatically.
+Implementation status: complete. Settings uses the same copy path for the
+default engine-switch action and reports table/vector/search/integrity progress
+over SSE. `pnpm migrate:engine` provides the equivalent offline operation with
+explicit source/target flags. Both preserve catalog and import IDs, collections,
+schemas, settings, embedding profiles, and vectors; CLI job history is copied
+only with `--include-jobs`. Search documents are rebuilt from the copied catalog.
+The operation refuses a finished non-empty target and verifies target integrity.
+
+Crash-safety residual (ME-6): a kill mid-copy must not leave a silently
+half-migrated target that the app treats as valid. SQLite copies into
+`*.engine-migrate` then atomically replaces the destination. Postgres writes
+an `engine_migration` `in_progress` marker before copying; `getPostgresPool`
+refuses that database; retry wipes the in-progress target (or the operator
+`DROP`s the database) and runs `pnpm migrate:engine` again. There is still no
+dual-read of old databases.
+
+The Settings default is **Migrate library**. **Switch empty / start fresh** is
+secondary, requires typed confirmation, and accepts only an unused empty target.
+There is no dual-read, dual-write, legacy-schema upgrade, or automatic migration
+during app startup.
 
 ## Key risks
 

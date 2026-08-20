@@ -20,6 +20,10 @@ import {
   reclaimOrphanedEmbeddingJobRows,
   reclaimOrphanedImportJobRows,
 } from "../job-queue";
+import {
+  type StorageEngineConfig,
+  writeStorageEngineConfig,
+} from "./engine-config";
 
 export type { Storage, EngineInfo } from "./ports";
 export type {
@@ -45,6 +49,11 @@ export {
   getSqlite,
   closeSqlite,
 } from "./sqlite/connection";
+export {
+  readStorageEngineConfig,
+  storageEnginePublicStatus,
+  type StorageEngineConfig,
+} from "./engine-config";
 
 const globalForStorage = globalThis as unknown as {
   instagramSavesStorage?: Storage;
@@ -112,9 +121,17 @@ export function clearStorageCache() {
 /** Close the selected engine and drop the Storage cache. */
 export function closeStorage() {
   clearStorageCache();
-  if (isPostgresConfigured()) {
-    void closePostgres();
-  } else {
-    closeSqlite();
-  }
+  closeSqlite();
+  void closePostgres();
+}
+
+/** Activate a verified engine target and reopen storage against it. */
+export async function switchStorageEngine(
+  config: StorageEngineConfig,
+): Promise<Storage> {
+  clearStorageCache();
+  closeSqlite();
+  await closePostgres();
+  writeStorageEngineConfig(config);
+  return getStorage();
 }
