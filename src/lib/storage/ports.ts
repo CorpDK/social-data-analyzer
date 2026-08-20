@@ -68,6 +68,28 @@ export type EngineInfo = {
   supportsVacuum: boolean;
 };
 
+export type LibraryStatusState =
+  | "up_to_date"
+  | "updating"
+  | "generation_break"
+  | "apply_failed";
+
+export type LibraryStatus = {
+  engine: "sqlite" | "postgres";
+  displayName: string;
+  location: string;
+  locationFolder: string | null;
+  state: LibraryStatusState;
+  appliedMigrations: number;
+  pendingMigrations: number;
+  /** Available to Advanced storage only; default recovery copy never renders it. */
+  technicalDetail?: string;
+};
+
+export interface LibraryStatusPort {
+  getStatus(): Promise<LibraryStatus>;
+}
+
 export type CatalogStats = ReturnType<
   typeof import("../queries").getStats
 >;
@@ -355,6 +377,7 @@ export interface MaintenanceOps {
 
 /** Bundled storage handle returned by getStorage(). */
 export type Storage = {
+  libraryStatus: LibraryStatusPort;
   catalog: CatalogStore;
   search: SearchIndex;
   jobs: JobStore;

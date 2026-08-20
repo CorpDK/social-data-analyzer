@@ -8,6 +8,8 @@
  * adapters that still call into queries → getSqlite.
  */
 import type { Storage } from "./ports";
+import Database from "better-sqlite3";
+import path from "node:path";
 import { closeSqlite, getSqlite } from "./sqlite/connection";
 import { createSqliteStorage } from "./sqlite/create";
 import {
@@ -22,10 +24,20 @@ import {
 } from "../job-queue";
 import {
   type StorageEngineConfig,
+  readStorageEngineConfig,
+  storageEnginePublicStatus,
   writeStorageEngineConfig,
 } from "./engine-config";
+import { getLibraryBusyState, LibraryBusyError } from "../settings/library-busy";
+import { currentLibraryStatus } from "./library-status";
 
-export type { Storage, EngineInfo } from "./ports";
+export type {
+  Storage,
+  EngineInfo,
+  LibraryStatus,
+  LibraryStatusPort,
+  LibraryStatusState,
+} from "./ports";
 export type {
   CatalogStore,
   SearchIndex,
@@ -54,6 +66,53 @@ export {
   storageEnginePublicStatus,
   type StorageEngineConfig,
 } from "./engine-config";
+
+export async function getLibraryStatus() {
+  const inProgress = currentLibraryStatus();
+  if (inProgress?.state === "updating") return inProgress;
+  try {
+    return await (await getStorage()).libraryStatus.getStatus();
+  } catch (error) {
+    const status = currentLibraryStatus();
+    if (status) return status;
+    const current = storageEnginePublicStatus();
+    return {
+      engine: current.engine,
+      displayName: current.displayName,
+      location:
+        current.engine === "sqlite"
+          ? current.sqlitePath
+          : (current.postgresUrl ?? "Configured PostgreSQL database"),
+      locationFolder:
+        current.engine === "sqlite" ? path.dirname(current.sqlitePath) : null,
+      state: "apply_failed" as const,
+      appliedMigrations: 0,
+      pendingMigrations: 0,
+      technicalDetail:
+        error instanceof Error ? error.message : "The library could not be opened.",
+    };
+  }
+}
+
+export async function retryLibraryUpdate() {
+  const config = readStorageEngineConfig();
+  if (config.engine !== "sqlite") {
+    throw new Error("PostgreSQL update recovery is available in Advanced storage.");
+  }
+
+  const probe = new Database(config.sqlitePath);
+  try {
+    const busy = getLibraryBusyState(probe, "update the library");
+    if (busy.busy) throw new LibraryBusyError(busy.reason);
+  } finally {
+    probe.close();
+  }
+
+  clearStorageCache();
+  closeSqlite();
+  await getStorage();
+  return getLibraryStatus();
+}
 
 const globalForStorage = globalThis as unknown as {
   instagramSavesStorage?: Storage;

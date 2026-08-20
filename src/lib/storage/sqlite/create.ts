@@ -5,6 +5,8 @@ import { createSqliteSearchIndex } from "./search";
 import { createSqliteJobStore } from "./jobs";
 import { createSqliteSettingsStore } from "./settings";
 import { createSqliteMaintenanceOps } from "./maintenance";
+import { readStorageEngineConfig } from "../engine-config";
+import { createSqliteLibraryStatusPort } from "../library-status";
 
 /**
  * Build a Storage bundle over an opened SQLite handle.
@@ -12,7 +14,10 @@ import { createSqliteMaintenanceOps } from "./maintenance";
  * domain modules that still call getSqlite() see the same connection.
  */
 export function createSqliteStorage(sqlite: Database.Database): Storage {
+  const configured = readStorageEngineConfig();
+  const sqlitePath = configured.sqlitePath;
   return {
+    libraryStatus: createSqliteLibraryStatusPort(sqlitePath),
     catalog: createSqliteCatalogStore(sqlite),
     search: createSqliteSearchIndex(sqlite),
     jobs: createSqliteJobStore(sqlite),

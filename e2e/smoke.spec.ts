@@ -65,6 +65,12 @@ test.describe("settings smoke", () => {
     await expect(
       main.getByRole("heading", { level: 1, name: "Settings" }),
     ).toBeVisible();
+    await expect(
+      main.getByRole("heading", { name: "Your library is ready" }),
+    ).toBeVisible();
+    await expect(
+      main.getByText("PostgreSQL connection URL"),
+    ).not.toBeVisible();
   });
 });
 

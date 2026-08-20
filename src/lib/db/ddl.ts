@@ -7,6 +7,7 @@
 import type Database from "better-sqlite3";
 import { drizzle } from "drizzle-orm/better-sqlite3";
 import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import fs from "node:fs";
 import path from "node:path";
 
 /** Fixed sqlite-vec embedding width for all provider tables. */
@@ -23,6 +24,27 @@ const SQLITE_MIGRATIONS_FOLDER = path.join(
   "drizzle",
   "sqlite",
 );
+
+export type DatabaseSchemaState = "up_to_date" | "migrated";
+
+export type DatabaseSchemaOutcome = {
+  state: DatabaseSchemaState;
+  appliedMigrations: number;
+  pendingMigrations: number;
+};
+
+export type DatabaseSchemaFailure = "generation_break" | "apply_failed";
+
+export class DatabaseSchemaError extends Error {
+  constructor(
+    readonly code: DatabaseSchemaFailure,
+    message: string,
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "DatabaseSchemaError";
+  }
+}
 
 function tableExists(sqlite: Database.Database, table: string): boolean {
   return Boolean(
@@ -51,12 +73,15 @@ function ordinaryApplicationTables(sqlite: Database.Database): string[] {
   ).map((row) => row.name);
 }
 
-function assertGreenfieldDatabase(sqlite: Database.Database): void {
+export function assertDatabaseGenerationSupported(
+  sqlite: Database.Database,
+): void {
   const version = sqlite.pragma("user_version", { simple: true }) as number;
   const hasMigrationJournal = tableExists(sqlite, "__drizzle_migrations");
 
   if (version !== 0 && version !== SCHEMA_VERSION) {
-    throw new Error(
+    throw new DatabaseSchemaError(
+      "generation_break",
       `Unsupported SQLite schema version ${version}. ` +
         `ME-3 requires a fresh database; delete the configured SQLite file and re-import.`,
     );
@@ -66,22 +91,55 @@ function assertGreenfieldDatabase(sqlite: Database.Database): void {
     (version === 0 && !hasMigrationJournal && ordinaryApplicationTables(sqlite).length > 0) ||
     (version === SCHEMA_VERSION && !hasMigrationJournal)
   ) {
-    throw new Error(
+    throw new DatabaseSchemaError(
+      "generation_break",
       "Unstamped non-empty SQLite database detected. " +
         "ME-3 does not upgrade legacy databases; delete the configured SQLite file and re-import.",
     );
   }
 }
 
+function migrationCount(): number {
+  return fs
+    .readdirSync(SQLITE_MIGRATIONS_FOLDER)
+    .filter((filename) => /^\d+.*\.sql$/.test(filename)).length;
+}
+
+function appliedMigrationCount(sqlite: Database.Database): number {
+  if (!tableExists(sqlite, "__drizzle_migrations")) return 0;
+  const row = sqlite
+    .prepare("SELECT count(*) AS count FROM __drizzle_migrations")
+    .get() as { count: number };
+  return row.count;
+}
+
 /**
  * Apply pending plain-table migrations, then ensure engine-specific search
  * objects. Safe to call repeatedly for a v10 database.
  */
-export function ensureDatabaseSchema(sqlite: Database.Database): void {
-  assertGreenfieldDatabase(sqlite);
-  migrate(drizzle(sqlite), { migrationsFolder: SQLITE_MIGRATIONS_FOLDER });
-  ensureSearchSchema(sqlite);
-  sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
+export function ensureDatabaseSchema(
+  sqlite: Database.Database,
+): DatabaseSchemaOutcome {
+  try {
+    assertDatabaseGenerationSupported(sqlite);
+    const before = appliedMigrationCount(sqlite);
+    migrate(drizzle(sqlite), { migrationsFolder: SQLITE_MIGRATIONS_FOLDER });
+    ensureSearchSchema(sqlite);
+    sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
+    const appliedMigrations = appliedMigrationCount(sqlite);
+    return {
+      state: appliedMigrations > before ? "migrated" : "up_to_date",
+      appliedMigrations,
+      pendingMigrations: Math.max(0, migrationCount() - appliedMigrations),
+    };
+  } catch (error) {
+    if (error instanceof DatabaseSchemaError) throw error;
+    throw new DatabaseSchemaError(
+      "apply_failed",
+      error instanceof Error ? error.message : "SQLite schema update failed.",
+      { cause: error },
+    );
+  }
 }
 
 const FTS_TOKENIZE = "porter unicode61 remove_diacritics 1";

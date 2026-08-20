@@ -1,20 +1,28 @@
+import { AdvancedStorage } from "@/components/advanced-storage";
 import { DangerZone } from "@/components/danger-zone";
 import { DbMaintenance } from "@/components/db-maintenance";
+import { LibraryStatusCard } from "@/components/library-status-card";
 import { SettingsForm } from "@/components/settings-form";
-import { StorageEngineSwitcher } from "@/components/storage-engine-switcher";
-import { getStorage } from "@/lib/storage";
+import { getLibraryStatus, getStorage } from "@/lib/storage";
 
 export const dynamic = "force-dynamic";
 
 export default async function SettingsPage() {
+  const libraryStatus = await getLibraryStatus();
   let engine = null;
-  let storageError: string | null = null;
-  try {
-    engine = await (await getStorage()).maintenance.engineInfo();
-  } catch (error) {
-    storageError =
-      error instanceof Error ? error.message : "The selected storage engine is unavailable.";
+  let advancedEnabled = Boolean(
+    process.env.INSTAGRAM_SAVES_DATABASE_URL?.trim(),
+  );
+  const lockedByEnvironment = advancedEnabled;
+  if (libraryStatus.state === "up_to_date") {
+    const storage = await getStorage();
+    engine = await storage.maintenance.engineInfo();
+    advancedEnabled =
+      advancedEnabled ||
+      (await storage.settings.getAppSetting("postgres_advanced_enabled")) ===
+        "1";
   }
+
   return (
     <div className="space-y-5">
       <section className="space-y-1.5">
@@ -30,18 +38,21 @@ export default async function SettingsPage() {
         </p>
       </section>
 
-      <StorageEngineSwitcher />
-      {storageError ? (
-        <p className="rounded-xl border border-[var(--danger)]/40 bg-[var(--surface)] px-4 py-3 text-sm text-[var(--danger)]" role="alert">
-          The selected storage engine is blocked: {storageError}
-        </p>
-      ) : (
+      <LibraryStatusCard
+        initialStatus={libraryStatus}
+        showTechnicalDetails={advancedEnabled}
+      />
+      {libraryStatus.state === "up_to_date" ? (
         <>
           <SettingsForm />
           {engine ? <DbMaintenance engine={engine} /> : null}
+          <AdvancedStorage
+            initialEnabled={advancedEnabled}
+            lockedByEnvironment={lockedByEnvironment}
+          />
           <DangerZone />
         </>
-      )}
+      ) : null}
     </div>
   );
 }

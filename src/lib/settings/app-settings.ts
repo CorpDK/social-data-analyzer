@@ -28,7 +28,8 @@ export type AppSettingKey =
   | "openai_base_url"
   | "openai_embedding_model"
   | "voyage_model"
-  | "embedding_timeout_ms";
+  | "embedding_timeout_ms"
+  | "postgres_advanced_enabled";
 
 const DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_OPENAI_MODEL = "text-embedding-3-small";

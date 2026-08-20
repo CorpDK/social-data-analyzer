@@ -13,10 +13,17 @@ import fs from "node:fs";
 import path from "node:path";
 import * as sqliteVec from "sqlite-vec";
 import {
+  DatabaseSchemaError,
   SCHEMA_VERSION,
+  assertDatabaseGenerationSupported,
   ensureDatabaseSchema,
 } from "../../db/ddl";
 import { readStorageEngineConfig } from "../engine-config";
+import {
+  markLibraryFailed,
+  markLibraryReady,
+  markLibraryUpdating,
+} from "../library-status";
 import * as schema from "./schema";
 
 export {
@@ -51,6 +58,25 @@ function createDatabaseConnection() {
 
   const sqlite = new Database(dbPath);
 
+  // Classify old libraries before WAL or any schema-writing setup can touch
+  // the existing file. The full check runs again immediately before migrate.
+  markLibraryUpdating(dbPath);
+  try {
+    assertDatabaseGenerationSupported(sqlite);
+  } catch (error) {
+    const classified =
+      error instanceof DatabaseSchemaError
+        ? error
+        : new DatabaseSchemaError(
+            "apply_failed",
+            error instanceof Error ? error.message : "SQLite schema check failed.",
+            { cause: error },
+          );
+    markLibraryFailed(dbPath, classified);
+    sqlite.close();
+    throw classified;
+  }
+
   // WAL: readers don't block writers; crash-safe append log.
   sqlite.pragma("journal_mode = WAL");
   sqlite.pragma("synchronous = NORMAL");
@@ -76,10 +102,28 @@ let schemaEnsuredForModule = false;
 export function getSqlite() {
   if (!globalForDb.sqlite) {
     const sqlite = createDatabaseConnection();
-    ensureDatabaseSchema(sqlite);
-    markSchemaApplied();
-    globalForDb.sqlite = sqlite;
-    schemaEnsuredForModule = true;
+    const dbPath = globalForDb.sqlitePath!;
+    markLibraryUpdating(dbPath);
+    try {
+      const outcome = ensureDatabaseSchema(sqlite);
+      markLibraryReady(dbPath, outcome);
+      markSchemaApplied();
+      globalForDb.sqlite = sqlite;
+      schemaEnsuredForModule = true;
+    } catch (error) {
+      const classified =
+        error instanceof DatabaseSchemaError
+          ? error
+          : new DatabaseSchemaError(
+              "apply_failed",
+              error instanceof Error ? error.message : "SQLite schema update failed.",
+              { cause: error },
+            );
+      markLibraryFailed(dbPath, classified);
+      globalForDb.sqlitePath = undefined;
+      sqlite.close();
+      throw classified;
+    }
   } else if (!schemaEnsuredForModule) {
     const persistedVersion = globalForDb.sqlite.pragma("user_version", {
       simple: true,
@@ -89,7 +133,23 @@ export function getSqlite() {
       globalForDb.schemaVersion !== SCHEMA_VERSION ||
       persistedVersion !== SCHEMA_VERSION
     ) {
-      ensureDatabaseSchema(globalForDb.sqlite);
+      const dbPath = globalForDb.sqlitePath!;
+      markLibraryUpdating(dbPath);
+      try {
+        const outcome = ensureDatabaseSchema(globalForDb.sqlite);
+        markLibraryReady(dbPath, outcome);
+      } catch (error) {
+        const classified =
+          error instanceof DatabaseSchemaError
+            ? error
+            : new DatabaseSchemaError(
+                "apply_failed",
+                error instanceof Error ? error.message : "SQLite schema update failed.",
+                { cause: error },
+              );
+        markLibraryFailed(dbPath, classified);
+        throw classified;
+      }
       markSchemaApplied();
     }
     schemaEnsuredForModule = true;
