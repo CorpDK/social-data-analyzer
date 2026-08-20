@@ -1,6 +1,6 @@
 # Multi-Engine Database Support (SQLite default + Postgres)
 
-Status: **ME-2 landed — call sites await ports** (Aug 2026). Phases 3–6 remain.
+Status: **ME-3 landed — greenfield Drizzle journals** (Aug 2026). Phases 4–6 remain.
 
 Goal: refactor from hard-wired better-sqlite3 to an async port-based storage
 layer with two full backends — SQLite (default, embedded) and Postgres
@@ -17,7 +17,7 @@ backend targets real servers only.
 
 - [x] Phase 1: Define async port interfaces (`CatalogStore`, `SearchIndex`, `JobStore`, `SettingsStore`, `MaintenanceOps`) and move existing SQLite code into `src/lib/storage/sqlite/` behind them
 - [x] Phase 2: Async-ify all call sites (routes, pages, SSE snapshots, scripts, worker), remove `getSqlite()` defaults and top-level HMR ensure, adapt existing tests; full suite green on SQLite
-- [ ] Phase 3: Move all plain tables to Drizzle schemas per dialect with Drizzle Kit migrations; shrink hand-rolled DDL to FTS5/vec0 (SQLite) and extension/tsvector SQL migrations (PG); baseline-stamp existing v9 DBs; rewrite `docs/db-boundary.md`
+- [x] Phase 3: Move all plain tables to Drizzle schemas per dialect with Drizzle Kit migrations; shrink hand-rolled DDL to FTS5/vec0 (SQLite) and journaled extension/tsvector/vector SQL (PG); stamp empty SQLite databases at v10 and reject legacy/non-empty unstamped files; rewrite `docs/db-boundary.md`
 - [ ] Phase 4: Implement Postgres backend (pg Pool, tsvector search docs, pgvector embeddings, jobs with lease reclaim, maintenance/reset, engine-aware UI), validate distance-metric parity, add docker-compose recipe
 - [ ] Phase 5: Port contract tests against both engines (Testcontainers pgvector), parameterize Gate A harness and soak over engine, optional Postgres e2e project
 - [ ] Phase 6: Build `scripts/migrate-engine.ts` for bidirectional SQLite/Postgres library migration with identity preservation; document in runbook; fresh start remains default
@@ -47,8 +47,8 @@ Postgres; otherwise SQLite at `INSTAGRAM_SAVES_DB` (current default path). A
 `getStorage(): Promise<Storage>` factory replaces `getSqlite()`/`getDb()` as
 the app-wide entry point (cached on `globalThis` like today, in
 `src/lib/storage/index.ts`). Connection lifecycle lives in
-`src/lib/storage/sqlite/connection.ts`; `src/lib/db/index.ts` re-exports
-`getSqlite`/`getDb` for ME-2 call-site conversion.
+`src/lib/storage/sqlite/connection.ts`; `src/lib/db/index.ts` keeps internal
+compatibility re-exports while app call sites use the ports.
 
 ## Phase 1 — Define ports and restructure the SQLite code behind them
 
@@ -119,15 +119,17 @@ Exit gate: `pnpm test:all` + e2e green, app behavior-identical on SQLite.
   `src/lib/storage/sqlite/schema.ts` (sqlite-core) and
   `src/lib/storage/postgres/schema.ts` (pg-core).
 - Two drizzle-kit configs and migration folders (`drizzle/sqlite/`,
-  `drizzle/postgres/`); migrations run programmatically at storage init via
-  drizzle's migrator.
+  `drizzle/postgres/`). SQLite migrations run programmatically at storage init
+  via Drizzle's migrator; the Postgres journal is ready for the ME-4 connection
+  bootstrap.
 - Hand-rolled DDL shrinks to a per-engine `ensureSearchSchema`: SQLite keeps
   FTS5 + vec0 create/recreate from `src/lib/db/ddl.ts`; Postgres uses
   custom-SQL migration files for `CREATE EXTENSION vector`, tsvector
   generated columns, and GIN/HNSW indexes (drizzle-kit supports raw SQL
   migrations, so these still live in the journal).
-- Transition for existing SQLite DBs: detect `PRAGMA user_version = 9` and
-  stamp the drizzle journal baseline so existing libraries upgrade in place.
+- Greenfield transition: v10 accepts only an empty database (then applies the
+  journal) or an already journaled v10 database. Versions 1–9 and unstamped
+  non-empty files are rejected with a wipe/reimport instruction.
 - Rewrite `docs/db-boundary.md`: new rule set (Drizzle Kit owns plain tables
   per dialect; hand-rolled SQL owns virtual/extension DDL only; ports own all
   access).
@@ -194,5 +196,5 @@ both engines bootstrap empty databases automatically.
 - The Phase 2 async conversion is the widest change surface (~40 files, 20
   routes); it lands as pure refactor with the full test suite as the gate
   before any Postgres code exists.
-- Drizzle journal baseline-stamping for existing v9 SQLite libraries needs a
-  dedicated upgrade test.
+- The greenfield SQLite gate must continue rejecting legacy and unstamped
+  non-empty files while allowing empty and already journaled v10 databases.

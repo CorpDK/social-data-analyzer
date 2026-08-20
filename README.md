@@ -228,7 +228,7 @@ on the Import page — metadata will backfill without wiping your library.
 ## Stack
 
 - Next.js (App Router)
-- better-sqlite3 + Drizzle schema
+- better-sqlite3 + Drizzle ORM / Drizzle Kit migrations
 - SQLite **WAL**, **FTS5**, and **sqlite-vec**
 - `@napi-rs/keyring` for OS credential storage
 - adm-zip for archive extraction
@@ -239,5 +239,5 @@ on the Import page — metadata will backfill without wiping your library.
 - Media CDN URLs inside exports can expire; the app stores Instagram permalinks.
 - Database files under `data/` are local-only and gitignored (including `-wal` / `-shm`). Import spools under `data/imports/` are also gitignored.
 - Infra-only env vars (not in Settings): `INSTAGRAM_SAVES_DB`, `INSTAGRAM_SAVES_KEYRING=memory` for tests, `EMBEDDING_WORKER_INLINE=1`, `EMBEDDING_WORKER_MAX_OLD_SPACE_MB` (default 2048).
-- Development schema changes apply on hot reload; bump `SCHEMA_VERSION` when adding or changing tables/indexes.
+- SQLite applies pending Drizzle migrations on open. Generate reviewed dialect migrations with `pnpm db:generate`; `SCHEMA_VERSION` marks intentional greenfield compatibility breaks rather than routine schema changes.
 - Schema explorer stores lightweight type trees in `import_schemas` (`import_id`, `file_path`, `schema_json`, sizes). Import parses each JSON file fully (no byte truncation); arrays sample up to 20 elements (first / last / random middle) for element shapes. Existing `import_schemas` rows are not upgraded automatically — re-import to refresh schemas.

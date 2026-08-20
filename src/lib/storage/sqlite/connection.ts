@@ -1,9 +1,8 @@
 /**
  * SQLite connection lifecycle — moved behind storage/ for ME-1/ME-2.
  *
- * Ownership: Drizzle (`getDb` + `db/schema`) owns the relational catalog;
- * raw SQL owns FTS/vec/jobs/`app_settings`/SCHEMA_VERSION DDL (`db/ddl.ts`).
- * See docs/db-boundary.md — do not add Drizzle Kit migrations here.
+ * Ownership: Drizzle Kit owns plain tables; `db/ddl.ts` owns only FTS5/vec0
+ * virtual tables and the greenfield SCHEMA_VERSION stamp.
  *
  * Prefer `getStorage()` from `src/lib/storage` (lazy init + orphan reclaim).
  * `getSqlite` / `getDb` open/schema-ensure only — no top-level HMR ensure.
@@ -17,7 +16,7 @@ import {
   SCHEMA_VERSION,
   ensureDatabaseSchema,
 } from "../../db/ddl";
-import * as schema from "../../db/schema";
+import * as schema from "./schema";
 
 export {
   SCHEMA_VERSION,
@@ -65,7 +64,7 @@ function markSchemaApplied() {
 let schemaEnsuredForModule = false;
 
 /**
- * Open (or return) the process SQLite handle and ensure schema.
+ * Open (or return) the process SQLite handle and run pending migrations.
  * Orphan job reclaim runs from `getStorage()` init (async), not here.
  */
 export function getSqlite() {

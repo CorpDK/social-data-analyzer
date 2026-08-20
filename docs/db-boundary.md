@@ -1,38 +1,57 @@
-# SQLite ownership boundary
+# Database ownership boundary
 
-This app uses one SQLite file (`data/instagram-saves.db` by default) with two
-access styles on purpose. Do not unify them with Drizzle Kit migrations or a
-full ORM rewrite of FTS/vec/jobs.
+The storage layer has one migration rule across engines: Drizzle Kit owns
+ordinary tables; engine-specific SQL owns search features that cannot be
+expressed by the portable schema.
 
 ## Ownership map
 
-| Concern | Owner | Access |
-|---------|--------|--------|
-| Relational catalog (imports, saved_items, liked_items, collections, import_schemas) | Drizzle schema + `getDb()` | `src/lib/db/schema.ts`, `queries.ts`, import write paths |
-| App settings key/value | Raw SQL | `app_settings` via `settings/app-settings.ts` (also created in DDL) |
-| Import / embedding job rows | Raw SQL | `import_jobs`, `embedding_jobs` in `import/jobs.ts`, `search/jobs.ts` |
-| FTS5 indexes | Raw SQL | `saved_items_fts`, `liked_items_fts` — sync + hybrid search |
-| sqlite-vec tables + embedding profiles | Raw SQL | `*_vec_*`, `embedding_index_profiles` — `search/sync.ts`, status |
-| Schema bootstrap / version | Raw SQL DDL | `ensureDatabaseSchema` + `SCHEMA_VERSION` in `src/lib/db/ddl.ts` |
+| Concern | Owner | Location |
+|---------|-------|----------|
+| SQLite plain tables and indexes | Drizzle Kit | `src/lib/storage/sqlite/schema.ts`, `drizzle/sqlite/` |
+| Postgres plain tables and indexes | Drizzle Kit | `src/lib/storage/postgres/schema.ts`, `drizzle/postgres/` |
+| SQLite FTS5 and sqlite-vec virtual tables | SQLite bootstrap SQL | `src/lib/db/ddl.ts` |
+| Postgres vector/tsvector search objects | Custom journaled SQL | `drizzle/postgres/0001_search.sql` |
+| Reads, writes, transactions, and maintenance | Async storage ports | `src/lib/storage/ports.ts`, engine adapters |
+| SQLite connection and migration startup | SQLite storage | `src/lib/storage/sqlite/connection.ts` |
+
+Plain tables include the catalog plus `app_settings`, `embedding_jobs`,
+`import_jobs`, and `embedding_index_profiles`. Do not recreate those tables
+with ad hoc `CREATE TABLE IF NOT EXISTS` statements.
+
+## Migration workflow
+
+1. Change the relevant dialect schema.
+2. Run `pnpm db:generate` (or one of `db:generate:sqlite` /
+   `db:generate:postgres`).
+3. Review the generated SQL and journal metadata.
+4. Put unsupported engine features in a Drizzle custom SQL migration so they
+   remain ordered with the plain-table migrations.
+5. Run unit tests and TypeScript checks.
+
+SQLite migrations run automatically when storage opens. The v10 bootstrap is
+greenfield-only: it accepts an empty database or an already journaled v10
+database. Versions 1–9 and unstamped non-empty files fail with an instruction
+to delete the configured database and perform a fresh import. There is no
+baseline stamp, dual-read path, or in-place legacy upgrade.
+
+`SCHEMA_VERSION` is a clean-break compatibility marker, not the migration
+journal. Bump it only when intentionally starting a new incompatible
+greenfield generation; normal forward schema changes use Drizzle migrations.
 
 ## Rules of thumb
 
-- **Drizzle** = typed CRUD for the relational catalog the UI browses and import
-  persists into.
-- **Raw `better-sqlite3` (`getSqlite()`)** = FTS, vectors, job queues,
-  `app_settings`, and all idempotent DDL / migrations.
-- Bump `SCHEMA_VERSION` whenever the idempotent DDL in `db/ddl.ts` gains or
-  changes a table/index. Development re-applies DDL on module re-evaluation.
-- Do **not** introduce Drizzle Kit migrations while `SCHEMA_VERSION` churn stays
-  rare (see quality roadmap deferred list).
-- Job tables and virtual tables are intentionally absent from
-  `schema.ts` — they are not Drizzle models.
+- App code enters through `await getStorage()` and the async ports.
+- Engine adapters may use their native driver internally; callers must not.
+- Never hand-edit generated snapshot JSON.
+- Never put SQLite virtual tables in the Drizzle schema.
+- Never create unjournaled Postgres extensions, generated search columns, or
+  vector indexes at runtime.
 
 ## Related
 
+- Multi-engine plan: `docs/multi-engine-database-plan.md`
 - Wire/job contracts: `docs/contracts.md`
-- Connection entry: `src/lib/storage` (`getStorage`) + `src/lib/storage/sqlite/connection.ts`
-  (`getSqlite` / `getDb`; internal open/schema — prefer ports at call sites)
-- DDL + `SCHEMA_VERSION`: `src/lib/db/ddl.ts`
-- Drizzle catalog only: `src/lib/db/schema.ts`
-- Ports: `src/lib/storage/ports.ts`; routes/pages/SSE await `getStorage()` (ME-2)
+- SQLite bootstrap: `src/lib/db/ddl.ts`
+- SQLite migration config: `drizzle.sqlite.config.ts`
+- Postgres migration config: `drizzle.postgres.config.ts`

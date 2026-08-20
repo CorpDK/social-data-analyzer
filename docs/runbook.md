@@ -27,16 +27,28 @@ guessing env knobs mid-incident.
   loopback nor the official OpenAI API host. See
   `src/lib/settings/base-url-trust.ts` and `docs/contracts.md`.
 
-## Shortcode / media_key identity (Phase 2)
+## Greenfield database bootstrap (ME-3)
+
+SQLite `SCHEMA_VERSION 10` is the first Drizzle Kit-managed generation.
+Migrations under `drizzle/sqlite/` run automatically when the app opens an
+empty database. Existing versions 1–9 and unstamped non-empty databases are
+intentionally rejected; stop the app, delete the configured SQLite file
+(default `data/instagram-saves.db`, including its `-wal` / `-shm` companions),
+restart, and perform a fresh import.
+
+Schema authors generate reviewed migration files with:
+
+```bash
+pnpm db:generate
+```
+
+Use `pnpm db:generate:sqlite` or `pnpm db:generate:postgres` when changing only
+one dialect. Do not run generated SQL manually against the SQLite app database.
+
+## Shortcode / media_key identity
 
 Instagram shortcodes are **case-sensitive**. `mediaKeyFromHref` preserves shortcode
 case from the href (usernames/hosts are still normalized where appropriate).
-
-**SCHEMA_VERSION 7** runs a one-time repair on open: recomputes `media_key` from
-`href` for `saved_items` / `liked_items` and refreshes matching FTS rows. It never
-deletes or merges rows. If two rows would collide on the corrected key (rare —
-usually means a prior case-fold already collapsed data), both are left unchanged;
-re-import the export to restore a missing case-variant.
 
 Liked comments no longer collapse to `comment:<post>:<author>` alone: prefer
 `fbid` / comment id from the URL, else `post + author + timestamp + content`.

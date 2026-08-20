@@ -88,7 +88,6 @@ export function migrateLegacyProviderEnableKeys(
   sqlite: Database.Database,
 ) {
   if (legacyEnableMigrated.has(sqlite)) return;
-  ensureAppSettingsTable(sqlite);
   for (const provider of PROVIDER_VALUES) {
     const legacyKey = LEGACY_ENABLED_KEYS[provider];
     const legacyValue = getAppSetting(legacyKey, sqlite);
@@ -106,23 +105,10 @@ export function migrateLegacyProviderEnableKeys(
   legacyEnableMigrated.add(sqlite);
 }
 
-export function ensureAppSettingsTable(
-  sqlite: Database.Database,
-) {
-  sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS app_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-  `);
-}
-
 export function getAppSetting(
   key: AppSettingKey,
   sqlite: Database.Database,
 ): string | null {
-  ensureAppSettingsTable(sqlite);
   const row = sqlite
     .prepare(`SELECT value FROM app_settings WHERE key = ?`)
     .get(key) as { value: string } | undefined;
@@ -135,7 +121,6 @@ export function setAppSetting(
   value: string | null,
   sqlite: Database.Database,
 ) {
-  ensureAppSettingsTable(sqlite);
   if (value === null || value.trim() === "") {
     sqlite.prepare(`DELETE FROM app_settings WHERE key = ?`).run(key);
     return;

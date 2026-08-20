@@ -1,225 +1,87 @@
 /**
- * Idempotent SQLite DDL + SCHEMA_VERSION ritual.
+ * Greenfield SQLite bootstrap.
  *
- * Connection lifecycle stays in `./index.ts` (`getSqlite` / `getDb`).
- * Ownership map: docs/db-boundary.md.
+ * Drizzle Kit migrations own ordinary tables. This module owns only the
+ * SQLite-specific FTS5/vec0 virtual tables and the clean-break version stamp.
  */
 import type Database from "better-sqlite3";
-import { repairCaseSensitiveMediaKeys } from "./repair-media-keys";
+import { drizzle } from "drizzle-orm/better-sqlite3";
+import { migrate } from "drizzle-orm/better-sqlite3/migrator";
+import path from "node:path";
 
 /** Fixed sqlite-vec embedding width for all provider tables. */
 export const VEC_DIMENSIONS = 1024;
 
 /**
- * Bump whenever the idempotent schema below gains or changes a table/index.
- * Development re-applies it once per module evaluation for hot-reload safety.
- *
- * v7: case-sensitive shortcode media_key repair (recompute from href).
- * v8: embedding_jobs.worker_pid for restart reclaim (kill stale child before requeue).
- * v9: embedding_jobs.lease_expires_at heartbeat — reclaim expired leases even if PID looks alive.
+ * v10 is the first Drizzle Kit-managed schema. Versions 1–9 are intentionally
+ * unsupported: delete the old database and start with a fresh import.
  */
-export const SCHEMA_VERSION = 9;
+export const SCHEMA_VERSION = 10;
 
-export function ensureDatabaseSchema(sqlite: Database.Database) {
-  const previousVersion = sqlite.pragma("user_version", {
-    simple: true,
-  }) as number;
+const SQLITE_MIGRATIONS_FOLDER = path.join(
+  process.cwd(),
+  "drizzle",
+  "sqlite",
+);
 
-  sqlite.exec(`
-    CREATE TABLE IF NOT EXISTS imports (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      filename TEXT NOT NULL,
-      content_hash TEXT NOT NULL,
-      imported_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      items_found INTEGER NOT NULL DEFAULT 0,
-      items_added INTEGER NOT NULL DEFAULT 0,
-      items_updated INTEGER NOT NULL DEFAULT 0,
-      items_skipped INTEGER NOT NULL DEFAULT 0,
-      status TEXT NOT NULL DEFAULT 'completed',
-      error TEXT,
-      notes TEXT
+function tableExists(sqlite: Database.Database, table: string): boolean {
+  return Boolean(
+    sqlite
+      .prepare(
+        `SELECT 1
+         FROM sqlite_master
+         WHERE type = 'table' AND name = ?`,
+      )
+      .get(table),
+  );
+}
+
+function ordinaryApplicationTables(sqlite: Database.Database): string[] {
+  return (
+    sqlite
+      .prepare(
+        `SELECT name
+         FROM sqlite_master
+         WHERE type = 'table'
+           AND name NOT LIKE 'sqlite_%'
+           AND name <> '__drizzle_migrations'
+         ORDER BY name`,
+      )
+      .all() as Array<{ name: string }>
+  ).map((row) => row.name);
+}
+
+function assertGreenfieldDatabase(sqlite: Database.Database): void {
+  const version = sqlite.pragma("user_version", { simple: true }) as number;
+  const hasMigrationJournal = tableExists(sqlite, "__drizzle_migrations");
+
+  if (version !== 0 && version !== SCHEMA_VERSION) {
+    throw new Error(
+      `Unsupported SQLite schema version ${version}. ` +
+        `ME-3 requires a fresh database; delete the configured SQLite file and re-import.`,
     );
+  }
 
-    CREATE INDEX IF NOT EXISTS imports_content_hash_idx
-      ON imports (content_hash);
-
-    CREATE TABLE IF NOT EXISTS saved_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      media_key TEXT NOT NULL,
-      href TEXT NOT NULL,
-      shortcode TEXT,
-      media_type TEXT NOT NULL DEFAULT 'unknown',
-      author_username TEXT,
-      saved_at INTEGER,
-      first_seen_import_id INTEGER NOT NULL REFERENCES imports(id),
-      last_seen_import_id INTEGER NOT NULL REFERENCES imports(id),
-      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
+  if (
+    (version === 0 && !hasMigrationJournal && ordinaryApplicationTables(sqlite).length > 0) ||
+    (version === SCHEMA_VERSION && !hasMigrationJournal)
+  ) {
+    throw new Error(
+      "Unstamped non-empty SQLite database detected. " +
+        "ME-3 does not upgrade legacy databases; delete the configured SQLite file and re-import.",
     );
+  }
+}
 
-    CREATE UNIQUE INDEX IF NOT EXISTS saved_items_media_key_uidx
-      ON saved_items (media_key);
-    CREATE INDEX IF NOT EXISTS saved_items_author_idx
-      ON saved_items (author_username);
-    CREATE INDEX IF NOT EXISTS saved_items_type_idx
-      ON saved_items (media_type);
-    CREATE INDEX IF NOT EXISTS saved_items_saved_at_idx
-      ON saved_items (saved_at);
-
-    CREATE TABLE IF NOT EXISTS item_collections (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      item_id INTEGER NOT NULL REFERENCES saved_items(id) ON DELETE CASCADE,
-      collection_name TEXT NOT NULL
-    );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS item_collections_uidx
-      ON item_collections (item_id, collection_name);
-    CREATE INDEX IF NOT EXISTS item_collections_name_idx
-      ON item_collections (collection_name);
-
-    CREATE TABLE IF NOT EXISTS app_settings (
-      key TEXT PRIMARY KEY,
-      value TEXT NOT NULL,
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-
-    CREATE TABLE IF NOT EXISTS import_schemas (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      import_id INTEGER NOT NULL REFERENCES imports(id) ON DELETE CASCADE,
-      file_path TEXT NOT NULL,
-      byte_size INTEGER NOT NULL DEFAULT 0,
-      truncated_read INTEGER NOT NULL DEFAULT 0,
-      top_level_type TEXT NOT NULL DEFAULT 'unknown',
-      schema_json TEXT NOT NULL,
-      created_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS import_schemas_import_path_uidx
-      ON import_schemas (import_id, file_path);
-    CREATE INDEX IF NOT EXISTS import_schemas_import_id_idx
-      ON import_schemas (import_id);
-    CREATE INDEX IF NOT EXISTS import_schemas_file_path_idx
-      ON import_schemas (file_path);
-
-    CREATE TABLE IF NOT EXISTS liked_items (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      media_key TEXT NOT NULL,
-      href TEXT NOT NULL,
-      shortcode TEXT,
-      media_type TEXT NOT NULL DEFAULT 'unknown',
-      author_username TEXT,
-      liked_at INTEGER,
-      source TEXT NOT NULL DEFAULT 'liked_posts',
-      first_seen_import_id INTEGER NOT NULL REFERENCES imports(id),
-      last_seen_import_id INTEGER NOT NULL REFERENCES imports(id),
-      created_at INTEGER NOT NULL DEFAULT (unixepoch()),
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS liked_items_media_key_uidx
-      ON liked_items (media_key);
-    CREATE INDEX IF NOT EXISTS liked_items_author_idx
-      ON liked_items (author_username);
-    CREATE INDEX IF NOT EXISTS liked_items_type_idx
-      ON liked_items (media_type);
-    CREATE INDEX IF NOT EXISTS liked_items_liked_at_idx
-      ON liked_items (liked_at);
-    CREATE INDEX IF NOT EXISTS liked_items_source_idx
-      ON liked_items (source);
-  `);
-
-  ensureEmbeddingJobsTable(sqlite);
-  ensureImportJobsTable(sqlite);
+/**
+ * Apply pending plain-table migrations, then ensure engine-specific search
+ * objects. Safe to call repeatedly for a v10 database.
+ */
+export function ensureDatabaseSchema(sqlite: Database.Database): void {
+  assertGreenfieldDatabase(sqlite);
+  migrate(drizzle(sqlite), { migrationsFolder: SQLITE_MIGRATIONS_FOLDER });
   ensureSearchSchema(sqlite);
-
-  // One-time data repair when upgrading past v6: restore shortcode case in
-  // media_key from href without deleting/merging colliding rows.
-  if (previousVersion < 7) {
-    repairCaseSensitiveMediaKeys(sqlite);
-  }
-
   sqlite.pragma(`user_version = ${SCHEMA_VERSION}`);
-}
-
-const EMBEDDING_JOBS_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS embedding_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    target TEXT NOT NULL,
-    state TEXT NOT NULL DEFAULT 'running',
-    phase TEXT NOT NULL DEFAULT 'queued',
-    processed INTEGER NOT NULL DEFAULT 0,
-    total INTEGER NOT NULL DEFAULT 0,
-    current_provider TEXT,
-    error TEXT,
-    message TEXT,
-    cancel_requested INTEGER NOT NULL DEFAULT 0,
-    worker_pid INTEGER,
-    lease_expires_at INTEGER,
-    started_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    finished_at INTEGER,
-    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-  );
-
-  CREATE INDEX IF NOT EXISTS embedding_jobs_state_idx
-    ON embedding_jobs (state);
-  CREATE INDEX IF NOT EXISTS embedding_jobs_started_idx
-    ON embedding_jobs (started_at DESC);
-`;
-
-function tableHasColumn(
-  sqlite: Database.Database,
-  table: string,
-  column: string,
-): boolean {
-  const cols = sqlite.prepare(`PRAGMA table_info(${table})`).all() as Array<{
-    name: string;
-  }>;
-  return cols.some((c) => c.name === column);
-}
-
-function ensureEmbeddingJobsTable(sqlite: Database.Database) {
-  sqlite.exec(EMBEDDING_JOBS_SCHEMA);
-  // CREATE TABLE IF NOT EXISTS does not add columns on existing DBs.
-  if (!tableHasColumn(sqlite, "embedding_jobs", "worker_pid")) {
-    sqlite.exec(`ALTER TABLE embedding_jobs ADD COLUMN worker_pid INTEGER`);
-  }
-  if (!tableHasColumn(sqlite, "embedding_jobs", "lease_expires_at")) {
-    sqlite.exec(
-      `ALTER TABLE embedding_jobs ADD COLUMN lease_expires_at INTEGER`,
-    );
-  }
-}
-
-const IMPORT_JOBS_SCHEMA = `
-  CREATE TABLE IF NOT EXISTS import_jobs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    filename TEXT NOT NULL,
-    content_hash TEXT,
-    spool_path TEXT NOT NULL,
-    kind TEXT NOT NULL DEFAULT 'zip',
-    state TEXT NOT NULL DEFAULT 'pending',
-    phase TEXT NOT NULL DEFAULT 'queued',
-    processed INTEGER NOT NULL DEFAULT 0,
-    total INTEGER NOT NULL DEFAULT 0,
-    message TEXT,
-    error TEXT,
-    details TEXT,
-    result TEXT,
-    import_id INTEGER REFERENCES imports(id),
-    cancel_requested INTEGER NOT NULL DEFAULT 0,
-    started_at INTEGER NOT NULL DEFAULT (unixepoch()),
-    finished_at INTEGER,
-    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-  );
-
-  CREATE INDEX IF NOT EXISTS import_jobs_state_idx
-    ON import_jobs (state);
-  CREATE INDEX IF NOT EXISTS import_jobs_started_idx
-    ON import_jobs (started_at DESC);
-`;
-
-function ensureImportJobsTable(sqlite: Database.Database) {
-  sqlite.exec(IMPORT_JOBS_SCHEMA);
 }
 
 const FTS_TOKENIZE = "porter unicode61 remove_diacritics 1";
@@ -263,48 +125,33 @@ function vectorTableCreateSql(
   };
 }
 
-function ensureSearchSchema(sqlite: Database.Database) {
-  const legacyRemoteProvider = migrateEmbeddingProfilesTable(sqlite);
-
-  const ftsExists = sqlite
-    .prepare(
-      `SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'saved_items_fts'`,
-    )
-    .get();
-
-  if (!ftsExists) {
+/** Ensure SQLite-only virtual search tables after plain-table migrations. */
+export function ensureSearchSchema(sqlite: Database.Database): void {
+  if (!tableExists(sqlite, "saved_items_fts")) {
     sqlite.exec(SAVED_ITEMS_FTS_CREATE_SQL);
   }
-
-  const likesFtsExists = sqlite
-    .prepare(
-      `SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'liked_items_fts'`,
-    )
-    .get();
-
-  if (!likesFtsExists) {
+  if (!tableExists(sqlite, "liked_items_fts")) {
     sqlite.exec(LIKED_ITEMS_FTS_CREATE_SQL);
   }
 
   for (const index of VECTOR_INDEXES) {
-    ensureVectorTable(sqlite, "saves", index);
-    ensureVectorTable(sqlite, "likes", index);
+    for (const library of ["saves", "likes"] as const) {
+      const { table, sql } = vectorTableCreateSql(library, index);
+      if (!tableExists(sqlite, table)) {
+        sqlite.exec(sql);
+      }
+    }
   }
-  migrateLegacyRemoteVectorTable(sqlite, legacyRemoteProvider);
 }
 
 /**
- * Drop and recreate empty FTS + vector indexes so the app stays usable after
- * a content wipe. Uses the same DDL strings as `ensureSearchSchema`.
- * Does not touch `app_settings` or keyring secrets.
+ * Drop and recreate empty FTS + vector indexes after a content wipe.
+ * Ordinary tables and the Drizzle journal remain untouched.
  */
-export function recreateEmptySearchIndexes(sqlite: Database.Database) {
+export function recreateEmptySearchIndexes(sqlite: Database.Database): void {
   sqlite.exec(`
     DROP TABLE IF EXISTS saved_items_fts;
     ${SAVED_ITEMS_FTS_CREATE_SQL};
-  `);
-
-  sqlite.exec(`
     DROP TABLE IF EXISTS liked_items_fts;
     ${LIKED_ITEMS_FTS_CREATE_SQL};
   `);
@@ -318,176 +165,4 @@ export function recreateEmptySearchIndexes(sqlite: Database.Database) {
       `);
     }
   }
-
-  sqlite.exec(`DROP TABLE IF EXISTS saved_items_vec_remote;`);
 }
-
-const PROFILE_INDEX_CHECK =
-  "('local', 'ollama', 'openai', 'voyage', 'likes-local', 'likes-ollama', 'likes-openai', 'likes-voyage')";
-
-const PROFILE_INDEX_NAMES = [
-  "local",
-  "ollama",
-  "openai",
-  "voyage",
-  "likes-local",
-  "likes-ollama",
-  "likes-openai",
-  "likes-voyage",
-] as const;
-
-/** Returns the legacy remote provider when migrating off `saved_items_vec_remote`. */
-function migrateEmbeddingProfilesTable(
-  sqlite: Database.Database,
-): "openai" | "voyage" | null {
-  const table = sqlite
-    .prepare(
-      `SELECT sql FROM sqlite_master
-       WHERE type = 'table' AND name = 'embedding_index_profiles'`,
-    )
-    .get() as { sql: string | null } | undefined;
-
-  const needsRemoteMigration = table?.sql?.includes("'remote'") ?? false;
-  const needsOllama =
-    Boolean(table) && !(table?.sql?.includes("'ollama'") ?? false);
-  const needsLikesProfiles =
-    Boolean(table) && !(table?.sql?.includes("'likes-local'") ?? false);
-
-  if (!table) {
-    sqlite.exec(`
-      CREATE TABLE embedding_index_profiles (
-        index_name TEXT PRIMARY KEY CHECK (index_name IN ${PROFILE_INDEX_CHECK}),
-        provider TEXT NOT NULL,
-        model TEXT NOT NULL,
-        dimensions INTEGER NOT NULL,
-        endpoint TEXT,
-        updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-      );
-    `);
-    return null;
-  }
-
-  if (!needsRemoteMigration && !needsOllama && !needsLikesProfiles) return null;
-
-  const legacyRemote = needsRemoteMigration
-    ? (sqlite
-        .prepare(
-          `SELECT provider, model, dimensions, endpoint, updated_at
-           FROM embedding_index_profiles WHERE index_name = 'remote'`,
-        )
-        .get() as
-        | {
-            provider: string;
-            model: string;
-            dimensions: number;
-            endpoint: string | null;
-            updated_at: number;
-          }
-        | undefined)
-    : undefined;
-
-  const allowed = PROFILE_INDEX_NAMES.map((name) => `'${name}'`).join(", ");
-
-  sqlite.exec(`
-    CREATE TABLE embedding_index_profiles_new (
-      index_name TEXT PRIMARY KEY CHECK (index_name IN ${PROFILE_INDEX_CHECK}),
-      provider TEXT NOT NULL,
-      model TEXT NOT NULL,
-      dimensions INTEGER NOT NULL,
-      endpoint TEXT,
-      updated_at INTEGER NOT NULL DEFAULT (unixepoch())
-    );
-    INSERT INTO embedding_index_profiles_new(
-      index_name, provider, model, dimensions, endpoint, updated_at
-    )
-    SELECT index_name, provider, model, dimensions, endpoint, updated_at
-    FROM embedding_index_profiles
-    WHERE index_name IN (${allowed});
-  `);
-
-  let migratedProvider: "openai" | "voyage" | null = null;
-  if (
-    legacyRemote &&
-    (legacyRemote.provider === "openai" || legacyRemote.provider === "voyage")
-  ) {
-    migratedProvider = legacyRemote.provider;
-    sqlite
-      .prepare(
-        `INSERT OR REPLACE INTO embedding_index_profiles_new(
-          index_name, provider, model, dimensions, endpoint, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        legacyRemote.provider,
-        legacyRemote.provider,
-        legacyRemote.model,
-        legacyRemote.dimensions,
-        legacyRemote.endpoint,
-        legacyRemote.updated_at,
-      );
-  }
-
-  sqlite.exec(`
-    DROP TABLE embedding_index_profiles;
-    ALTER TABLE embedding_index_profiles_new RENAME TO embedding_index_profiles;
-  `);
-  return migratedProvider;
-}
-
-function ensureVectorTable(
-  sqlite: Database.Database,
-  library: "saves" | "likes",
-  index: (typeof VECTOR_INDEXES)[number],
-) {
-  const { table, sql } = vectorTableCreateSql(library, index);
-  const profileKey = library === "saves" ? index : `likes-${index}`;
-  const definition = sqlite
-    .prepare(
-      `SELECT sql FROM sqlite_master
-       WHERE type = 'table' AND name = ?`,
-    )
-    .get(table) as { sql: string | null } | undefined;
-
-  const dimensions = Number(
-    definition?.sql?.match(/embedding\s+FLOAT\[(\d+)\]/i)?.[1],
-  );
-  if (!definition || dimensions !== VEC_DIMENSIONS) {
-    sqlite.exec(`
-      DROP TABLE IF EXISTS ${table};
-      ${sql};
-      DELETE FROM embedding_index_profiles WHERE index_name = '${profileKey}';
-    `);
-  }
-}
-
-function migrateLegacyRemoteVectorTable(
-  sqlite: Database.Database,
-  target: "openai" | "voyage" | null,
-) {
-  const remoteExists = sqlite
-    .prepare(
-      `SELECT 1 AS ok FROM sqlite_master
-       WHERE type = 'table' AND name = 'saved_items_vec_remote'`,
-    )
-    .get();
-
-  if (!remoteExists) return;
-
-  if (target) {
-    const targetTable = `saved_items_vec_${target}`;
-    const targetCount = (
-      sqlite
-        .prepare(`SELECT count(*) AS c FROM ${targetTable}`)
-        .get() as { c: number }
-    ).c;
-    if (targetCount === 0) {
-      sqlite.exec(`
-        INSERT INTO ${targetTable}(item_id, embedding)
-        SELECT item_id, embedding FROM saved_items_vec_remote;
-      `);
-    }
-  }
-
-  sqlite.exec(`DROP TABLE IF EXISTS saved_items_vec_remote;`);
-}
-

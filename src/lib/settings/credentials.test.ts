@@ -9,6 +9,11 @@ const getKeyringStatus = vi.fn(() => ({
   backend: "memory" as const,
   message: null,
 }));
+const sqlite = {};
+
+vi.mock("../db", () => ({
+  getSqlite: () => sqlite,
+}));
 
 vi.mock("./app-settings", () => ({
   getEmbeddingTimeoutMs: () => 30_000,
