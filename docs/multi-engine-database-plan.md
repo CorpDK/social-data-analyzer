@@ -160,10 +160,11 @@ SQLite APIs from returning to runner files.
   partial indexes per provider.
 - **Search**: `websearch_to_tsquery` + `ts_rank` replaces `MATCH`/`rank`
   (port of `buildFtsQuery`); KNN via `ORDER BY embedding <=> $1 LIMIT k`.
-  Validation item: sqlite-vec `vec0` defaults to L2 distance while pgvector
-  `<=>` is cosine — confirm the current metric and normalize
-  behavior/thresholds (`VEC_DISTANCE_MAX`/`SLACK`) so RRF ranking stays
-  comparable across engines.
+  Distance parity is resolved: sqlite-vec `vec0` uses L2 while pgvector `<=>`
+  is cosine, so embeddings are unit-normalized before storage. Cosine distance
+  then equals L2² / 2, preserving nearest-neighbor order, and the SQLite
+  `VEC_DISTANCE_MAX` default of 1.22 maps to a cosine cutoff of 0.7442. Unit
+  tests cover the conversion.
 - **Jobs**: identical columns and lease semantics (`worker_pid`,
   `lease_expires_at`); the embedding worker child keeps its process design,
   opening its own connection — reclaim's `/proc` cmdline probe is
@@ -221,12 +222,16 @@ secondary, requires typed confirmation, and accepts only an unused empty target.
 There is no dual-read, dual-write, legacy-schema upgrade, or automatic migration
 during app startup.
 
-## Key risks
+## Key risks (status)
 
 - Distance-metric parity (L2 vs cosine) between sqlite-vec and pgvector —
-  must be validated in Phase 4 before hybrid thresholds are trusted.
-- The Phase 2 async conversion is the widest change surface (~40 files, 20
-  routes); it lands as pure refactor with the full test suite as the gate
-  before any Postgres code exists.
+  closed by unit-normalizing embeddings before storage; conversion unit-tested.
+- The Phase 2 async conversion (widest change surface, ~40 files, 20 routes) —
+  closed; it landed as a pure refactor with the full suite green before any
+  Postgres code existed.
 - The greenfield SQLite gate must continue rejecting legacy and unstamped
-  non-empty files while allowing empty and already journaled v10 databases.
+  non-empty files while allowing empty and already journaled v10 databases —
+  covered by tests; keep this assertion in place as the schema evolves.
+- A crash mid-migration must not leave a silently half-migrated target —
+  mitigated by the SQLite staging-file rename and the Postgres `in_progress`
+  marker that `getPostgresPool` refuses; recovery is retry-or-recreate.
