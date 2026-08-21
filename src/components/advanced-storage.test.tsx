@@ -39,5 +39,13 @@ describe("AdvancedStorage", () => {
     );
 
     expect(await screen.findByText("PostgreSQL connection URL")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/settings/advanced-storage",
+      expect.objectContaining({
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ enabled: true }),
+      }),
+    );
   });
 });

@@ -30,6 +30,10 @@ describe("isAllowedLocalHostname", () => {
     expect(isAllowedLocalHostname("192.168.1.10")).toBe(false);
     expect(isAllowedLocalHostname("0.0.0.0")).toBe(false);
   });
+
+  it("allows IPv4-mapped loopback from Node sockets", () => {
+    expect(isAllowedLocalHostname("::ffff:127.0.0.1")).toBe(true);
+  });
 });
 
 describe("evaluateLocalMutatingRequest", () => {
@@ -86,11 +90,40 @@ describe("evaluateLocalMutatingRequest", () => {
     });
   });
 
-  it("rejects X-Forwarded-* instead of trusting them", () => {
+  it("accepts Next.js-injected loopback X-Forwarded-* headers", () => {
+    const result = evaluateLocalMutatingRequest(
+      req({
+        host: "127.0.0.1:3000",
+        origin: "http://127.0.0.1:3000",
+        "x-forwarded-host": "127.0.0.1:3000",
+        "x-forwarded-proto": "http",
+        "x-forwarded-for": "::1",
+      }),
+      noToken,
+    );
+    expect(result).toEqual({ ok: true });
+  });
+
+  it("rejects spoofed X-Forwarded-* instead of trusting them", () => {
     const result = evaluateLocalMutatingRequest(
       req({
         host: "127.0.0.1:3000",
         "x-forwarded-host": "evil.example",
+      }),
+      noToken,
+    );
+    expect(result).toMatchObject({
+      ok: false,
+      reason: "forwarded_header",
+      status: 403,
+    });
+  });
+
+  it("rejects non-loopback X-Forwarded-For", () => {
+    const result = evaluateLocalMutatingRequest(
+      req({
+        host: "127.0.0.1:3000",
+        "x-forwarded-for": "8.8.8.8",
       }),
       noToken,
     );
