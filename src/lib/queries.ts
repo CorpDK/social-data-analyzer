@@ -137,6 +137,7 @@ export type SavesQuery = {
   page?: number;
   pageSize?: number;
   provider?: string;
+  membership?: "both";
 };
 
 export async function listSaves(query: SavesQuery) {
@@ -223,6 +224,15 @@ export async function listSaves(query: SavesQuery) {
         select 1 from ${itemCollections}
         where ${itemCollections.itemId} = ${media.id}
           and ${itemCollections.collectionName} = ${query.collection}
+      )`,
+    );
+  }
+
+  if (query.membership === "both") {
+    conditions.push(
+      sql`exists (
+        select 1 from ${liked}
+        where ${liked.mediaId} = ${media.id}
       )`,
     );
   }
@@ -367,6 +377,7 @@ export type LikesQuery = {
   page?: number;
   pageSize?: number;
   provider?: string;
+  membership?: "both";
 };
 
 export async function listLikes(query: LikesQuery) {
@@ -447,6 +458,15 @@ export async function listLikes(query: LikesQuery) {
 
   if (query.author) {
     conditions.push(eq(media.authorUsername, query.author));
+  }
+
+  if (query.membership === "both") {
+    conditions.push(
+      sql`exists (
+        select 1 from ${saved}
+        where ${saved.mediaId} = ${media.id}
+      )`,
+    );
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;

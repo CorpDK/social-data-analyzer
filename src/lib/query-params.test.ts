@@ -108,6 +108,7 @@ describe("parseBrowseFilterParams", () => {
       author: "creator",
       collection: "Food",
       provider: "local",
+      membership: undefined,
     });
   });
 
@@ -136,7 +137,7 @@ describe("parseBrowseFilterParams", () => {
     expect(longCollection.ok).toBe(false);
   });
 
-  it("rejects unknown media types and accepts likes-only types", () => {
+  it("rejects unknown and comment media types and accepts likes stories", () => {
     const bad = parseBrowseFilterParams(new URLSearchParams("type=carousel"), {
       library: "saves",
     });
@@ -153,6 +154,12 @@ describe("parseBrowseFilterParams", () => {
       { library: "likes" },
     );
     expect(storyOnLikes).toMatchObject({ ok: true, type: "story" });
+
+    const comments = parseBrowseFilterParams(
+      new URLSearchParams("type=comment"),
+      { library: "likes" },
+    );
+    expect(comments.ok).toBe(false);
   });
 
   it("ignores collection for likes library", () => {
@@ -161,5 +168,18 @@ describe("parseBrowseFilterParams", () => {
       { library: "likes" },
     );
     expect(result).toMatchObject({ ok: true, collection: undefined });
+  });
+
+  it("accepts only the indexed overlap membership filter", () => {
+    expect(
+      parseBrowseFilterParams(new URLSearchParams("membership=both"), {
+        library: "saves",
+      }),
+    ).toMatchObject({ ok: true, membership: "both" });
+    expect(
+      parseBrowseFilterParams(new URLSearchParams("membership=saved"), {
+        library: "likes",
+      }).ok,
+    ).toBe(false);
   });
 });

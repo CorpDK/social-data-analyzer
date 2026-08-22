@@ -15,22 +15,32 @@ import type {
   SearchProviderInfoDto,
 } from "@/lib/search/status-dto";
 
-type LikeRow = {
+type Library = "saves" | "likes";
+
+type MediaRow = {
   id: number;
   href: string;
   shortcode: string | null;
   mediaType: string;
   authorUsername: string | null;
-  likedAt: string | null;
-  source: string;
-  alsoSaved?: boolean;
+  savedAt?: string | null;
+  likedAt?: string | null;
+  collections?: string[];
+  source?: string;
+  membership: {
+    saved: boolean;
+    liked: boolean;
+  };
 };
 
 type ProviderInfo = SearchProviderInfoDto;
-type LikesResponse = BrowseListResponse<LikeRow>;
-type FilterOptions = BrowseFilterOptions;
+type MediaResponse = BrowseListResponse<MediaRow>;
+type FilterOptions = BrowseFilterOptions & { collections?: string[] };
 
-const PROVIDER_STORAGE_KEY = "instagram-likes-search-provider";
+const PROVIDER_STORAGE_KEYS: Record<Library, string> = {
+  saves: "instagram-saves-search-provider",
+  likes: "instagram-likes-search-provider",
+};
 
 const PROVIDER_LABELS: Record<EmbeddingProvider, string> = {
   local: "Local (basic)",
@@ -39,7 +49,25 @@ const PROVIDER_LABELS: Record<EmbeddingProvider, string> = {
   voyage: "Voyage",
 };
 
-function formatDate(value: string | null) {
+const TYPE_OPTIONS: Record<Library, ReadonlyArray<[string, string]>> = {
+  saves: [
+    ["all", "All"],
+    ["post", "Posts"],
+    ["reel", "Reels"],
+    ["igtv", "IGTV"],
+    ["unknown", "Unknown"],
+  ],
+  likes: [
+    ["all", "All"],
+    ["post", "Posts"],
+    ["reel", "Reels"],
+    ["story", "Stories"],
+    ["igtv", "IGTV"],
+    ["unknown", "Unknown"],
+  ],
+};
+
+function formatDate(value: string | null | undefined) {
   if (!value) return "—";
   return new Date(value).toLocaleString(undefined, {
     dateStyle: "medium",
@@ -56,13 +84,14 @@ function isProvider(value: string | null): value is EmbeddingProvider {
   );
 }
 
-function readStoredProvider(): EmbeddingProvider | null {
+function readStoredProvider(library: Library): EmbeddingProvider | null {
   if (typeof window === "undefined") return null;
-  const stored = window.localStorage.getItem(PROVIDER_STORAGE_KEY);
+  const stored = window.localStorage.getItem(PROVIDER_STORAGE_KEYS[library]);
   return isProvider(stored) ? stored : null;
 }
 
 function resolveProvider(
+  library: Library,
   providerParam: string | null,
   providers: ProviderInfo | null,
 ): EmbeddingProvider {
@@ -72,38 +101,66 @@ function resolveProvider(
   ) {
     return providerParam;
   }
-  const stored = readStoredProvider();
+  const stored = readStoredProvider(library);
   if (stored && (!providers || providers.available.includes(stored))) {
     return stored;
   }
   return providers?.default ?? "local";
 }
 
-export function LikesBrowser({
+export function canonicalizeProviderQuery(
+  searchKey: string,
+  desired: EmbeddingProvider,
+  defaultProvider: EmbeddingProvider,
+): string {
+  const next = new URLSearchParams(searchKey);
+  if (desired === defaultProvider) next.delete("provider");
+  else next.set("provider", desired);
+  return next.toString();
+}
+
+export function formatBrowseTotal(
+  data: Pick<MediaResponse, "total" | "totalCapped" | "searchCap">,
+): string {
+  const noun = data.total === 1 && !data.totalCapped ? "item" : "items";
+  const cap =
+    data.totalCapped && data.searchCap
+      ? ` · top ${data.searchCap.toLocaleString()} matches`
+      : "";
+  return `${data.total.toLocaleString()}${data.totalCapped ? "+" : ""} ${noun}${cap}`;
+}
+
+export function MediaBrowser({
+  library,
   keywordTech = "FTS5",
   vectorTech = "sqlite-vec",
 }: {
+  library: Library;
   keywordTech?: string;
   vectorTech?: string;
 }) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [pending, startTransition] = useTransition();
-
-  const [data, setData] = useState<LikesResponse | null>(null);
+  const [data, setData] = useState<MediaResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [providers, setProviders] = useState<ProviderInfo | null>(null);
   const [filters, setFilters] = useState<FilterOptions>({ authors: [] });
   const [error, setError] = useState<string | null>(null);
 
+  const route = `/${library}`;
+  const isSaves = library === "saves";
   const q = searchParams.get("q") ?? "";
   const type = searchParams.get("type") ?? "all";
   const author = searchParams.get("author") ?? "";
+  const collection = isSaves
+    ? (searchParams.get("collection") ?? "")
+    : "";
+  const membership = searchParams.get("membership") ?? "";
   const page = Number(searchParams.get("page") ?? "1");
   const providerParam = searchParams.get("provider");
   const searchKey = searchParams.toString();
-
-  const activeProvider = resolveProvider(providerParam, providers);
+  const activeProvider = resolveProvider(library, providerParam, providers);
 
   const updateParams = useCallback(
     (patch: Record<string, string | null>) => {
@@ -117,81 +174,74 @@ export function LikesBrowser({
         const providerValue =
           patch.provider ?? providers?.default ?? "local";
         if (isProvider(providerValue)) {
-          window.localStorage.setItem(PROVIDER_STORAGE_KEY, providerValue);
+          window.localStorage.setItem(
+            PROVIDER_STORAGE_KEYS[library],
+            providerValue,
+          );
         }
       }
       const nextKey = next.toString();
       if (nextKey === searchParams.toString()) return;
       startTransition(() => {
-        router.push(nextKey ? `/likes?${nextKey}` : "/likes");
+        router.push(nextKey ? `${route}?${nextKey}` : route);
       });
     },
-    [router, searchParams, providers],
+    [library, providers, route, router, searchParams],
   );
 
   useEffect(() => {
     let cancelled = false;
-
     async function loadProviders() {
       try {
-        const res = await fetch("/api/search/providers?library=likes");
+        const res = await fetch(`/api/search/providers?library=${library}`);
         if (!res.ok) return;
         const json = parseSearchProviderInfo(await res.json());
         if (!cancelled && json) setProviders(json);
       } catch {
-        // optional
+        // Provider metadata is optional for rendering.
       }
     }
-
     void loadProviders();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [library]);
 
   useEffect(() => {
     let cancelled = false;
-
     async function loadFilters() {
       try {
-        const res = await fetch("/api/likes?filters=1");
+        const res = await fetch(`/api/${library}?filters=1`);
         if (!res.ok) return;
         const json = parseBrowseFilterOptions(await res.json());
         if (!cancelled && json) setFilters(json);
       } catch {
-        // optional
+        // Filter options are optional for rendering.
       }
     }
-
     void loadFilters();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [library]);
 
   useEffect(() => {
     if (!providers) return;
-
-    const desired = resolveProvider(providerParam, providers);
-    const next = new URLSearchParams(searchKey);
-    if (desired === providers.default) next.delete("provider");
-    else next.set("provider", desired);
-
-    const nextKey = next.toString();
-    if (nextKey === searchKey) {
-      window.localStorage.setItem(PROVIDER_STORAGE_KEY, desired);
-      return;
-    }
-
-    window.localStorage.setItem(PROVIDER_STORAGE_KEY, desired);
+    const desired = resolveProvider(library, providerParam, providers);
+    const nextKey = canonicalizeProviderQuery(
+      searchKey,
+      desired,
+      providers.default,
+    );
+    window.localStorage.setItem(PROVIDER_STORAGE_KEYS[library], desired);
+    if (nextKey === searchKey) return;
     startTransition(() => {
-      router.replace(nextKey ? `/likes?${nextKey}` : "/likes");
+      router.replace(nextKey ? `${route}?${nextKey}` : route);
     });
-  }, [providers, providerParam, router, searchKey]);
+  }, [library, providerParam, providers, route, router, searchKey]);
 
   useEffect(() => {
     const controller = new AbortController();
-
     async function load() {
       setError(null);
       setLoading(true);
@@ -200,32 +250,44 @@ export function LikesBrowser({
         if (q) params.set("q", q);
         if (type) params.set("type", type);
         if (author) params.set("author", author);
+        if (collection) params.set("collection", collection);
+        if (membership) params.set("membership", membership);
         if (activeProvider) params.set("provider", activeProvider);
         params.set("page", String(page || 1));
         params.set("pageSize", "25");
-
-        const res = await fetch(`/api/likes?${params.toString()}`, {
+        const res = await fetch(`/api/${library}?${params.toString()}`, {
           signal: controller.signal,
         });
-        if (!res.ok) throw new Error("Failed to load likes");
-        const json = parseBrowseListResponse<LikeRow>(await res.json());
-        if (!json) throw new Error("Invalid likes response");
+        if (!res.ok) throw new Error(`Failed to load ${library}`);
+        const json = parseBrowseListResponse<MediaRow>(await res.json());
+        if (!json) throw new Error(`Invalid ${library} response`);
         if (!controller.signal.aborted) setData(json);
-      } catch (err) {
+      } catch (caught) {
         if (controller.signal.aborted) return;
-        setError(err instanceof Error ? err.message : "Failed to load");
+        setError(caught instanceof Error ? caught.message : "Failed to load");
       } finally {
         if (!controller.signal.aborted) setLoading(false);
       }
     }
-
     void load();
     return () => controller.abort();
-  }, [q, type, author, page, activeProvider]);
+  }, [
+    activeProvider,
+    author,
+    collection,
+    library,
+    membership,
+    page,
+    q,
+    type,
+  ]);
 
   const providerOptions = providers?.available ?? ["local"];
   const showProviderControl = providerOptions.length > 1;
   const isRefreshing = pending || loading;
+  const oppositeRoute = isSaves ? "/likes" : "/saves";
+  const oppositeLabel = isSaves ? "Liked" : "Saved";
+  const extraColumnCount = isSaves ? 1 : 1;
 
   return (
     <div className="space-y-6">
@@ -234,17 +296,16 @@ export function LikesBrowser({
           Browse
         </p>
         <h1 className="font-[family-name:var(--font-fraunces)] text-4xl tracking-tight">
-          Liked media
+          {isSaves ? "Saved media" : "Liked media"}
         </h1>
         <p className="text-[var(--muted)]">
-          Keyword ({keywordTech}) and semantic ({vectorTech}) search over creators,
-          shortcodes, and like sources. The Saved column marks media also in
-          your saves library.
+          Keyword ({keywordTech}) and semantic ({vectorTech}) search over
+          creators, shortcodes, and {isSaves ? "collections" : "like sources"}.
         </p>
       </section>
 
       <form
-        className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4 sm:grid-cols-2 lg:grid-cols-3"
+        className="grid gap-3 rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-4 sm:grid-cols-2 lg:grid-cols-5"
         onSubmit={(event) => {
           event.preventDefault();
           const form = new FormData(event.currentTarget);
@@ -252,6 +313,10 @@ export function LikesBrowser({
             q: String(form.get("q") || "") || null,
             type: String(form.get("type") || "all"),
             author: String(form.get("author") || "") || null,
+            collection: isSaves
+              ? String(form.get("collection") || "") || null
+              : null,
+            membership: String(form.get("membership") || "") || null,
           });
         }}
       >
@@ -260,7 +325,9 @@ export function LikesBrowser({
           <input
             name="q"
             defaultValue={q}
-            placeholder="creator, shortcode…"
+            placeholder={
+              isSaves ? "creator, collection, shortcode…" : "creator, shortcode…"
+            }
             className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-2 outline-none ring-[var(--accent)] focus:ring-2"
           />
         </label>
@@ -271,13 +338,11 @@ export function LikesBrowser({
             defaultValue={type}
             className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-2 outline-none ring-[var(--accent)] focus:ring-2"
           >
-            <option value="all">All</option>
-            <option value="post">Posts</option>
-            <option value="reel">Reels</option>
-            <option value="story">Stories</option>
-            <option value="comment">Comments</option>
-            <option value="igtv">IGTV</option>
-            <option value="unknown">Unknown</option>
+            {TYPE_OPTIONS[library].map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
           </select>
         </label>
         <label className="block text-sm">
@@ -295,7 +360,35 @@ export function LikesBrowser({
             ))}
           </select>
         </label>
-        <div className="sm:col-span-2 lg:col-span-3">
+        {isSaves ? (
+          <label className="block text-sm">
+            <span className="mb-1 block text-[var(--muted)]">Collection</span>
+            <select
+              name="collection"
+              defaultValue={collection}
+              className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-2 outline-none ring-[var(--accent)] focus:ring-2"
+            >
+              <option value="">All collections</option>
+              {(filters.collections ?? []).map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </label>
+        ) : null}
+        <label className="block text-sm">
+          <span className="mb-1 block text-[var(--muted)]">Membership</span>
+          <select
+            name="membership"
+            defaultValue={membership}
+            className="w-full rounded-xl border border-[var(--line)] bg-[var(--bg)] px-3 py-2 outline-none ring-[var(--accent)] focus:ring-2"
+          >
+            <option value="">All {library}</option>
+            <option value="both">Saved and liked</option>
+          </select>
+        </label>
+        <div className="sm:col-span-2 lg:col-span-5">
           <button
             type="submit"
             className="rounded-full bg-[var(--ink)] px-4 py-2 text-sm text-[var(--surface)]"
@@ -312,7 +405,7 @@ export function LikesBrowser({
               Semantic search provider
             </p>
             <p className="text-xs text-[var(--muted)]">
-              Keyword search stays on {keywordTech}. Only the likes vector path changes.
+              Keyword search stays on {keywordTech}. Only the vector path changes.
             </p>
           </div>
           <div
@@ -328,7 +421,10 @@ export function LikesBrowser({
                   type="button"
                   aria-pressed={selected}
                   onClick={() => {
-                    window.localStorage.setItem(PROVIDER_STORAGE_KEY, option);
+                    window.localStorage.setItem(
+                      PROVIDER_STORAGE_KEYS[library],
+                      option,
+                    );
                     updateParams({
                       provider:
                         option === providers?.default ? null : option,
@@ -348,30 +444,22 @@ export function LikesBrowser({
         </div>
       ) : null}
 
-      {error ? (
-        <p className="text-sm text-[var(--danger)]">{error}</p>
-      ) : null}
+      {error ? <p className="text-sm text-[var(--danger)]">{error}</p> : null}
 
       <div className="rounded-2xl border border-[var(--line)] bg-[var(--surface)]">
         <div className="flex flex-col gap-1 border-b border-[var(--line)] px-4 py-3 text-sm text-[var(--muted)] sm:flex-row sm:items-center sm:justify-between">
           <span>
             {data
-              ? `${data.total.toLocaleString()}${data.totalCapped ? "+" : ""} item${data.total === 1 && !data.totalCapped ? "" : "s"}`
+              ? formatBrowseTotal(data)
               : "Loading…"}
-            {data?.totalCapped && data.searchCap
-              ? ` · top ${data.searchCap.toLocaleString()} matches`
-              : ""}
             {data?.searchMode &&
             data.searchMode !== "none" &&
             q.trim() !== ""
               ? ` · ${data.searchMode} search`
               : ""}
-            {data?.searchProvider &&
-            data.searchMode &&
-            !["none", "like", "fts"].includes(data.searchMode)
-              ? ` · ${data.searchProvider}`
+            {data?.searchProvider && q.trim() !== ""
+              ? ` · ${PROVIDER_LABELS[data.searchProvider]}`
               : ""}
-            {data?.providerFallback ? " · local fallback" : ""}
             {data && isRefreshing ? " · updating" : ""}
           </span>
           {data && data.totalPages > 1 ? (
@@ -380,9 +468,8 @@ export function LikesBrowser({
             </span>
           ) : null}
         </div>
-
         {data?.providerFallbackReason ? (
-          <p className="border-b border-[var(--line)] px-4 py-2 text-xs text-[var(--muted)]">
+          <p className="border-b border-[var(--line)] px-4 py-2 text-xs text-[var(--danger)]">
             {data.providerFallbackReason}
           </p>
         ) : null}
@@ -397,72 +484,96 @@ export function LikesBrowser({
               <tr>
                 <th className="px-4 py-3 font-medium">Creator</th>
                 <th className="px-4 py-3 font-medium">Type</th>
-                <th className="px-4 py-3 font-medium">Liked</th>
-                <th className="px-4 py-3 font-medium">Source</th>
-                <th className="px-4 py-3 font-medium">Saved</th>
+                <th className="px-4 py-3 font-medium">
+                  {isSaves ? "Saved" : "Liked"}
+                </th>
+                <th className="px-4 py-3 font-medium">
+                  {isSaves ? "Collections" : "Source"}
+                </th>
+                <th className="px-4 py-3 font-medium">{oppositeLabel}</th>
                 <th className="px-4 py-3 font-medium">Link</th>
               </tr>
             </thead>
             <tbody>
-              {(data?.items ?? []).map((item) => (
-                <tr key={item.id} className="border-t border-[var(--line)]/80">
-                  <td className="px-4 py-3 font-medium">
-                    {item.authorUsername ? (
-                      <Link
-                        href={`/likes?author=${encodeURIComponent(item.authorUsername)}`}
-                        className="hover:text-[var(--accent)]"
+              {(data?.items ?? []).map((item) => {
+                const overlaps = isSaves
+                  ? item.membership.liked
+                  : item.membership.saved;
+                return (
+                  <tr key={item.id} className="border-t border-[var(--line)]/80">
+                    <td className="px-4 py-3 font-medium">
+                      {item.authorUsername ? (
+                        <Link
+                          href={`${route}?author=${encodeURIComponent(item.authorUsername)}`}
+                          className="hover:text-[var(--accent)]"
+                        >
+                          @{item.authorUsername}
+                        </Link>
+                      ) : (
+                        <span className="text-[var(--muted)]">unknown</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 capitalize text-[var(--muted)]">
+                      {item.mediaType}
+                    </td>
+                    <td className="px-4 py-3 text-[var(--muted)]">
+                      {formatDate(isSaves ? item.savedAt : item.likedAt)}
+                    </td>
+                    <td className="px-4 py-3">
+                      {isSaves ? (
+                        <div className="flex flex-wrap gap-1">
+                          {(item.collections ?? []).length === 0 ? (
+                            <span className="text-[var(--muted)]">—</span>
+                          ) : (
+                            item.collections!.map((name) => (
+                              <Link
+                                key={name}
+                                href={`${route}?collection=${encodeURIComponent(name)}`}
+                                className="rounded-full bg-[var(--chip)] px-2 py-0.5 text-xs hover:bg-[var(--accent-soft)]"
+                              >
+                                {name}
+                              </Link>
+                            ))
+                          )}
+                        </div>
+                      ) : (
+                        <span className="text-[var(--muted)]">
+                          {(item.source ?? "unknown").replace(/_/g, " ")}
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {overlaps ? (
+                        <Link
+                          href={`${oppositeRoute}?q=${encodeURIComponent(item.shortcode ?? item.href)}`}
+                          className="inline-flex rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--accent)] hover:underline"
+                        >
+                          {oppositeLabel}
+                        </Link>
+                      ) : (
+                        <span className="text-[var(--muted)]">—</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <a
+                        href={item.href}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[var(--accent)] hover:underline"
                       >
-                        @{item.authorUsername}
-                      </Link>
-                    ) : (
-                      <span className="text-[var(--muted)]">unknown</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 capitalize text-[var(--muted)]">
-                    {item.mediaType}
-                  </td>
-                  <td className="px-4 py-3 text-[var(--muted)]">
-                    {formatDate(item.likedAt)}
-                  </td>
-                  <td className="px-4 py-3 text-[var(--muted)]">
-                    {item.source.replace(/_/g, " ")}
-                  </td>
-                  <td className="px-4 py-3">
-                    {item.alsoSaved ? (
-                      <Link
-                        href={
-                          item.shortcode
-                            ? `/saves?q=${encodeURIComponent(item.shortcode)}`
-                            : `/saves?q=${encodeURIComponent(item.href)}`
-                        }
-                        className="inline-flex rounded-full bg-[var(--accent-soft)] px-2 py-0.5 text-[11px] font-medium text-[var(--accent)] hover:underline"
-                      >
-                        Saved
-                      </Link>
-                    ) : (
-                      <span className="text-[var(--muted)]">—</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <a
-                      href={item.href}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="text-[var(--accent)] hover:underline"
-                    >
-                      Open
-                    </a>
-                  </td>
-                </tr>
-              ))}
+                        Open
+                      </a>
+                    </td>
+                  </tr>
+                );
+              })}
               {data && data.items.length === 0 ? (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={5 + extraColumnCount}
                     className="px-4 py-10 text-center text-[var(--muted)]"
                   >
-                    No likes match these filters. Re-import an export that
-                    includes likes activity.
+                    No {library} match these filters.
                   </td>
                 </tr>
               ) : null}

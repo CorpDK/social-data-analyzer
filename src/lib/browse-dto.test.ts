@@ -65,4 +65,23 @@ describe("browse-dto guards", () => {
       }),
     ).toBeNull();
   });
+
+  it("preserves bidirectional membership DTOs", () => {
+    const response = parseBrowseListResponse<{
+      membership: { saved: boolean; liked: boolean };
+    }>({
+      items: [
+        { membership: { saved: true, liked: true } },
+        { membership: { saved: false, liked: true } },
+      ],
+      total: 2,
+      page: 1,
+      pageSize: 25,
+      totalPages: 1,
+    });
+    expect(response?.items.map((item) => item.membership)).toEqual([
+      { saved: true, liked: true },
+      { saved: false, liked: true },
+    ]);
+  });
 });

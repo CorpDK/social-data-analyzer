@@ -152,6 +152,10 @@ function registerStorageContracts(backend: ContractBackend) {
         "save-alpha",
         "save-gamma",
       ]);
+      expect(saves.items[0]?.membership).toEqual({
+        saved: true,
+        liked: true,
+      });
       expect(await storage.catalog.listSavesFilterOptions()).toEqual({
         authors: ["alice", "bob", "carol"],
         collections: ["Recipes", "Travel"],
@@ -165,6 +169,25 @@ function registerStorageContracts(backend: ContractBackend) {
       expect(likes.items).toHaveLength(1);
       expect(likes.items[0]?.mediaKey).toBe("save-alpha");
       expect(likes.items[0]?.membership).toEqual({ saved: true, liked: true });
+
+      const overlappingSaves = await storage.catalog.listSaves({
+        page: 1,
+        pageSize: 10,
+        membership: "both",
+      });
+      const overlappingLikes = await storage.catalog.listLikes({
+        page: 1,
+        pageSize: 10,
+        membership: "both",
+      });
+      expect(overlappingSaves.total).toBe(1);
+      expect(overlappingSaves.items.map((item) => item.mediaKey)).toEqual([
+        "save-alpha",
+      ]);
+      expect(overlappingLikes.total).toBe(1);
+      expect(overlappingLikes.items.map((item) => item.mediaKey)).toEqual([
+        "save-alpha",
+      ]);
 
       expect(await storage.catalog.countPersistedImportRows(seeded.importId)).toEqual({
         itemsAdded: 3,

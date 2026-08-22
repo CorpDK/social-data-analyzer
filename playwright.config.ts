@@ -14,6 +14,9 @@ const e2eDbPath = path.join(
   os.tmpdir(),
   `instagram-saves-e2e-${process.pid}.db`,
 );
+const e2ePort = process.env.PLAYWRIGHT_PORT ?? "3000";
+const e2eBaseUrl =
+  process.env.PLAYWRIGHT_BASE_URL ?? `http://127.0.0.1:${e2ePort}`;
 
 export default defineConfig({
   testDir: "./e2e",
@@ -23,7 +26,7 @@ export default defineConfig({
   workers: 1,
   reporter: process.env.CI ? "github" : "list",
   use: {
-    baseURL: "http://127.0.0.1:3000",
+    baseURL: e2eBaseUrl,
     trace: "on-first-retry",
   },
   projects: [
@@ -33,8 +36,8 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "pnpm dev",
-    url: "http://127.0.0.1:3000",
+    command: `pnpm exec next dev -H 127.0.0.1 -p ${e2ePort}`,
+    url: e2eBaseUrl,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
     env: {

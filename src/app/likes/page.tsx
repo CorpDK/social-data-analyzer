@@ -1,5 +1,5 @@
 import { Suspense } from "react";
-import { LikesBrowser } from "@/components/likes-browser";
+import { MediaBrowser } from "@/components/media-browser";
 import { getStorage } from "@/lib/storage";
 
 export default async function LikesPage() {
@@ -10,7 +10,8 @@ export default async function LikesPage() {
         <p className="text-sm text-[var(--muted)]">Loading likes…</p>
       }
     >
-      <LikesBrowser
+      <MediaBrowser
+        library="likes"
         keywordTech={info.searchTech.keyword}
         vectorTech={info.searchTech.vector}
       />

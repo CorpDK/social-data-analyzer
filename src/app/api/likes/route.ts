@@ -30,6 +30,7 @@ export async function GET(request: Request) {
     page: pageParams.page,
     pageSize: pageParams.pageSize,
     provider: filters.provider,
+    membership: filters.membership,
   });
 
   return NextResponse.json(data);

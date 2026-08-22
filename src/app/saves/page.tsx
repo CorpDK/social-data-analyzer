@@ -1,5 +1,5 @@
 import { Suspense } from "react";
-import { SavesBrowser } from "@/components/saves-browser";
+import { MediaBrowser } from "@/components/media-browser";
 import { getStorage } from "@/lib/storage";
 
 export default async function SavesPage() {
@@ -10,7 +10,8 @@ export default async function SavesPage() {
         <p className="text-sm text-[var(--muted)]">Loading saves…</p>
       }
     >
-      <SavesBrowser
+      <MediaBrowser
+        library="saves"
         keywordTech={info.searchTech.keyword}
         vectorTech={info.searchTech.vector}
       />

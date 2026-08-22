@@ -498,6 +498,10 @@ export function createPostgresCatalogStore(pool: Pool): CatalogStore {
           `EXISTS (SELECT 1 FROM item_collections c WHERE c.item_id=m.id
            AND c.collection_name=${add(query.collection)})`,
         );
+      if (query.membership === "both")
+        filters.push(
+          "EXISTS (SELECT 1 FROM liked l WHERE l.media_id=m.id)",
+        );
       const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
       const count = await pool.query<{ count: string }>(
         `SELECT count(*) FROM saved i JOIN media m ON m.id=i.media_id ${where}`,
@@ -553,6 +557,10 @@ export function createPostgresCatalogStore(pool: Pool): CatalogStore {
       if (query.type && query.type !== "all")
         filters.push(`m.media_type=${add(query.type)}`);
       if (query.author) filters.push(`m.author_username=${add(query.author)}`);
+      if (query.membership === "both")
+        filters.push(
+          "EXISTS (SELECT 1 FROM saved s WHERE s.media_id=m.id)",
+        );
       const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
       const count = await pool.query<{ count: string }>(
         `SELECT count(*) FROM liked i JOIN media m ON m.id=i.media_id ${where}`,

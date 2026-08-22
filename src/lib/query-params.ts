@@ -35,9 +35,10 @@ const LIKES_MEDIA_TYPES = new Set([
   "reel",
   "igtv",
   "story",
-  "comment",
   "unknown",
 ]);
+
+const MEMBERSHIP_FILTERS = new Set(["both"]);
 
 export type BrowseFilterParamsResult =
   | {
@@ -47,6 +48,7 @@ export type BrowseFilterParamsResult =
       author?: string;
       collection?: string;
       provider?: string;
+      membership?: "both";
     }
   | { ok: false; error: string };
 
@@ -124,6 +126,18 @@ export function parseBrowseFilterParams(
   });
   if (!provider.ok) return provider;
 
+  const membership = parseBoundedStringParam(searchParams.get("membership"), {
+    name: "membership",
+    maxLen: 16,
+  });
+  if (!membership.ok) return membership;
+  if (membership.value && !MEMBERSHIP_FILTERS.has(membership.value)) {
+    return {
+      ok: false,
+      error: "Invalid membership: must be both",
+    };
+  }
+
   return {
     ok: true,
     q: q.value,
@@ -131,6 +145,7 @@ export function parseBrowseFilterParams(
     author: author.value,
     collection: collection.value,
     provider: provider.value,
+    membership: membership.value as "both" | undefined,
   };
 }
 
