@@ -127,12 +127,13 @@ Exit gate: `pnpm test:all` + e2e green, app behavior-identical on SQLite.
   bootstrap.
 - Hand-rolled DDL shrinks to a per-engine `ensureSearchSchema`: SQLite keeps
   FTS5 + vec0 create/recreate from `src/lib/db/ddl.ts`; Postgres uses
-  custom-SQL migration files for `CREATE EXTENSION vector`, tsvector
-  generated columns, and GIN/HNSW indexes (drizzle-kit supports raw SQL
-  migrations, so these still live in the journal).
-- Greenfield transition: v10 accepts only an empty database (then applies the
-  journal) or an already journaled v10 database. Versions 1–9 and unstamped
-  non-empty files are rejected with a wipe/reimport instruction.
+  custom-SQL migration files for tsvector generated columns and GIN/HNSW
+  indexes (drizzle-kit supports raw SQL migrations, so these still live in the
+  journal). The database-level vector extension must already be installed.
+- Greenfield transition: SCHEMA_VERSION 11 accepts only an empty database
+  (then applies the journal) or an already journaled v11 database. Earlier and
+  unstamped non-empty files are rejected with a wipe/reimport instruction; no
+  v10 backfill exists.
 - Rewrite `docs/db-boundary.md`: new rule set (Drizzle Kit owns plain tables
   per dialect; hand-rolled SQL owns virtual/extension DDL only; ports own all
   access).
@@ -150,14 +151,15 @@ SQLite APIs from returning to runner files.
 `src/lib/storage/postgres/` implementing all five ports over a `pg` Pool:
 
 - **Schema mapping**: identity columns for autoincrement PKs;
-  `timestamptz`/epoch handling replacing `unixepoch()`; per-library
+  `timestamptz`/epoch handling replacing `unixepoch()`; canonical `media`
+  identity with thin `saved` / `liked` memberships; per-library
   search-doc tables `saved_items_search` / `liked_items_search` (denormalized
   author/shortcode/media_key/media_type/collections-or-source, tsvector
   generated column, GIN index) maintained by the same delete+insert pattern
-  as FTS5 today; embeddings as
-  `saved_item_embeddings(item_id, provider, embedding vector(1024))`
-  (PK `(item_id, provider)`) + likes twin, exact `<=>` KNN with optional HNSW
-  partial indexes per provider.
+  as FTS5 today; embeddings as one
+  `media_embeddings(media_id, provider, embedding vector(1024))` table (PK
+  `(media_id, provider)`), exact `<=>` KNN filtered through the requested
+  membership, with an optional HNSW index.
 - **Search**: `websearch_to_tsquery` + `ts_rank` replaces `MATCH`/`rank`
   (port of `buildFtsQuery`); KNN via `ORDER BY embedding <=> $1 LIMIT k`.
   Distance parity is resolved: sqlite-vec `vec0` uses L2 while pgvector `<=>`
@@ -190,9 +192,10 @@ starts a `pgvector/pgvector:pg17` service, sets the URL, and runs
 `pnpm test:pg` (fail-loud if the URL is set but Postgres is unreachable).
 `pnpm test:contracts` is the same suite without requiring Docker.
 
-The contracts cover all five ports, including import-adjacent catalog writes
-and rollback, FTS, normalized 1024-dimension vector ranking, embedding/import
-job lifecycles, settings, busy-state enforcement, integrity, and reset.
+The contracts cover all five ports, including canonical media/membership
+overlap, import-adjacent catalog writes and rollback, FTS, normalized
+1024-dimension vector ranking, shared-vector projection, embedding/import job
+lifecycles, settings, busy-state enforcement, integrity, and reset.
 `scripts/soak-scale.ts` accepts `--engine=sqlite|postgres` and uses storage
 ports for count and integrity assertions. Gate A remains in `test:all`, while
 its database behavior is exercised through the shared storage contracts.
@@ -205,8 +208,11 @@ Implementation status: complete. Settings uses the same copy path for the
 default engine-switch action and reports table/vector/search/integrity progress
 over SSE. `pnpm migrate:engine` provides the equivalent offline operation with
 explicit source/target flags. Both preserve catalog and import IDs, collections,
-schemas, settings, embedding profiles, and vectors; CLI job history is copied
-only with `--include-jobs`. Search documents are rebuilt from the copied catalog.
+schemas, settings, embedding profiles, and vectors; v11 preserves `media.id`
+across engines. PostgreSQL keeps one vector per media+provider, while SQLite
+copies those bytes into each applicable library vec0 projection. CLI job
+history is copied only with `--include-jobs`. Search documents are rebuilt from
+the copied catalog.
 The operation refuses a finished non-empty target and verifies target integrity.
 
 Crash-safety residual (ME-6): a kill mid-copy must not leave a silently
@@ -230,7 +236,7 @@ during app startup.
   closed; it landed as a pure refactor with the full suite green before any
   Postgres code existed.
 - The greenfield SQLite gate must continue rejecting legacy and unstamped
-  non-empty files while allowing empty and already journaled v10 databases —
+  non-empty files while allowing empty and already journaled v11 databases —
   covered by tests; keep this assertion in place as the schema evolves.
 - A crash mid-migration must not leave a silently half-migrated target —
   mitigated by the SQLite staging-file rename and the Postgres `in_progress`

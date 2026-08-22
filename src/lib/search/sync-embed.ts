@@ -4,8 +4,7 @@
  */
 import type { SearchIndex } from "../storage";
 import {
-  buildLikedSearchDocument,
-  buildSearchDocument,
+  buildMediaEmbeddingText,
 } from "./document";
 import {
   embedTextLocal,
@@ -87,7 +86,7 @@ async function generateSavesEmbeddingsChunk(
   config: EmbeddingConfig,
 ): Promise<GeneratedEmbedding[]> {
   if (rows.length === 0) return [];
-  const texts = rows.map((row) => buildSearchDocument(row).combined);
+  const texts = rows.map(buildMediaEmbeddingText);
   const embeddings = await embedTexts(texts, config);
   return rows.map((row, i) => ({
     id: row.id,
@@ -100,7 +99,7 @@ async function generateLikesEmbeddingsChunk(
   config: EmbeddingConfig,
 ): Promise<GeneratedEmbedding[]> {
   if (rows.length === 0) return [];
-  const texts = rows.map((row) => buildLikedSearchDocument(row).combined);
+  const texts = rows.map(buildMediaEmbeddingText);
   const embeddings = await embedTexts(texts, config);
   return rows.map((row, i) => ({
     id: row.id,
@@ -128,6 +127,33 @@ async function prepareVectorTableForStore(
   }
   // Extending an existing table: upsert (DELETE + INSERT) per row.
   return { writeMode: "upsert" };
+}
+
+async function projectReusableEmbeddings(
+  library: SearchLibrary,
+  index: VectorIndexName,
+  rows: Array<{ id: number }>,
+  config: EmbeddingConfig,
+  search: SearchIndex,
+): Promise<Set<number>> {
+  const sourceLibrary = library === "saves" ? "likes" : "saves";
+  const sourceProfile = await search.getIndexedEmbeddingProfile(
+    sourceLibrary,
+    index,
+  );
+  if (
+    !sourceProfile ||
+    !embeddingProfilesMatch(sourceProfile, config.profile) ||
+    (await search.vectorTableDimensions(sourceLibrary, index)) !==
+      config.profile.dimensions
+  ) {
+    return new Set();
+  }
+  return search.projectExistingEmbeddings(
+    library,
+    index,
+    rows.map((row) => row.id),
+  );
 }
 
 /**
@@ -166,16 +192,27 @@ export async function storeEmbeddingsChunked(
     const existing = await existingEmbeddingItemIds(library, index, search);
     // Count only ids we would otherwise embed, so progress can't exceed total
     // when the table holds vectors for since-deleted items.
-    alreadyDone = (rows as Array<{ id: number }>).filter((row) =>
-      existing.has(row.id),
-    ).length;
-    workRows = (rows as Array<{ id: number }>).filter(
-      (row) => !existing.has(row.id),
-    ) as typeof rows;
     // Resume keeps existing rows, so writes must be idempotent: the skip set is
     // a snapshot, and a re-run (or a leftover row from an interrupted chunk)
     // would otherwise fail the whole job on a primary-key conflict.
     writeMode = "upsert";
+    const remaining = (rows as Array<{ id: number }>).filter(
+      (row) => !existing.has(row.id),
+    );
+    const projected = await projectReusableEmbeddings(
+      library,
+      index,
+      remaining,
+      config,
+      search,
+    );
+    const reusable = new Set([...existing, ...projected]);
+    alreadyDone = (rows as Array<{ id: number }>).filter((row) =>
+      reusable.has(row.id),
+    ).length;
+    workRows = (rows as Array<{ id: number }>).filter(
+      (row) => !reusable.has(row.id),
+    ) as typeof rows;
   } else {
     writeMode = (await prepareVectorTableForStore(
       library,
@@ -184,6 +221,17 @@ export async function storeEmbeddingsChunked(
       replace || wantResume,
       search,
     )).writeMode;
+    const projected = await projectReusableEmbeddings(
+      library,
+      index,
+      rows as Array<{ id: number }>,
+      config,
+      search,
+    );
+    alreadyDone = projected.size;
+    workRows = (rows as Array<{ id: number }>).filter(
+      (row) => !projected.has(row.id),
+    ) as typeof rows;
   }
 
   let processed = alreadyDone;
@@ -231,23 +279,33 @@ export async function storeLocalEmbeddingsChunked(
     true,
     search,
   );
+  const projected = await projectReusableEmbeddings(
+    library,
+    "local",
+    rows as Array<{ id: number }>,
+    config,
+    search,
+  );
+  const workRows = (rows as Array<{ id: number }>).filter(
+    (row) => !projected.has(row.id),
+  ) as typeof rows;
   if (library === "saves") {
-    for (const chunk of chunkRows(rows as SavesSearchRow[])) {
+    for (const chunk of chunkRows(workRows as SavesSearchRow[])) {
       const generated: GeneratedEmbedding[] = chunk.map((row) => ({
         id: row.id,
         embedding: embedTextLocal(
-          buildSearchDocument(row).combined,
+          buildMediaEmbeddingText(row),
           config.profile.dimensions,
         ),
       }));
       await search.writeEmbeddingChunk(library, "local", generated, writeMode);
     }
   } else {
-    for (const chunk of chunkRows(rows as LikesSearchRow[])) {
+    for (const chunk of chunkRows(workRows as LikesSearchRow[])) {
       const generated: GeneratedEmbedding[] = chunk.map((row) => ({
         id: row.id,
         embedding: embedTextLocal(
-          buildLikedSearchDocument(row).combined,
+          buildMediaEmbeddingText(row),
           config.profile.dimensions,
         ),
       }));

@@ -27,14 +27,18 @@ guessing env knobs mid-incident.
   loopback nor the official OpenAI API host. See
   `src/lib/settings/base-url-trust.ts` and `docs/contracts.md`.
 
-## Greenfield database bootstrap (ME-3)
+## Greenfield database bootstrap (SCHEMA 11)
 
-SQLite `SCHEMA_VERSION 10` is the first Drizzle Kit-managed generation.
-Migrations under `drizzle/sqlite/` run automatically when the app opens an
-empty database. Existing versions 1–9 and unstamped non-empty databases are
-intentionally rejected; stop the app, delete the configured SQLite file
-(default `data/instagram-saves.db`, including its `-wal` / `-shm` companions),
-restart, and perform a fresh import.
+SQLite `SCHEMA_VERSION 11` is the canonical-media generation. Migrations under
+`drizzle/sqlite/` run automatically when the app opens an empty database.
+Earlier schema versions and unstamped non-empty databases are intentionally
+rejected; there is no v10 backfill. Stop the app, delete the configured SQLite
+file (default `data/instagram-saves.db`, including its `-wal` / `-shm`
+companions), restart, and perform a fresh import.
+
+In v11, `media.id` is the stable catalog/search id. `saved` and `liked` are
+membership rows keyed by that id; collections remain saved-only and `source`
+remains liked-only. Search FTS rows and SQLite vec0 rows also use `media.id`.
 
 Schema authors generate reviewed migration files with:
 
@@ -58,9 +62,10 @@ pnpm dev
 ```
 
 Use `INSTAGRAM_SAVES_POSTGRES_PORT=55432` (both for Compose and in the URL) when
-port 5432 is occupied. Storage startup applies `drizzle/postgres/` automatically,
-including the `vector` extension, generated `tsvector` documents, and indexes.
-Unset `INSTAGRAM_SAVES_DATABASE_URL` to return to SQLite.
+port 5432 is occupied. Storage startup applies `drizzle/postgres/`
+automatically, including generated `tsvector` documents and indexes. The
+database-level `vector` extension must already be installed; the app does not
+create it at runtime. Unset `INSTAGRAM_SAVES_DATABASE_URL` to return to SQLite.
 
 Postgres app tables, search indexes, `engine_migration`, and the Drizzle journal
 live in `INSTAGRAM_SAVES_PG_SCHEMA` (default `instagram_saves`), including on a
@@ -198,10 +203,13 @@ pnpm migrate:engine -- \
 The SQLite path and Postgres URL are always required (the URL may instead come
 from `INSTAGRAM_SAVES_DATABASE_URL`).
 The command refuses a non-empty target, preserves catalog/import identities,
-copies collections, import schemas, settings, embedding profiles and vectors,
-rebuilds FTS on the target, and runs an integrity check. Finished job history
-is operational metadata and is omitted by default; add `--include-jobs` only
-when you intentionally want it copied. Spool files referenced by imported job
+copies canonical `media.id` values and saved/liked memberships, collections,
+import schemas, settings, embedding profiles and vectors, rebuilds FTS on the
+target, and runs an integrity check. Postgres stores one
+`media_embeddings(media_id, provider)` row; SQLite projects the same vector
+bytes into each applicable library vec0 table. Finished job history is
+operational metadata and is omitted by default; add `--include-jobs` only when
+you intentionally want it copied. Spool files referenced by imported job
 history are not moved.
 
 SQLite destinations are copied into a sibling `*.engine-migrate` file and
@@ -308,6 +316,14 @@ the spool.
 3. Cancel stops the **active** job only.
 4. Logs: `[search] job=…` in the Next process; `[embedding-worker] job=…` in
    the child when workers are enabled.
+
+Embedding input is media-only (author, shortcode, media key, media type, and a
+future caption). Collections and like source remain in their library-specific
+FTS documents and never alter vectors. When one media id belongs to both
+libraries, the first enabled library generates the provider vector and the
+second reuses it. PostgreSQL reuses the canonical row directly; SQLite copies
+the bytes between vec0 projections, so Voyage/OpenAI/Ollama are not called
+twice for overlap.
 
 ### Search readiness (no sync backfill on browse)
 

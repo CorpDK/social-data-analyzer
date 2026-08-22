@@ -34,8 +34,7 @@ type ContractBackend = {
 };
 
 const POSTGRES_RESET_TABLES = [
-  "saved_item_embeddings",
-  "liked_item_embeddings",
+  "media_embeddings",
   "saved_items_search",
   "liked_items_search",
   "import_schemas",
@@ -43,8 +42,9 @@ const POSTGRES_RESET_TABLES = [
   "import_jobs",
   "embedding_jobs",
   "embedding_index_profiles",
-  "saved_items",
-  "liked_items",
+  "saved",
+  "liked",
+  "media",
   "imports",
   "app_settings",
 ].join(", ");
@@ -94,11 +94,11 @@ async function seedCatalog(storage: Storage) {
   ]);
   const likes = await storage.catalog.applyLikedItems(imported.id, [
     {
-      mediaKey: "like-alpha",
-      href: "https://www.instagram.com/p/LikeAlpha/",
-      shortcode: "LikeAlpha",
+      mediaKey: "save-alpha",
+      href: "https://www.instagram.com/p/Alpha/",
+      shortcode: "Alpha",
       mediaType: "post",
-      authorUsername: "dana",
+      authorUsername: "alice",
       likedAt: new Date("2026-01-04T00:00:00.000Z"),
       source: "liked_posts",
     },
@@ -160,10 +160,11 @@ function registerStorageContracts(backend: ContractBackend) {
       const likes = await storage.catalog.listLikes({
         page: 1,
         pageSize: 10,
-        author: "dana",
+        author: "alice",
       });
       expect(likes.items).toHaveLength(1);
-      expect(likes.items[0]?.mediaKey).toBe("like-alpha");
+      expect(likes.items[0]?.mediaKey).toBe("save-alpha");
+      expect(likes.items[0]?.membership).toEqual({ saved: true, liked: true });
 
       expect(await storage.catalog.countPersistedImportRows(seeded.importId)).toEqual({
         itemsAdded: 3,
@@ -234,6 +235,30 @@ function registerStorageContracts(backend: ContractBackend) {
         dimensions: 1024,
         endpoint: null,
       });
+
+      await storage.search.recreateVectorTable("likes", "local", 1024);
+      await storage.search.writeEmbeddingProfile("likes", "local", {
+        provider: "local",
+        model: "contract-1024",
+        dimensions: 1024,
+        endpoint: null,
+      });
+      expect(
+        await storage.search.projectExistingEmbeddings(
+          "likes",
+          "local",
+          [saveIds[0]!],
+        ),
+      ).toEqual(new Set([saveIds[0]]));
+      expect(await storage.search.vecCount("likes", "local")).toBe(1);
+      const projectedHits = await storage.search.searchVector(
+        "likes",
+        "local",
+        vector([0, 1]),
+        1,
+      );
+      expect(projectedHits[0]?.id).toBe(saveIds[0]);
+      expect(projectedHits[0]?.distance).toBeCloseTo(0, 5);
 
       const integrity = await storage.search.assessVectorIntegrity(
         "saves",

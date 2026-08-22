@@ -14,6 +14,23 @@ export type LikedSearchableItem = {
   source: string;
 };
 
+type MediaSearchableItem = Pick<
+  SearchableItem,
+  "authorUsername" | "shortcode" | "mediaKey" | "mediaType"
+>;
+
+/** Stable embedding input shared by Saves and Likes membership projections. */
+export function buildMediaEmbeddingText(item: MediaSearchableItem): string {
+  return [
+    item.authorUsername ?? "",
+    item.shortcode ?? "",
+    item.mediaKey,
+    item.mediaType,
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 export function buildSearchDocument(item: SearchableItem): {
   authorUsername: string;
   shortcode: string;
@@ -27,15 +44,7 @@ export function buildSearchDocument(item: SearchableItem): {
   const mediaKey = item.mediaKey;
   const mediaType = item.mediaType;
   const collections = item.collections.filter(Boolean).join(" ");
-  const combined = [
-    authorUsername,
-    shortcode,
-    mediaKey,
-    mediaType,
-    collections,
-  ]
-    .filter(Boolean)
-    .join("\n");
+  const combined = buildMediaEmbeddingText(item);
 
   return {
     authorUsername,
@@ -60,9 +69,7 @@ export function buildLikedSearchDocument(item: LikedSearchableItem): {
   const mediaKey = item.mediaKey;
   const mediaType = item.mediaType;
   const source = item.source ?? "";
-  const combined = [authorUsername, shortcode, mediaKey, mediaType, source]
-    .filter(Boolean)
-    .join("\n");
+  const combined = buildMediaEmbeddingText(item);
 
   return {
     authorUsername,

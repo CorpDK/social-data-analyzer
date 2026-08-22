@@ -53,9 +53,32 @@ function seedSqliteLibrary(file: string): void {
         media_id, saved_at, first_seen_import_id, last_seen_import_id,
         created_at, updated_at
       ) VALUES (1, unixepoch(), 1, 1, unixepoch(), unixepoch());
+      INSERT INTO liked (
+        media_id, liked_at, source, first_seen_import_id, last_seen_import_id,
+        created_at, updated_at
+      ) VALUES (
+        1, unixepoch(), 'liked_posts', 1, 1, unixepoch(), unixepoch()
+      );
       INSERT INTO item_collections (id, item_id, collection_name)
       VALUES (1, 1, 'Recipes');
+      INSERT INTO embedding_index_profiles (
+        index_name, provider, model, dimensions, endpoint, updated_at
+      ) VALUES
+        ('local', 'local', 'feature-hash-v1', 1024, NULL, unixepoch()),
+        ('likes-local', 'local', 'feature-hash-v1', 1024, NULL, unixepoch());
     `);
+    const vector = Buffer.alloc(1024 * Float32Array.BYTES_PER_ELEMENT);
+    vector.writeFloatLE(1, 0);
+    sqlite
+      .prepare(
+        "INSERT INTO saved_items_vec_local(item_id, embedding) VALUES (?, ?)",
+      )
+      .run(1, vector);
+    sqlite
+      .prepare(
+        "INSERT INTO liked_items_vec_local(item_id, embedding) VALUES (?, ?)",
+      )
+      .run(1, vector);
   } finally {
     sqlite.close();
   }
@@ -207,6 +230,22 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
       await assertPostgresMigrationUsable(completed, isolated.schema);
       const storage = createPostgresStorage(completed);
       expect((await storage.catalog.getStats()).totalItems).toBe(1);
+      const copied = await completed.query<{
+        media_id: number;
+        saved: boolean;
+        liked: boolean;
+        embeddings: number;
+      }>(`
+        SELECT m.id AS media_id,
+          EXISTS (SELECT 1 FROM saved s WHERE s.media_id=m.id) AS saved,
+          EXISTS (SELECT 1 FROM liked l WHERE l.media_id=m.id) AS liked,
+          (SELECT count(*)::int FROM media_embeddings e
+            WHERE e.media_id=m.id AND e.provider='local') AS embeddings
+        FROM media m
+      `);
+      expect(copied.rows).toEqual([
+        { media_id: 1, saved: true, liked: true, embeddings: 1 },
+      ]);
     } finally {
       await completed.end();
     }
@@ -281,7 +320,7 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
         status: "completed",
         itemsFound: 1,
       });
-      await storage.catalog.applyParsedItems(imported.id, [
+      const saved = await storage.catalog.applyParsedItems(imported.id, [
         {
           mediaKey: "save-pg",
           href: "https://www.instagram.com/p/SavePg/",
@@ -292,6 +331,33 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
           collections: ["Travel"],
         },
       ]);
+      await storage.catalog.applyLikedItems(imported.id, [
+        {
+          mediaKey: "save-pg",
+          href: "https://www.instagram.com/p/SavePg/",
+          shortcode: "SavePg",
+          mediaType: "post",
+          authorUsername: "bob",
+          likedAt: new Date("2026-01-03T00:00:00.000Z"),
+          source: "liked_posts",
+        },
+      ]);
+      for (const library of ["saves", "likes"] as const) {
+        await storage.search.writeEmbeddingProfile(library, "local", {
+          provider: "local",
+          model: "feature-hash-v1",
+          dimensions: 1024,
+          endpoint: null,
+        });
+      }
+      const vector = new Float32Array(1024);
+      vector[0] = 1;
+      await storage.search.upsertItemEmbedding(
+        "saves",
+        "local",
+        saved.changedIds[0]!,
+        vector,
+      );
     } finally {
       await seedPool.end();
     }
@@ -316,5 +382,30 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
     await runEngineMigration(options);
     expect(fs.existsSync(dest)).toBe(true);
     expect(countSqliteFileIfExists(dest)).toBeGreaterThan(0);
+    const copied = openSqliteDatabase(dest, "source");
+    try {
+      expect(
+        (
+          copied
+            .prepare(
+              `SELECT
+                 (SELECT count(*) FROM media) AS media,
+                 (SELECT count(*) FROM saved) AS saved,
+                 (SELECT count(*) FROM liked) AS liked,
+                 (SELECT count(*) FROM saved_items_vec_local) AS saved_vec,
+                 (SELECT count(*) FROM liked_items_vec_local) AS liked_vec`,
+            )
+            .get() as Record<string, number>
+        ),
+      ).toEqual({
+        media: 1,
+        saved: 1,
+        liked: 1,
+        saved_vec: 1,
+        liked_vec: 1,
+      });
+    } finally {
+      copied.close();
+    }
   });
 });

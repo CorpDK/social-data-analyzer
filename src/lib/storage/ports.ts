@@ -237,6 +237,16 @@ export interface SearchIndex {
     library: SearchLibrary,
     index: VectorIndexName,
   ): Promise<Set<number>>;
+  /**
+   * Reuse vectors already generated for the other membership projection.
+   * SQLite copies bytes between vec0 tables; Postgres returns rows from its
+   * shared media_embeddings table. The returned ids need no API/CPU embed.
+   */
+  projectExistingEmbeddings(
+    library: SearchLibrary,
+    index: VectorIndexName,
+    itemIds: number[],
+  ): Promise<Set<number>>;
 
   allSavesSearchRows(itemIds?: number[]): Promise<SavesSearchRow[]>;
   allLikesSearchRows(itemIds?: number[]): Promise<LikesSearchRow[]>;

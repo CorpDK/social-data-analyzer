@@ -30,11 +30,13 @@ with ad hoc `CREATE TABLE IF NOT EXISTS` statements.
    remain ordered with the plain-table migrations.
 5. Run unit tests and TypeScript checks.
 
-SQLite migrations run automatically when storage opens. The v10 bootstrap is
-greenfield-only: it accepts an empty database or an already journaled v10
-database. Versions 1–9 and unstamped non-empty files fail with an instruction
-to delete the configured database and perform a fresh import. There is no
-baseline stamp, dual-read path, or in-place legacy upgrade.
+SQLite migrations run automatically when storage opens. The v11 bootstrap is
+greenfield-only: it accepts an empty database or an already journaled v11
+database. Earlier versions and unstamped non-empty files fail with an
+instruction to delete the configured database and perform a fresh import.
+There is no v10 backfill, baseline stamp, dual-read path, or in-place legacy
+upgrade. The v11 catalog identity is `media.id`; saved/liked memberships, FTS,
+and vector projections all preserve that id across engines.
 
 `SCHEMA_VERSION` is a clean-break compatibility marker, not the migration
 journal. Bump it only when intentionally starting a new incompatible

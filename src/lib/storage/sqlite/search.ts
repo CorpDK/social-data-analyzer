@@ -75,6 +75,47 @@ export function createSqliteSearchIndex(sqlite: Database.Database): SearchIndex 
         .all() as Array<{ id: number | bigint }>;
       return new Set(rows.map((row) => Number(row.id)));
     },
+    projectExistingEmbeddings: async (library, index, itemIds) => {
+      if (itemIds.length === 0) return new Set();
+      const sourceLibrary = library === "saves" ? "likes" : "saves";
+      const sourceTable = vectorTableName(sourceLibrary, index);
+      const targetTable = vectorTableName(library, index);
+      if (
+        vectorTableDimensions(sourceLibrary, index, sqlite) === null ||
+        vectorTableDimensions(library, index, sqlite) === null
+      ) {
+        return new Set();
+      }
+      const placeholders = itemIds.map(() => "?").join(", ");
+      const before = new Set(
+        (
+          sqlite
+            .prepare(
+              `SELECT item_id AS id FROM ${targetTable}
+               WHERE item_id IN (${placeholders})`,
+            )
+            .all(...itemIds) as Array<{ id: number | bigint }>
+        ).map((row) => Number(row.id)),
+      );
+      sqlite
+        .prepare(
+          `INSERT OR IGNORE INTO ${targetTable}(item_id, embedding)
+           SELECT item_id, embedding FROM ${sourceTable}
+           WHERE item_id IN (${placeholders})`,
+        )
+        .run(...itemIds);
+      const projected = (
+        sqlite
+          .prepare(
+            `SELECT item_id AS id FROM ${targetTable}
+             WHERE item_id IN (${placeholders})`,
+          )
+          .all(...itemIds) as Array<{ id: number | bigint }>
+      )
+        .map((row) => Number(row.id))
+        .filter((id) => !before.has(id));
+      return new Set(projected);
+    },
 
     allSavesSearchRows: async (itemIds) => allSavesSearchRows(sqlite, itemIds),
     allLikesSearchRows: async (itemIds) => allLikesSearchRows(sqlite, itemIds),

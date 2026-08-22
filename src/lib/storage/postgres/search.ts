@@ -96,16 +96,12 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
     index: VectorIndexName,
     itemId: number,
     embedding: Float32Array,
-    insertOnly = false,
+    _insertOnly = false,
   ) =>
     client.query(
       `INSERT INTO ${embeddingTable(library)}(media_id, provider, embedding)
        VALUES ($1, $2, $3::vector)
-       ${
-         insertOnly
-           ? "ON CONFLICT(media_id, provider) DO NOTHING"
-           : "ON CONFLICT(media_id, provider) DO UPDATE SET embedding = excluded.embedding"
-       }`,
+       ON CONFLICT(media_id, provider) DO UPDATE SET embedding = excluded.embedding`,
       [itemId, index, vectorLiteral(embedding)],
     );
 
@@ -170,13 +166,11 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
           `Postgres embeddings are fixed at ${DIMENSIONS} dimensions.`,
         );
       }
-      await pool.query(
-        `DELETE FROM ${embeddingTable(library)} e WHERE e.provider = $1
-         AND EXISTS (
-           SELECT 1 FROM ${itemsTable(library)} i WHERE i.media_id=e.media_id
-         )`,
-        [index],
-      );
+      // media_embeddings is canonical across memberships. A library rebuild
+      // overwrites its rows below, but must not delete vectors still used by
+      // the other library before they can be reused.
+      void library;
+      void index;
     },
     writeEmbeddingProfile: async (library, index, value) => {
       await pool.query(
@@ -240,6 +234,20 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
          JOIN ${itemsTable(library)} i ON i.media_id=e.media_id
          WHERE e.provider=$1`,
         [index],
+      );
+      return new Set(result.rows.map((row) => row.item_id));
+    },
+    projectExistingEmbeddings: async (library, index, itemIds) => {
+      if (itemIds.length === 0) return new Set();
+      const sourceTable = itemsTable(library === "saves" ? "likes" : "saves");
+      const targetTable = itemsTable(library);
+      const result = await pool.query<{ item_id: number }>(
+        `SELECT e.media_id AS item_id
+         FROM ${embeddingTable(library)} e
+         JOIN ${sourceTable} source ON source.media_id=e.media_id
+         JOIN ${targetTable} target ON target.media_id=e.media_id
+         WHERE e.provider=$1 AND e.media_id = ANY($2::int[])`,
+        [index, itemIds],
       );
       return new Set(result.rows.map((row) => row.item_id));
     },
