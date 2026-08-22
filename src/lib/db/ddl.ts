@@ -14,10 +14,10 @@ import path from "node:path";
 export const VEC_DIMENSIONS = 1024;
 
 /**
- * v10 is the first Drizzle Kit-managed schema. Versions 1–9 are intentionally
- * unsupported: delete the old database and start with a fresh import.
+ * v11 is the canonical-media generation. Earlier populated libraries are
+ * intentionally unsupported: delete the database and start with a fresh import.
  */
-export const SCHEMA_VERSION = 10;
+export const SCHEMA_VERSION = 11;
 
 const SQLITE_MIGRATIONS_FOLDER = path.join(
   process.cwd(),
@@ -83,7 +83,7 @@ export function assertDatabaseGenerationSupported(
     throw new DatabaseSchemaError(
       "generation_break",
       `Unsupported SQLite schema version ${version}. ` +
-        `ME-3 requires a fresh database; delete the configured SQLite file and re-import.`,
+        `Schema v11 requires a fresh database; delete the configured SQLite file and re-import.`,
     );
   }
 
@@ -94,7 +94,7 @@ export function assertDatabaseGenerationSupported(
     throw new DatabaseSchemaError(
       "generation_break",
       "Unstamped non-empty SQLite database detected. " +
-        "ME-3 does not upgrade legacy databases; delete the configured SQLite file and re-import.",
+        "Schema v11 does not upgrade legacy databases; delete the configured SQLite file and re-import.",
     );
   }
 }
@@ -115,7 +115,7 @@ function appliedMigrationCount(sqlite: Database.Database): number {
 
 /**
  * Apply pending plain-table migrations, then ensure engine-specific search
- * objects. Safe to call repeatedly for a v10 database.
+ * objects. Safe to call repeatedly for a v11 database.
  */
 export function ensureDatabaseSchema(
   sqlite: Database.Database,

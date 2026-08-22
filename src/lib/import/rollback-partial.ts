@@ -32,24 +32,31 @@ export function rollbackImportInserts(importId: number): ImportRollbackResult {
 
   const saveIds = sqlite
     .prepare(
-      `SELECT id FROM saved_items WHERE first_seen_import_id = ?`,
+      `SELECT media_id AS id FROM saved WHERE first_seen_import_id = ?`,
     )
     .all(importId) as Array<{ id: number }>;
 
   const likeIds = sqlite
     .prepare(
-      `SELECT id FROM liked_items WHERE first_seen_import_id = ?`,
+      `SELECT media_id AS id FROM liked WHERE first_seen_import_id = ?`,
     )
     .all(importId) as Array<{ id: number }>;
 
   const tx = sqlite.transaction(() => {
     for (const row of saveIds) {
       removeItemSearch(row.id, sqlite);
-      sqlite.prepare(`DELETE FROM saved_items WHERE id = ?`).run(row.id);
+      sqlite.prepare(`DELETE FROM saved WHERE media_id = ?`).run(row.id);
     }
     for (const row of likeIds) {
       removeLikedItemSearch(row.id, sqlite);
-      sqlite.prepare(`DELETE FROM liked_items WHERE id = ?`).run(row.id);
+      sqlite.prepare(`DELETE FROM liked WHERE media_id = ?`).run(row.id);
+    }
+    for (const row of [...saveIds, ...likeIds]) {
+      sqlite.prepare(
+        `DELETE FROM media WHERE id = ?
+         AND NOT EXISTS (SELECT 1 FROM saved WHERE media_id = ?)
+         AND NOT EXISTS (SELECT 1 FROM liked WHERE media_id = ?)`,
+      ).run(row.id, row.id, row.id);
     }
   });
   tx();

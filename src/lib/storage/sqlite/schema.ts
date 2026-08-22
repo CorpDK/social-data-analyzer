@@ -40,19 +40,39 @@ export const imports = sqliteTable(
   (table) => [index("imports_content_hash_idx").on(table.contentHash)],
 );
 
-export const savedItems = sqliteTable(
-  "saved_items",
+export const media = sqliteTable(
+  "media",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
     mediaKey: text("media_key").notNull(),
     href: text("href").notNull(),
     shortcode: text("shortcode"),
     mediaType: text("media_type", {
-      enum: ["post", "reel", "igtv", "unknown"],
+      enum: ["post", "reel", "igtv", "story", "unknown"],
     })
       .notNull()
       .default("unknown"),
     authorUsername: text("author_username"),
+    createdAt: integer("created_at", { mode: "timestamp" })
+      .notNull()
+      .default(unixepoch),
+    updatedAt: integer("updated_at", { mode: "timestamp" })
+      .notNull()
+      .default(unixepoch),
+  },
+  (table) => [
+    uniqueIndex("media_media_key_uidx").on(table.mediaKey),
+    index("media_author_idx").on(table.authorUsername),
+    index("media_type_idx").on(table.mediaType),
+  ],
+);
+
+export const saved = sqliteTable(
+  "saved",
+  {
+    mediaId: integer("media_id")
+      .primaryKey()
+      .references(() => media.id, { onDelete: "cascade" }),
     savedAt: integer("saved_at", { mode: "timestamp" }),
     firstSeenImportId: integer("first_seen_import_id")
       .notNull()
@@ -67,12 +87,7 @@ export const savedItems = sqliteTable(
       .notNull()
       .default(unixepoch),
   },
-  (table) => [
-    uniqueIndex("saved_items_media_key_uidx").on(table.mediaKey),
-    index("saved_items_author_idx").on(table.authorUsername),
-    index("saved_items_type_idx").on(table.mediaType),
-    index("saved_items_saved_at_idx").on(table.savedAt),
-  ],
+  (table) => [index("saved_saved_at_idx").on(table.savedAt)],
 );
 
 export const itemCollections = sqliteTable(
@@ -81,7 +96,7 @@ export const itemCollections = sqliteTable(
     id: integer("id").primaryKey({ autoIncrement: true }),
     itemId: integer("item_id")
       .notNull()
-      .references(() => savedItems.id, { onDelete: "cascade" }),
+      .references(() => saved.mediaId, { onDelete: "cascade" }),
     collectionName: text("collection_name").notNull(),
   },
   (table) => [
@@ -93,22 +108,15 @@ export const itemCollections = sqliteTable(
   ],
 );
 
-export const likedItems = sqliteTable(
-  "liked_items",
+export const liked = sqliteTable(
+  "liked",
   {
-    id: integer("id").primaryKey({ autoIncrement: true }),
-    mediaKey: text("media_key").notNull(),
-    href: text("href").notNull(),
-    shortcode: text("shortcode"),
-    mediaType: text("media_type", {
-      enum: ["post", "reel", "igtv", "story", "comment", "unknown"],
-    })
-      .notNull()
-      .default("unknown"),
-    authorUsername: text("author_username"),
+    mediaId: integer("media_id")
+      .primaryKey()
+      .references(() => media.id, { onDelete: "cascade" }),
     likedAt: integer("liked_at", { mode: "timestamp" }),
     source: text("source", {
-      enum: ["liked_posts", "story_likes", "liked_comments"],
+      enum: ["liked_posts", "story_likes"],
     })
       .notNull()
       .default("liked_posts"),
@@ -126,11 +134,8 @@ export const likedItems = sqliteTable(
       .default(unixepoch),
   },
   (table) => [
-    uniqueIndex("liked_items_media_key_uidx").on(table.mediaKey),
-    index("liked_items_author_idx").on(table.authorUsername),
-    index("liked_items_type_idx").on(table.mediaType),
-    index("liked_items_liked_at_idx").on(table.likedAt),
-    index("liked_items_source_idx").on(table.source),
+    index("liked_liked_at_idx").on(table.likedAt),
+    index("liked_source_idx").on(table.source),
   ],
 );
 
@@ -256,8 +261,8 @@ export const embeddingIndexProfiles = sqliteTable(
 );
 
 export const importsRelations = relations(imports, ({ many }) => ({
-  items: many(savedItems),
-  likedItems: many(likedItems),
+  saved: many(saved),
+  liked: many(liked),
   schemas: many(importSchemas),
 }));
 
@@ -268,28 +273,41 @@ export const importSchemasRelations = relations(importSchemas, ({ one }) => ({
   }),
 }));
 
-export const savedItemsRelations = relations(savedItems, ({ one, many }) => ({
+export const mediaRelations = relations(media, ({ one }) => ({
+  saved: one(saved),
+  liked: one(liked),
+}));
+
+export const savedRelations = relations(saved, ({ one, many }) => ({
+  media: one(media, {
+    fields: [saved.mediaId],
+    references: [media.id],
+  }),
   firstSeenImport: one(imports, {
-    fields: [savedItems.firstSeenImportId],
+    fields: [saved.firstSeenImportId],
     references: [imports.id],
     relationName: "firstSeen",
   }),
   lastSeenImport: one(imports, {
-    fields: [savedItems.lastSeenImportId],
+    fields: [saved.lastSeenImportId],
     references: [imports.id],
     relationName: "lastSeen",
   }),
   collections: many(itemCollections),
 }));
 
-export const likedItemsRelations = relations(likedItems, ({ one }) => ({
+export const likedRelations = relations(liked, ({ one }) => ({
+  media: one(media, {
+    fields: [liked.mediaId],
+    references: [media.id],
+  }),
   firstSeenImport: one(imports, {
-    fields: [likedItems.firstSeenImportId],
+    fields: [liked.firstSeenImportId],
     references: [imports.id],
     relationName: "likedFirstSeen",
   }),
   lastSeenImport: one(imports, {
-    fields: [likedItems.lastSeenImportId],
+    fields: [liked.lastSeenImportId],
     references: [imports.id],
     relationName: "likedLastSeen",
   }),
@@ -298,15 +316,16 @@ export const likedItemsRelations = relations(likedItems, ({ one }) => ({
 export const itemCollectionsRelations = relations(
   itemCollections,
   ({ one }) => ({
-    item: one(savedItems, {
+    item: one(saved, {
       fields: [itemCollections.itemId],
-      references: [savedItems.id],
+      references: [saved.mediaId],
     }),
   }),
 );
 
 export type Import = typeof imports.$inferSelect;
-export type SavedItem = typeof savedItems.$inferSelect;
-export type LikedItem = typeof likedItems.$inferSelect;
+export type Media = typeof media.$inferSelect;
+export type Saved = typeof saved.$inferSelect;
+export type Liked = typeof liked.$inferSelect;
 export type ItemCollection = typeof itemCollections.$inferSelect;
 export type ImportSchema = typeof importSchemas.$inferSelect;

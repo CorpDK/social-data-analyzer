@@ -42,13 +42,17 @@ function seedSqliteLibrary(file: string): void {
         id, filename, content_hash, imported_at, items_found, items_added,
         items_updated, items_skipped, status
       ) VALUES (1, 'seed.json', 'migrate-engine-seed', unixepoch(), 1, 1, 0, 0, 'completed');
-      INSERT INTO saved_items (
-        id, media_key, href, shortcode, media_type, author_username, saved_at,
-        first_seen_import_id, last_seen_import_id, created_at, updated_at
+      INSERT INTO media (
+        id, media_key, href, shortcode, media_type, author_username,
+        created_at, updated_at
       ) VALUES (
         1, 'save-one', 'https://www.instagram.com/p/SaveOne/', 'SaveOne', 'post',
-        'alice', unixepoch(), 1, 1, unixepoch(), unixepoch()
+        'alice', unixepoch(), unixepoch()
       );
+      INSERT INTO saved (
+        media_id, saved_at, first_seen_import_id, last_seen_import_id,
+        created_at, updated_at
+      ) VALUES (1, unixepoch(), 1, 1, unixepoch(), unixepoch());
       INSERT INTO item_collections (id, item_id, collection_name)
       VALUES (1, 1, 'Recipes');
     `);
@@ -181,7 +185,7 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
         await postgresEngineMigrationStatus(interrupted, isolated.schema),
       ).toBe("in_progress");
       const count = await interrupted.query<{ n: number }>(
-        "SELECT count(*)::int AS n FROM saved_items",
+        "SELECT count(*)::int AS n FROM saved",
       );
       expect(count.rows[0]?.n).toBe(0);
       await expect(
@@ -236,7 +240,7 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
         await postgresEngineMigrationStatus(interrupted, isolated.schema),
       ).toBe("in_progress");
       const count = await interrupted.query<{ n: number }>(
-        "SELECT count(*)::int AS n FROM saved_items",
+        "SELECT count(*)::int AS n FROM saved",
       );
       expect(count.rows[0]?.n).toBe(1);
       await expect(

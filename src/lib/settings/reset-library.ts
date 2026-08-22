@@ -63,8 +63,8 @@ export function resetLibrary(
 
   const before = {
     imports: countRows(sqlite, "imports"),
-    savedItems: countRows(sqlite, "saved_items"),
-    likedItems: tableExists(sqlite, "liked_items") ? countRows(sqlite, "liked_items") : 0,
+    savedItems: countRows(sqlite, "saved"),
+    likedItems: tableExists(sqlite, "liked") ? countRows(sqlite, "liked") : 0,
     itemCollections: countRows(sqlite, "item_collections"),
     embeddingProfiles: tableExists(sqlite, "embedding_index_profiles")
       ? countRows(sqlite, "embedding_index_profiles")
@@ -74,7 +74,7 @@ export function resetLibrary(
   };
 
   const wipeContent = sqlite.transaction(() => {
-    // Children first — FK from import_schemas/item_collections/liked_items → imports.
+    // Children first — memberships and import metadata reference imports.
     // Clear import_jobs before imports (FK import_id → imports.id).
     if (tableExists(sqlite, "import_jobs")) {
       sqlite.exec(`DELETE FROM import_jobs`);
@@ -83,10 +83,11 @@ export function resetLibrary(
       sqlite.exec(`DELETE from import_schemas`);
     }
     sqlite.exec(`DELETE from item_collections`);
-    sqlite.exec(`DELETE FROM saved_items`);
-    if (tableExists(sqlite, "liked_items")) {
-      sqlite.exec(`DELETE FROM liked_items`);
+    sqlite.exec(`DELETE FROM saved`);
+    if (tableExists(sqlite, "liked")) {
+      sqlite.exec(`DELETE FROM liked`);
     }
+    sqlite.exec(`DELETE FROM media`);
     sqlite.exec(`DELETE FROM imports`);
 
     if (tableExists(sqlite, "embedding_index_profiles")) {
@@ -100,8 +101,9 @@ export function resetLibrary(
         DELETE FROM sqlite_sequence
         WHERE name IN (
           'imports',
-          'saved_items',
-          'liked_items',
+          'saved',
+          'liked',
+          'media',
           'item_collections',
           'embedding_jobs',
           'import_jobs',

@@ -39,6 +39,9 @@ describe("greenfield Drizzle bootstrap", () => {
                'embedding_jobs',
                'import_jobs',
                'embedding_index_profiles',
+               'media',
+               'saved',
+               'liked',
                'saved_items_fts',
                'saved_items_vec_local'
              )
@@ -54,6 +57,9 @@ describe("greenfield Drizzle bootstrap", () => {
       "embedding_jobs",
       "import_jobs",
       "imports",
+      "liked",
+      "media",
+      "saved",
       "saved_items_fts",
       "saved_items_vec_local",
     ]);

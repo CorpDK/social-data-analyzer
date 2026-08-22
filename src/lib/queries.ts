@@ -1,5 +1,5 @@
 import { and, count, desc, eq, sql } from "drizzle-orm";
-import { getDb, getSqlite, schema } from "./db";
+import { getDb, schema } from "./db";
 import {
   BROWSE_HYBRID_SEARCH_LIMIT,
   hybridSearchIds,
@@ -9,7 +9,18 @@ import {
 import type { EmbeddingProvider } from "./search/embeddings";
 import { parseProviderParam } from "./search/providers";
 
-const { imports, savedItems, itemCollections, likedItems } = schema;
+const { imports, media, saved, itemCollections, liked } = schema;
+
+const mediaSelection = {
+  id: media.id,
+  mediaKey: media.mediaKey,
+  href: media.href,
+  shortcode: media.shortcode,
+  mediaType: media.mediaType,
+  authorUsername: media.authorUsername,
+  createdAt: media.createdAt,
+  updatedAt: media.updatedAt,
+};
 
 export { BROWSE_HYBRID_SEARCH_LIMIT };
 
@@ -25,46 +36,50 @@ export function getStats() {
   const totals = db
     .select({
       total: count(),
-      posts: sql<number>`sum(case when ${savedItems.mediaType} = 'post' then 1 else 0 end)`,
-      reels: sql<number>`sum(case when ${savedItems.mediaType} = 'reel' then 1 else 0 end)`,
-      authors: sql<number>`count(distinct ${savedItems.authorUsername})`,
+      posts: sql<number>`sum(case when ${media.mediaType} = 'post' then 1 else 0 end)`,
+      reels: sql<number>`sum(case when ${media.mediaType} = 'reel' then 1 else 0 end)`,
+      authors: sql<number>`count(distinct ${media.authorUsername})`,
     })
-    .from(savedItems)
+    .from(saved)
+    .innerJoin(media, eq(media.id, saved.mediaId))
     .get();
 
   const likesTotals = db
     .select({
       total: count(),
-      posts: sql<number>`sum(case when ${likedItems.mediaType} = 'post' then 1 else 0 end)`,
-      reels: sql<number>`sum(case when ${likedItems.mediaType} = 'reel' then 1 else 0 end)`,
-      stories: sql<number>`sum(case when ${likedItems.mediaType} = 'story' then 1 else 0 end)`,
-      comments: sql<number>`sum(case when ${likedItems.mediaType} = 'comment' then 1 else 0 end)`,
+      posts: sql<number>`sum(case when ${media.mediaType} = 'post' then 1 else 0 end)`,
+      reels: sql<number>`sum(case when ${media.mediaType} = 'reel' then 1 else 0 end)`,
+      stories: sql<number>`sum(case when ${media.mediaType} = 'story' then 1 else 0 end)`,
+      comments: sql<number>`0`,
     })
-    .from(likedItems)
+    .from(liked)
+    .innerJoin(media, eq(media.id, liked.mediaId))
     .get();
 
   const importCount = db.select({ total: count() }).from(imports).get();
 
   const topAuthors = db
     .select({
-      authorUsername: savedItems.authorUsername,
+      authorUsername: media.authorUsername,
       total: count(),
     })
-    .from(savedItems)
-    .where(sql`${savedItems.authorUsername} is not null`)
-    .groupBy(savedItems.authorUsername)
+    .from(saved)
+    .innerJoin(media, eq(media.id, saved.mediaId))
+    .where(sql`${media.authorUsername} is not null`)
+    .groupBy(media.authorUsername)
     .orderBy(desc(count()))
     .limit(10)
     .all();
 
   const topLikedAuthors = db
     .select({
-      authorUsername: likedItems.authorUsername,
+      authorUsername: media.authorUsername,
       total: count(),
     })
-    .from(likedItems)
-    .where(sql`${likedItems.authorUsername} is not null`)
-    .groupBy(likedItems.authorUsername)
+    .from(liked)
+    .innerJoin(media, eq(media.id, liked.mediaId))
+    .where(sql`${media.authorUsername} is not null`)
+    .groupBy(media.authorUsername)
     .orderBy(desc(count()))
     .limit(10)
     .all();
@@ -166,7 +181,7 @@ export async function listSaves(query: SavesQuery) {
       rankedIds = hits.map((hit) => hit.id);
       searchMode = mode;
       conditions.push(
-        sql`${savedItems.id} in (${sql.join(
+        sql`${media.id} in (${sql.join(
           rankedIds.map((id) => sql`${id}`),
           sql`, `,
         )})`,
@@ -178,10 +193,10 @@ export async function listSaves(query: SavesQuery) {
       totalCapped = false;
       conditions.push(
         sql`(
-          ${savedItems.authorUsername} like ${term}
-          or ${savedItems.href} like ${term}
-          or ${savedItems.shortcode} like ${term}
-          or ${savedItems.mediaKey} like ${term}
+          ${media.authorUsername} like ${term}
+          or ${media.href} like ${term}
+          or ${media.shortcode} like ${term}
+          or ${media.mediaKey} like ${term}
         )`,
       );
     }
@@ -190,14 +205,14 @@ export async function listSaves(query: SavesQuery) {
   if (query.type && query.type !== "all") {
     conditions.push(
       eq(
-        savedItems.mediaType,
+        media.mediaType,
         query.type as "post" | "reel" | "igtv" | "unknown",
       ),
     );
   }
 
   if (query.author) {
-    conditions.push(eq(savedItems.authorUsername, query.author));
+    conditions.push(eq(media.authorUsername, query.author));
   }
 
   if (query.collection) {
@@ -206,7 +221,7 @@ export async function listSaves(query: SavesQuery) {
     conditions.push(
       sql`exists (
         select 1 from ${itemCollections}
-        where ${itemCollections.itemId} = ${savedItems.id}
+        where ${itemCollections.itemId} = ${media.id}
           and ${itemCollections.collectionName} = ${query.collection}
       )`,
     );
@@ -216,14 +231,26 @@ export async function listSaves(query: SavesQuery) {
 
   const totalRow = db
     .select({ total: count() })
-    .from(savedItems)
+    .from(saved)
+    .innerJoin(media, eq(media.id, saved.mediaId))
     .where(where)
     .get();
 
   let rows;
   if (rankedIds && rankedIds.length > 0) {
     // Preserve hybrid RRF order, then paginate in JS after filter.
-    const filtered = db.select().from(savedItems).where(where).all();
+    const filtered = db
+      .select({
+        ...mediaSelection,
+        savedAt: saved.savedAt,
+        firstSeenImportId: saved.firstSeenImportId,
+        lastSeenImportId: saved.lastSeenImportId,
+        liked: sql<boolean>`exists(select 1 from liked where liked.media_id = ${media.id})`,
+      })
+      .from(saved)
+      .innerJoin(media, eq(media.id, saved.mediaId))
+      .where(where)
+      .all();
     const byId = new Map(filtered.map((row) => [row.id, row]));
     const ordered = rankedIds
       .map((id) => byId.get(id))
@@ -231,10 +258,17 @@ export async function listSaves(query: SavesQuery) {
     rows = ordered.slice(offset, offset + pageSize);
   } else {
     rows = db
-      .select()
-      .from(savedItems)
+      .select({
+        ...mediaSelection,
+        savedAt: saved.savedAt,
+        firstSeenImportId: saved.firstSeenImportId,
+        lastSeenImportId: saved.lastSeenImportId,
+        liked: sql<boolean>`exists(select 1 from liked where liked.media_id = ${media.id})`,
+      })
+      .from(saved)
+      .innerJoin(media, eq(media.id, saved.mediaId))
       .where(where)
-      .orderBy(desc(savedItems.savedAt), desc(savedItems.id))
+      .orderBy(desc(saved.savedAt), desc(media.id))
       .limit(pageSize)
       .offset(offset)
       .all();
@@ -265,13 +299,17 @@ export async function listSaves(query: SavesQuery) {
   const total = totalRow?.total ?? 0;
 
   return {
-    items: rows.map((row) => ({
-      ...row,
-      savedAt: row.savedAt?.toISOString() ?? null,
-      createdAt: row.createdAt.toISOString(),
-      updatedAt: row.updatedAt.toISOString(),
-      collections: collectionsByItem.get(row.id) ?? [],
-    })),
+    items: rows.map((row) => {
+      const { liked: isLiked, ...item } = row;
+      return {
+        ...item,
+        savedAt: row.savedAt?.toISOString() ?? null,
+        createdAt: row.createdAt.toISOString(),
+        updatedAt: row.updatedAt.toISOString(),
+        collections: collectionsByItem.get(row.id) ?? [],
+        membership: { saved: true, liked: Boolean(isLiked) },
+      };
+    }),
     total,
     page,
     pageSize,
@@ -300,10 +338,11 @@ export function listSavesFilterOptions() {
   const db = getDb();
 
   const authors = db
-    .selectDistinct({ authorUsername: savedItems.authorUsername })
-    .from(savedItems)
-    .where(sql`${savedItems.authorUsername} is not null`)
-    .orderBy(savedItems.authorUsername)
+    .selectDistinct({ authorUsername: media.authorUsername })
+    .from(saved)
+    .innerJoin(media, eq(media.id, saved.mediaId))
+    .where(sql`${media.authorUsername} is not null`)
+    .orderBy(media.authorUsername)
     .all()
     .map((row) => row.authorUsername!)
     .filter(Boolean);
@@ -329,47 +368,6 @@ export type LikesQuery = {
   pageSize?: number;
   provider?: string;
 };
-
-function savedKeysForLikePage(
-  rows: Array<{ mediaKey: string; shortcode: string | null }>,
-): Set<string> {
-  if (rows.length === 0) return new Set();
-  const sqlite = getSqlite();
-  const mediaKeys = [...new Set(rows.map((row) => row.mediaKey))];
-  const shortcodes = [
-    ...new Set(
-      rows
-        .map((row) => row.shortcode)
-        .filter((value): value is string => Boolean(value)),
-    ),
-  ];
-
-  const matched = new Set<string>();
-
-  if (mediaKeys.length > 0) {
-    const keyRows = sqlite
-      .prepare(
-        `SELECT media_key AS mediaKey
-         FROM saved_items
-         WHERE media_key IN (${mediaKeys.map(() => "?").join(", ")})`,
-      )
-      .all(...mediaKeys) as Array<{ mediaKey: string }>;
-    for (const row of keyRows) matched.add(`key:${row.mediaKey}`);
-  }
-
-  if (shortcodes.length > 0) {
-    const codeRows = sqlite
-      .prepare(
-        `SELECT shortcode AS shortcode
-         FROM saved_items
-         WHERE shortcode IN (${shortcodes.map(() => "?").join(", ")})`,
-      )
-      .all(...shortcodes) as Array<{ shortcode: string }>;
-    for (const row of codeRows) matched.add(`code:${row.shortcode}`);
-  }
-
-  return matched;
-}
 
 export async function listLikes(query: LikesQuery) {
   const db = getDb();
@@ -413,7 +411,7 @@ export async function listLikes(query: LikesQuery) {
       rankedIds = hits.map((hit) => hit.id);
       searchMode = mode;
       conditions.push(
-        sql`${likedItems.id} in (${sql.join(
+        sql`${media.id} in (${sql.join(
           rankedIds.map((id) => sql`${id}`),
           sql`, `,
         )})`,
@@ -424,10 +422,10 @@ export async function listLikes(query: LikesQuery) {
       totalCapped = false;
       conditions.push(
         sql`(
-          ${likedItems.authorUsername} like ${term}
-          or ${likedItems.href} like ${term}
-          or ${likedItems.shortcode} like ${term}
-          or ${likedItems.mediaKey} like ${term}
+          ${media.authorUsername} like ${term}
+          or ${media.href} like ${term}
+          or ${media.shortcode} like ${term}
+          or ${media.mediaKey} like ${term}
         )`,
       );
     }
@@ -436,33 +434,45 @@ export async function listLikes(query: LikesQuery) {
   if (query.type && query.type !== "all") {
     conditions.push(
       eq(
-        likedItems.mediaType,
+        media.mediaType,
         query.type as
           | "post"
           | "reel"
           | "igtv"
           | "story"
-          | "comment"
           | "unknown",
       ),
     );
   }
 
   if (query.author) {
-    conditions.push(eq(likedItems.authorUsername, query.author));
+    conditions.push(eq(media.authorUsername, query.author));
   }
 
   const where = conditions.length > 0 ? and(...conditions) : undefined;
 
   const totalRow = db
     .select({ total: count() })
-    .from(likedItems)
+    .from(liked)
+    .innerJoin(media, eq(media.id, liked.mediaId))
     .where(where)
     .get();
 
   let rows;
   if (rankedIds && rankedIds.length > 0) {
-    const filtered = db.select().from(likedItems).where(where).all();
+    const filtered = db
+      .select({
+        ...mediaSelection,
+        likedAt: liked.likedAt,
+        source: liked.source,
+        firstSeenImportId: liked.firstSeenImportId,
+        lastSeenImportId: liked.lastSeenImportId,
+        saved: sql<boolean>`exists(select 1 from saved where saved.media_id = ${media.id})`,
+      })
+      .from(liked)
+      .innerJoin(media, eq(media.id, liked.mediaId))
+      .where(where)
+      .all();
     const byId = new Map(filtered.map((row) => [row.id, row]));
     const ordered = rankedIds
       .map((id) => byId.get(id))
@@ -470,29 +480,35 @@ export async function listLikes(query: LikesQuery) {
     rows = ordered.slice(offset, offset + pageSize);
   } else {
     rows = db
-      .select()
-      .from(likedItems)
+      .select({
+        ...mediaSelection,
+        likedAt: liked.likedAt,
+        source: liked.source,
+        firstSeenImportId: liked.firstSeenImportId,
+        lastSeenImportId: liked.lastSeenImportId,
+        saved: sql<boolean>`exists(select 1 from saved where saved.media_id = ${media.id})`,
+      })
+      .from(liked)
+      .innerJoin(media, eq(media.id, liked.mediaId))
       .where(where)
-      .orderBy(desc(likedItems.likedAt), desc(likedItems.id))
+      .orderBy(desc(liked.likedAt), desc(media.id))
       .limit(pageSize)
       .offset(offset)
       .all();
   }
 
-  const savedMatches = savedKeysForLikePage(rows);
   const total = totalRow?.total ?? 0;
 
   return {
     items: rows.map((row) => {
-      const alsoSaved =
-        savedMatches.has(`key:${row.mediaKey}`) ||
-        Boolean(row.shortcode && savedMatches.has(`code:${row.shortcode}`));
+      const { saved: isSaved, ...item } = row;
       return {
-        ...row,
+        ...item,
         likedAt: row.likedAt?.toISOString() ?? null,
         createdAt: row.createdAt.toISOString(),
         updatedAt: row.updatedAt.toISOString(),
-        alsoSaved,
+        alsoSaved: Boolean(isSaved),
+        membership: { saved: Boolean(isSaved), liked: true },
       };
     }),
     total,
@@ -512,10 +528,11 @@ export function listLikesFilterOptions() {
   const db = getDb();
 
   const authors = db
-    .selectDistinct({ authorUsername: likedItems.authorUsername })
-    .from(likedItems)
-    .where(sql`${likedItems.authorUsername} is not null`)
-    .orderBy(likedItems.authorUsername)
+    .selectDistinct({ authorUsername: media.authorUsername })
+    .from(liked)
+    .innerJoin(media, eq(media.id, liked.mediaId))
+    .where(sql`${media.authorUsername} is not null`)
+    .orderBy(media.authorUsername)
     .all()
     .map((row) => row.authorUsername!)
     .filter(Boolean);

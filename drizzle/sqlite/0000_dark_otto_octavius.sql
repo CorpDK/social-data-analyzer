@@ -92,50 +92,50 @@ CREATE TABLE `item_collections` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`item_id` integer NOT NULL,
 	`collection_name` text NOT NULL,
-	FOREIGN KEY (`item_id`) REFERENCES `saved_items`(`id`) ON UPDATE no action ON DELETE cascade
+	FOREIGN KEY (`item_id`) REFERENCES `saved`(`media_id`) ON UPDATE no action ON DELETE cascade
 );
 --> statement-breakpoint
 CREATE UNIQUE INDEX `item_collections_uidx` ON `item_collections` (`item_id`,`collection_name`);--> statement-breakpoint
 CREATE INDEX `item_collections_name_idx` ON `item_collections` (`collection_name`);--> statement-breakpoint
-CREATE TABLE `liked_items` (
-	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
-	`media_key` text NOT NULL,
-	`href` text NOT NULL,
-	`shortcode` text,
-	`media_type` text DEFAULT 'unknown' NOT NULL,
-	`author_username` text,
+CREATE TABLE `liked` (
+	`media_id` integer PRIMARY KEY NOT NULL,
 	`liked_at` integer,
 	`source` text DEFAULT 'liked_posts' NOT NULL,
 	`first_seen_import_id` integer NOT NULL,
 	`last_seen_import_id` integer NOT NULL,
 	`created_at` integer DEFAULT (unixepoch()) NOT NULL,
 	`updated_at` integer DEFAULT (unixepoch()) NOT NULL,
+	FOREIGN KEY (`media_id`) REFERENCES `media`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`first_seen_import_id`) REFERENCES `imports`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`last_seen_import_id`) REFERENCES `imports`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `liked_items_media_key_uidx` ON `liked_items` (`media_key`);--> statement-breakpoint
-CREATE INDEX `liked_items_author_idx` ON `liked_items` (`author_username`);--> statement-breakpoint
-CREATE INDEX `liked_items_type_idx` ON `liked_items` (`media_type`);--> statement-breakpoint
-CREATE INDEX `liked_items_liked_at_idx` ON `liked_items` (`liked_at`);--> statement-breakpoint
-CREATE INDEX `liked_items_source_idx` ON `liked_items` (`source`);--> statement-breakpoint
-CREATE TABLE `saved_items` (
+CREATE INDEX `liked_liked_at_idx` ON `liked` (`liked_at`);--> statement-breakpoint
+CREATE INDEX `liked_source_idx` ON `liked` (`source`);--> statement-breakpoint
+CREATE TABLE `media` (
 	`id` integer PRIMARY KEY AUTOINCREMENT NOT NULL,
 	`media_key` text NOT NULL,
 	`href` text NOT NULL,
 	`shortcode` text,
 	`media_type` text DEFAULT 'unknown' NOT NULL,
 	`author_username` text,
+	`created_at` integer DEFAULT (unixepoch()) NOT NULL,
+	`updated_at` integer DEFAULT (unixepoch()) NOT NULL
+);
+--> statement-breakpoint
+CREATE UNIQUE INDEX `media_media_key_uidx` ON `media` (`media_key`);--> statement-breakpoint
+CREATE INDEX `media_author_idx` ON `media` (`author_username`);--> statement-breakpoint
+CREATE INDEX `media_type_idx` ON `media` (`media_type`);--> statement-breakpoint
+CREATE TABLE `saved` (
+	`media_id` integer PRIMARY KEY NOT NULL,
 	`saved_at` integer,
 	`first_seen_import_id` integer NOT NULL,
 	`last_seen_import_id` integer NOT NULL,
 	`created_at` integer DEFAULT (unixepoch()) NOT NULL,
 	`updated_at` integer DEFAULT (unixepoch()) NOT NULL,
+	FOREIGN KEY (`media_id`) REFERENCES `media`(`id`) ON UPDATE no action ON DELETE cascade,
 	FOREIGN KEY (`first_seen_import_id`) REFERENCES `imports`(`id`) ON UPDATE no action ON DELETE no action,
 	FOREIGN KEY (`last_seen_import_id`) REFERENCES `imports`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
-CREATE UNIQUE INDEX `saved_items_media_key_uidx` ON `saved_items` (`media_key`);--> statement-breakpoint
-CREATE INDEX `saved_items_author_idx` ON `saved_items` (`author_username`);--> statement-breakpoint
-CREATE INDEX `saved_items_type_idx` ON `saved_items` (`media_type`);--> statement-breakpoint
-CREATE INDEX `saved_items_saved_at_idx` ON `saved_items` (`saved_at`);
+CREATE INDEX `saved_saved_at_idx` ON `saved` (`saved_at`);

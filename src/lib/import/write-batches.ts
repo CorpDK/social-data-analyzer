@@ -7,7 +7,7 @@ import type { FileSchemaCatalogEntry } from "../json-schema-infer";
 import { emitProgress, throwIfCancelled, yieldToEventLoop } from "./progress";
 import type { ImportRunOptions } from "./types";
 
-const { savedItems, itemCollections, importSchemas, likedItems } = schema;
+const { media, saved, itemCollections, importSchemas, liked } = schema;
 
 export function persistImportSchemas(
   importId: number,
@@ -37,222 +37,180 @@ type DbTx = Parameters<Parameters<ReturnType<typeof getDb>["transaction"]>[0]>[0
 
 function applyOneParsedItem(tx: DbTx, importId: number, item: ParsedSavedItem) {
   const sqlite = getSqlite();
-  const existing = tx
+  const existingMedia = tx
     .select()
-    .from(savedItems)
-    .where(eq(savedItems.mediaKey, item.mediaKey))
+    .from(media)
+    .where(eq(media.mediaKey, item.mediaKey))
     .get();
-
-  if (!existing) {
-    const inserted = tx
-      .insert(savedItems)
+  const mediaId = existingMedia
+    ? existingMedia.id
+    : tx
+      .insert(media)
       .values({
         mediaKey: item.mediaKey,
         href: item.href,
         shortcode: item.shortcode,
         mediaType: item.mediaType,
         authorUsername: item.authorUsername,
+      })
+      .returning({ id: media.id })
+      .get().id;
+
+  const currentMedia = existingMedia ?? {
+    id: mediaId,
+    mediaKey: item.mediaKey,
+    href: item.href,
+    shortcode: item.shortcode,
+    mediaType: item.mediaType,
+    authorUsername: item.authorUsername,
+  };
+  const shouldUpdateAuthor =
+    !!item.authorUsername &&
+    (!currentMedia.authorUsername ||
+      item.authorUsername !== currentMedia.authorUsername);
+  const shouldUpdateType =
+    item.mediaType !== "unknown" && item.mediaType !== currentMedia.mediaType;
+  const shouldUpdateHref = item.href !== currentMedia.href;
+  if (existingMedia && (shouldUpdateAuthor || shouldUpdateType || shouldUpdateHref)) {
+    tx.update(media)
+      .set({
+        href: shouldUpdateHref ? item.href : currentMedia.href,
+        authorUsername: shouldUpdateAuthor
+          ? item.authorUsername
+          : currentMedia.authorUsername,
+        mediaType: shouldUpdateType ? item.mediaType : currentMedia.mediaType,
+        updatedAt: new Date(),
+      })
+      .where(eq(media.id, mediaId))
+      .run();
+  }
+
+  const existing = tx.select().from(saved).where(eq(saved.mediaId, mediaId)).get();
+  if (!existing) {
+    tx.insert(saved)
+      .values({
+        mediaId,
         savedAt: item.savedAt,
         firstSeenImportId: importId,
         lastSeenImportId: importId,
       })
-      .returning({ id: savedItems.id })
-      .get();
-
-    const collections: string[] = [];
-    for (const name of item.collections) {
-      const trimmed = name.trim();
-      if (!trimmed) continue;
-      collections.push(trimmed);
-      tx.insert(itemCollections)
-        .values({ itemId: inserted.id, collectionName: trimmed })
-        .onConflictDoNothing()
-        .run();
-    }
-
-    upsertItemFts(
-      inserted.id,
-      {
-        authorUsername: item.authorUsername,
-        shortcode: item.shortcode,
-        mediaKey: item.mediaKey,
-        mediaType: item.mediaType,
-        collections,
-      },
-      sqlite,
-    );
-
-    return { kind: "added" as const, id: inserted.id };
+      .run();
+  } else {
+    const shouldUpdateSavedAt =
+      item.savedAt &&
+      (!existing.savedAt || item.savedAt.getTime() > existing.savedAt.getTime());
+    tx.update(saved)
+      .set({
+        lastSeenImportId: importId,
+        savedAt: shouldUpdateSavedAt ? item.savedAt : existing.savedAt,
+        updatedAt: new Date(),
+      })
+      .where(eq(saved.mediaId, mediaId))
+      .run();
   }
-
-  const shouldUpdateSavedAt =
-    item.savedAt &&
-    (!existing.savedAt || item.savedAt.getTime() > existing.savedAt.getTime());
-  // Backfill missing author, or replace when the export supplies a different one.
-  const shouldUpdateAuthor =
-    !!item.authorUsername &&
-    (!existing.authorUsername ||
-      item.authorUsername !== existing.authorUsername);
-  const shouldUpdateType =
-    item.mediaType !== "unknown" && item.mediaType !== existing.mediaType;
-  const shouldUpdateHref = item.href !== existing.href;
-
   const existingCollections = tx
     .select()
     .from(itemCollections)
-    .where(eq(itemCollections.itemId, existing.id))
+    .where(eq(itemCollections.itemId, mediaId))
     .all()
     .map((row) => row.collectionName);
-
-  const newCollections = item.collections.filter(
-    (name) => !existingCollections.includes(name),
-  );
-
-  const hasChanges =
-    shouldUpdateSavedAt ||
-    shouldUpdateAuthor ||
-    shouldUpdateType ||
-    shouldUpdateHref ||
-    newCollections.length > 0;
-
-  const nextAuthor = shouldUpdateAuthor
-    ? item.authorUsername
-    : existing.authorUsername;
-  const nextType = shouldUpdateType ? item.mediaType : existing.mediaType;
-  const nextHref = shouldUpdateHref ? item.href : existing.href;
-
-  tx.update(savedItems)
-    .set({
-      lastSeenImportId: importId,
-      href: nextHref,
-      authorUsername: nextAuthor,
-      mediaType: nextType,
-      savedAt: shouldUpdateSavedAt ? item.savedAt : existing.savedAt,
-      updatedAt: new Date(),
-    })
-    .where(eq(savedItems.id, existing.id))
-    .run();
-
+  const newCollections = item.collections
+    .map((name) => name.trim())
+    .filter((name) => name && !existingCollections.includes(name));
   for (const name of newCollections) {
     tx.insert(itemCollections)
-      .values({ itemId: existing.id, collectionName: name })
+      .values({ itemId: mediaId, collectionName: name })
       .onConflictDoNothing()
       .run();
   }
-
-  if (hasChanges) {
-    upsertItemFts(
-      existing.id,
-      {
-        authorUsername: nextAuthor,
-        shortcode: existing.shortcode,
-        mediaKey: existing.mediaKey,
-        mediaType: nextType,
-        collections: [...existingCollections, ...newCollections],
-      },
-      sqlite,
-    );
-    return { kind: "updated" as const, id: existing.id };
-  }
-
-  return { kind: "skipped" as const, id: existing.id };
+  const nextAuthor = shouldUpdateAuthor ? item.authorUsername : currentMedia.authorUsername;
+  const nextType = shouldUpdateType ? item.mediaType : currentMedia.mediaType;
+  upsertItemFts(mediaId, {
+    authorUsername: nextAuthor,
+    shortcode: currentMedia.shortcode,
+    mediaKey: currentMedia.mediaKey,
+    mediaType: nextType,
+    collections: [...existingCollections, ...newCollections],
+  }, sqlite);
+  const changed = !existing || !existingMedia || shouldUpdateAuthor ||
+    shouldUpdateType || shouldUpdateHref || newCollections.length > 0 ||
+    Boolean(item.savedAt && (!existing?.savedAt || item.savedAt > existing.savedAt));
+  return { kind: changed ? (existing ? "updated" as const : "added" as const) : "skipped" as const, id: mediaId };
 }
 
 function applyOneLikedItem(tx: DbTx, importId: number, item: ParsedLikedItem) {
   const sqlite = getSqlite();
-  const existing = tx
+  if (
+    item.source === "liked_comments" ||
+    item.mediaType === "comment" ||
+    item.mediaKey.startsWith("comment:")
+  ) {
+    return { kind: "skipped" as const, id: null };
+  }
+  const mediaType = item.mediaType as Exclude<typeof item.mediaType, "comment">;
+  const existingMedia = tx
     .select()
-    .from(likedItems)
-    .where(eq(likedItems.mediaKey, item.mediaKey))
+    .from(media)
+    .where(eq(media.mediaKey, item.mediaKey))
     .get();
-
-  if (!existing) {
-    const inserted = tx
-      .insert(likedItems)
+  const mediaId = existingMedia
+    ? existingMedia.id
+    : tx.insert(media)
       .values({
         mediaKey: item.mediaKey,
         href: item.href,
         shortcode: item.shortcode,
-        mediaType: item.mediaType,
+        mediaType,
         authorUsername: item.authorUsername,
-        likedAt: item.likedAt,
-        source: item.source,
-        firstSeenImportId: importId,
-        lastSeenImportId: importId,
       })
-      .returning({ id: likedItems.id })
-      .get();
-
-    upsertLikedItemFts(
-      inserted.id,
-      {
-        authorUsername: item.authorUsername,
-        shortcode: item.shortcode,
-        mediaKey: item.mediaKey,
-        mediaType: item.mediaType,
-        source: item.source,
-      },
-      sqlite,
-    );
-
-    return { kind: "added" as const, id: inserted.id };
-  }
-
-  const shouldUpdateLikedAt =
-    item.likedAt &&
-    (!existing.likedAt || item.likedAt.getTime() > existing.likedAt.getTime());
+      .returning({ id: media.id }).get().id;
+  const currentMedia = existingMedia ?? {
+    id: mediaId, mediaKey: item.mediaKey, href: item.href,
+    shortcode: item.shortcode, mediaType,
+    authorUsername: item.authorUsername,
+  };
   const shouldUpdateAuthor =
     !!item.authorUsername &&
-    (!existing.authorUsername ||
-      item.authorUsername !== existing.authorUsername);
+    (!currentMedia.authorUsername ||
+      item.authorUsername !== currentMedia.authorUsername);
   const shouldUpdateType =
-    item.mediaType !== "unknown" && item.mediaType !== existing.mediaType;
-  const shouldUpdateHref = item.href !== existing.href;
-  const shouldUpdateSource = item.source !== existing.source;
-
-  const hasChanges =
-    shouldUpdateLikedAt ||
-    shouldUpdateAuthor ||
-    shouldUpdateType ||
-    shouldUpdateHref ||
-    shouldUpdateSource;
-
-  const nextAuthor = shouldUpdateAuthor
-    ? item.authorUsername
-    : existing.authorUsername;
-  const nextType = shouldUpdateType ? item.mediaType : existing.mediaType;
-  const nextHref = shouldUpdateHref ? item.href : existing.href;
-  const nextSource = shouldUpdateSource ? item.source : existing.source;
-
-  tx.update(likedItems)
-    .set({
-      lastSeenImportId: importId,
-      href: nextHref,
-      authorUsername: nextAuthor,
-      mediaType: nextType,
-      source: nextSource,
-      likedAt: shouldUpdateLikedAt ? item.likedAt : existing.likedAt,
+    mediaType !== "unknown" && mediaType !== currentMedia.mediaType;
+  const shouldUpdateHref = item.href !== currentMedia.href;
+  if (existingMedia && (shouldUpdateAuthor || shouldUpdateType || shouldUpdateHref)) {
+    tx.update(media).set({
+      href: shouldUpdateHref ? item.href : currentMedia.href,
+      authorUsername: shouldUpdateAuthor ? item.authorUsername : currentMedia.authorUsername,
+      mediaType: shouldUpdateType ? mediaType : currentMedia.mediaType,
       updatedAt: new Date(),
-    })
-    .where(eq(likedItems.id, existing.id))
-    .run();
-
-  if (hasChanges) {
-    upsertLikedItemFts(
-      existing.id,
-      {
-        authorUsername: nextAuthor,
-        shortcode: existing.shortcode,
-        mediaKey: existing.mediaKey,
-        mediaType: nextType,
-        source: nextSource,
-      },
-      sqlite,
-    );
-    return { kind: "updated" as const, id: existing.id };
+    }).where(eq(media.id, mediaId)).run();
   }
-
-  return { kind: "skipped" as const, id: existing.id };
+  const existing = tx.select().from(liked).where(eq(liked.mediaId, mediaId)).get();
+  const shouldUpdateLikedAt = Boolean(item.likedAt &&
+    (!existing?.likedAt || item.likedAt.getTime() > existing.likedAt.getTime()));
+  const shouldUpdateSource = Boolean(existing && item.source !== existing.source);
+  if (!existing) {
+    tx.insert(liked).values({
+      mediaId, likedAt: item.likedAt, source: item.source as "liked_posts" | "story_likes",
+      firstSeenImportId: importId, lastSeenImportId: importId,
+    }).run();
+  } else {
+    tx.update(liked).set({
+      lastSeenImportId: importId,
+      likedAt: shouldUpdateLikedAt ? item.likedAt : existing.likedAt,
+      source: item.source as "liked_posts" | "story_likes",
+      updatedAt: new Date(),
+    }).where(eq(liked.mediaId, mediaId)).run();
+  }
+  const nextAuthor = shouldUpdateAuthor ? item.authorUsername : currentMedia.authorUsername;
+  const nextType = shouldUpdateType ? mediaType : currentMedia.mediaType;
+  upsertLikedItemFts(mediaId, {
+    authorUsername: nextAuthor, shortcode: currentMedia.shortcode,
+    mediaKey: currentMedia.mediaKey, mediaType: nextType,
+    source: item.source,
+  }, sqlite);
+  const changed = !existing || !existingMedia || shouldUpdateLikedAt ||
+    shouldUpdateSource || shouldUpdateAuthor || shouldUpdateType || shouldUpdateHref;
+  return { kind: changed ? (existing ? "updated" as const : "added" as const) : "skipped" as const, id: mediaId };
 }
 
 export async function applyParsedItems(

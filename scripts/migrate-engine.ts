@@ -90,24 +90,29 @@ const CORE_TABLES: TableSpec[] = [
     identity: true,
   },
   {
-    name: "saved_items",
+    name: "media",
     columns: [
       "id", "media_key", "href", "shortcode", "media_type", "author_username",
-      "saved_at", "first_seen_import_id", "last_seen_import_id", "created_at",
-      "updated_at",
+      "created_at", "updated_at",
     ],
-    timestampColumns: ["saved_at", "created_at", "updated_at"],
+    timestampColumns: ["created_at", "updated_at"],
     identity: true,
   },
   {
-    name: "liked_items",
+    name: "saved",
     columns: [
-      "id", "media_key", "href", "shortcode", "media_type", "author_username",
-      "liked_at", "source", "first_seen_import_id", "last_seen_import_id",
+      "media_id", "saved_at", "first_seen_import_id", "last_seen_import_id",
       "created_at", "updated_at",
     ],
+    timestampColumns: ["saved_at", "created_at", "updated_at"],
+  },
+  {
+    name: "liked",
+    columns: [
+      "media_id", "liked_at", "source", "first_seen_import_id",
+      "last_seen_import_id", "created_at", "updated_at",
+    ],
     timestampColumns: ["liked_at", "created_at", "updated_at"],
-    identity: true,
   },
   {
     name: "item_collections",
@@ -454,7 +459,7 @@ async function copyVectors(
   for (const library of ["saved", "liked"] as const) {
     for (const provider of PROVIDERS) {
       const sqliteTable = `${library}_items_vec_${provider}`;
-      const postgresTable = `${library}_item_embeddings`;
+      const postgresTable = "media_embeddings";
       let offset = 0;
       while (true) {
         const rows =
@@ -469,8 +474,10 @@ async function copyVectors(
                 embedding: unknown;
               }>)
             : ((await pool.query(
-                `SELECT item_id, embedding FROM ${quote(postgresTable)}
-                 WHERE provider = $1 ORDER BY item_id LIMIT $2 OFFSET $3`,
+                `SELECT e.media_id AS item_id, e.embedding
+                 FROM ${quote(postgresTable)} e
+                 JOIN ${quote(library)} m ON m.media_id=e.media_id
+                 WHERE e.provider = $1 ORDER BY e.media_id LIMIT $2 OFFSET $3`,
                 [provider, BATCH_SIZE, offset],
               )).rows as Array<{ item_id: number; embedding: unknown }>);
         if (rows.length === 0) break;
@@ -487,8 +494,10 @@ async function copyVectors(
         } else {
           for (const row of rows) {
             await client.query(
-              `INSERT INTO ${quote(postgresTable)} (item_id, provider, embedding)
-               VALUES ($1, $2, $3::vector)`,
+              `INSERT INTO ${quote(postgresTable)} (media_id, provider, embedding)
+               VALUES ($1, $2, $3::vector)
+               ON CONFLICT(media_id, provider) DO UPDATE
+               SET embedding=excluded.embedding`,
               [row.item_id, provider, vectorLiteral(sqliteVector(row.embedding))],
             );
           }
@@ -538,8 +547,7 @@ export async function postgresTargetCount(
     ...JOB_TABLES,
     { name: "saved_items_search" },
     { name: "liked_items_search" },
-    { name: "saved_item_embeddings" },
-    { name: "liked_item_embeddings" },
+    { name: "media_embeddings" },
   ];
   const expressions = tables.map(
     (table) =>

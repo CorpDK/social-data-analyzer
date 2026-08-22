@@ -46,21 +46,22 @@ function querySavesSearchRowsBatch(
   itemIds?: number[],
 ): SavesSearchRow[] {
   const where = itemIds
-    ? `WHERE si.id IN (${itemIds.map(() => "?").join(", ")})`
+    ? `WHERE m.id IN (${itemIds.map(() => "?").join(", ")})`
     : "";
   return sqlite
     .prepare(
       `SELECT
-        si.id,
-        si.author_username AS authorUsername,
-        si.shortcode AS shortcode,
-        si.media_key AS mediaKey,
-        si.media_type AS mediaType,
+        m.id,
+        m.author_username AS authorUsername,
+        m.shortcode AS shortcode,
+        m.media_key AS mediaKey,
+        m.media_type AS mediaType,
         COALESCE(group_concat(ic.collection_name, char(31)), '') AS collections
-      FROM saved_items si
-      LEFT JOIN item_collections ic ON ic.item_id = si.id
+      FROM saved s
+      JOIN media m ON m.id = s.media_id
+      LEFT JOIN item_collections ic ON ic.item_id = m.id
       ${where}
-      GROUP BY si.id`,
+      GROUP BY m.id`,
     )
     .all(...(itemIds ?? []))
     .map(mapSavesSearchRow);
@@ -89,18 +90,19 @@ function queryLikesSearchRowsBatch(
   itemIds?: number[],
 ): LikesSearchRow[] {
   const where = itemIds
-    ? `WHERE id IN (${itemIds.map(() => "?").join(", ")})`
+    ? `WHERE m.id IN (${itemIds.map(() => "?").join(", ")})`
     : "";
   return sqlite
     .prepare(
       `SELECT
-        id,
-        author_username AS authorUsername,
-        shortcode AS shortcode,
-        media_key AS mediaKey,
-        media_type AS mediaType,
-        source AS source
-      FROM liked_items
+        m.id,
+        m.author_username AS authorUsername,
+        m.shortcode AS shortcode,
+        m.media_key AS mediaKey,
+        m.media_type AS mediaType,
+        l.source AS source
+      FROM liked l
+      JOIN media m ON m.id = l.media_id
       ${where}`,
     )
     .all(...(itemIds ?? [])) as LikesSearchRow[];

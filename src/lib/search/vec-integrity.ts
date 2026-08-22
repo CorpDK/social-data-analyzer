@@ -100,7 +100,7 @@ export function assessVectorIntegrity(
         `SELECT count(*) AS c
          FROM ${table} AS v
          WHERE NOT EXISTS (
-           SELECT 1 FROM ${items} AS i WHERE i.id = v.item_id
+           SELECT 1 FROM ${items} AS i WHERE i.media_id = v.item_id
          )`,
       )
       .get() as { c: number }

@@ -8,10 +8,7 @@ function memoryVecDb() {
   const sqlite = new Database(":memory:");
   sqliteVec.load(sqlite);
   sqlite.exec(`
-    CREATE TABLE saved_items (
-      id INTEGER PRIMARY KEY,
-      media_key TEXT NOT NULL
-    );
+    CREATE TABLE saved (media_id INTEGER PRIMARY KEY);
     CREATE VIRTUAL TABLE saved_items_vec_local USING vec0(
       item_id INTEGER PRIMARY KEY,
       embedding FLOAT[4]
@@ -31,8 +28,8 @@ function memoryVecDb() {
 describe("assessVectorIntegrity", () => {
   it("reports ok for a matching items+vec table", () => {
     const sqlite = memoryVecDb();
-    sqlite.prepare(`INSERT INTO saved_items (id, media_key) VALUES (1, 'a')`).run();
-    sqlite.prepare(`INSERT INTO saved_items (id, media_key) VALUES (2, 'b')`).run();
+    sqlite.prepare(`INSERT INTO saved (media_id) VALUES (1)`).run();
+    sqlite.prepare(`INSERT INTO saved (media_id) VALUES (2)`).run();
     const emb = embeddingToBuffer(new Float32Array([0.1, 0.2, 0.3, 0.4]));
     sqlite
       .prepare(
@@ -60,7 +57,7 @@ describe("assessVectorIntegrity", () => {
 
   it("fails when orphan vector rows exist", () => {
     const sqlite = memoryVecDb();
-    sqlite.prepare(`INSERT INTO saved_items (id, media_key) VALUES (1, 'a')`).run();
+    sqlite.prepare(`INSERT INTO saved (media_id) VALUES (1)`).run();
     const emb = embeddingToBuffer(new Float32Array(4).fill(0.5));
     sqlite
       .prepare(
@@ -82,7 +79,7 @@ describe("assessVectorIntegrity", () => {
   it("treats missing vec table as ok (empty)", () => {
     const sqlite = new Database(":memory:");
     sqliteVec.load(sqlite);
-    sqlite.exec(`CREATE TABLE saved_items (id INTEGER PRIMARY KEY);`);
+    sqlite.exec(`CREATE TABLE saved (media_id INTEGER PRIMARY KEY);`);
     const report = assessVectorIntegrity("saves", "local", sqlite);
     expect(report).toMatchObject({
       ok: true,

@@ -168,10 +168,10 @@ async function countImportRows(pool: Pool, importId: number) {
     likes_touched: number;
   }>(
     `SELECT
-      (SELECT count(*)::int FROM saved_items WHERE first_seen_import_id=$1) items_added,
-      (SELECT count(*)::int FROM saved_items WHERE last_seen_import_id=$1) items_touched,
-      (SELECT count(*)::int FROM liked_items WHERE first_seen_import_id=$1) likes_added,
-      (SELECT count(*)::int FROM liked_items WHERE last_seen_import_id=$1) likes_touched`,
+      (SELECT count(*)::int FROM saved WHERE first_seen_import_id=$1) items_added,
+      (SELECT count(*)::int FROM saved WHERE last_seen_import_id=$1) items_touched,
+      (SELECT count(*)::int FROM liked WHERE first_seen_import_id=$1) likes_added,
+      (SELECT count(*)::int FROM liked WHERE last_seen_import_id=$1) likes_touched`,
     [importId],
   );
   const row = result.rows[0]!;
@@ -195,48 +195,60 @@ async function applySave(
     media_key: string;
     media_type: string;
     author_username: string | null;
-    saved_at: Date | null;
-  }>("SELECT * FROM saved_items WHERE media_key=$1", [item.mediaKey]);
+  }>("SELECT * FROM media WHERE media_key=$1", [item.mediaKey]);
   const row = existing.rows[0];
   let id: number;
-  let kind: "added" | "updated" | "skipped";
+  let mediaChanged = false;
   if (!row) {
     const inserted = await client.query<{ id: number }>(
-      `INSERT INTO saved_items(media_key,href,shortcode,media_type,author_username,
-       saved_at,first_seen_import_id,last_seen_import_id)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$7) RETURNING id`,
+      `INSERT INTO media(media_key,href,shortcode,media_type,author_username)
+       VALUES($1,$2,$3,$4,$5) RETURNING id`,
       [
         item.mediaKey,
         item.href,
         item.shortcode,
         item.mediaType,
         item.authorUsername,
-        item.savedAt,
-        importId,
       ],
     );
     id = inserted.rows[0]!.id;
-    kind = "added";
+    mediaChanged = true;
   } else {
     id = row.id;
-    const nextSavedAt =
-      item.savedAt && (!row.saved_at || item.savedAt > row.saved_at)
-        ? item.savedAt
-        : row.saved_at;
     const nextAuthor = item.authorUsername || row.author_username;
     const nextType =
       item.mediaType !== "unknown" ? item.mediaType : row.media_type;
-    const changed =
+    mediaChanged =
       item.href !== row.href ||
       nextAuthor !== row.author_username ||
-      nextType !== row.media_type ||
-      nextSavedAt !== row.saved_at;
+      nextType !== row.media_type;
     await client.query(
-      `UPDATE saved_items SET href=$1, author_username=$2, media_type=$3,
-       saved_at=$4, last_seen_import_id=$5, updated_at=now() WHERE id=$6`,
-      [item.href, nextAuthor, nextType, nextSavedAt, importId, id],
+      `UPDATE media SET href=$1, author_username=$2, media_type=$3,
+       updated_at=now() WHERE id=$4`,
+      [item.href, nextAuthor, nextType, id],
     );
-    kind = changed ? "updated" : "skipped";
+  }
+  const membership = await client.query<{ saved_at: Date | null }>(
+    "SELECT saved_at FROM saved WHERE media_id=$1",
+    [id],
+  );
+  const savedRow = membership.rows[0];
+  const nextSavedAt =
+    item.savedAt && (!savedRow?.saved_at || item.savedAt > savedRow.saved_at)
+      ? item.savedAt
+      : (savedRow?.saved_at ?? null);
+  if (!savedRow) {
+    await client.query(
+      `INSERT INTO saved(media_id,saved_at,first_seen_import_id,last_seen_import_id)
+       VALUES($1,$2,$3,$3)`,
+      [id, nextSavedAt, importId],
+    );
+  } else {
+    await client.query(
+      `UPDATE saved SET saved_at=$1,last_seen_import_id=$2,updated_at=now()
+       WHERE media_id=$3`,
+      [nextSavedAt, importId, id],
+    );
   }
   for (const name of item.collections.map((value) => value.trim()).filter(Boolean)) {
     await client.query(
@@ -253,14 +265,15 @@ async function applySave(
     `INSERT INTO saved_items_search(
        item_id,author_username,shortcode,media_key,media_type,collections)
      SELECT id,author_username,shortcode,media_key,media_type,$2
-       FROM saved_items WHERE id=$1
+       FROM media WHERE id=$1
      ON CONFLICT(item_id) DO UPDATE SET
        author_username=excluded.author_username,shortcode=excluded.shortcode,
        media_key=excluded.media_key,media_type=excluded.media_type,
        collections=excluded.collections`,
     [id, collections.rows.map((value) => value.collection_name).join(" ")],
   );
-  return { kind, id };
+  const changed = mediaChanged || !savedRow || nextSavedAt !== savedRow.saved_at;
+  return { kind: changed ? (savedRow ? "updated" : "added") : "skipped", id };
 }
 
 async function applyLike(
@@ -268,69 +281,87 @@ async function applyLike(
   importId: number,
   item: ParsedLikedItem,
 ) {
+  if (
+    item.source === "liked_comments" ||
+    item.mediaType === "comment" ||
+    item.mediaKey.startsWith("comment:")
+  ) {
+    return { kind: "skipped" as const, id: null };
+  }
   const existing = await client.query<{
     id: number;
     href: string;
     media_type: string;
     author_username: string | null;
-    liked_at: Date | null;
-    source: string;
-  }>("SELECT * FROM liked_items WHERE media_key=$1", [item.mediaKey]);
+  }>("SELECT * FROM media WHERE media_key=$1", [item.mediaKey]);
   const row = existing.rows[0];
   let id: number;
-  let kind: "added" | "updated" | "skipped";
+  let mediaChanged = false;
   if (!row) {
     const inserted = await client.query<{ id: number }>(
-      `INSERT INTO liked_items(media_key,href,shortcode,media_type,author_username,
-       liked_at,source,first_seen_import_id,last_seen_import_id)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$8) RETURNING id`,
+      `INSERT INTO media(media_key,href,shortcode,media_type,author_username)
+       VALUES($1,$2,$3,$4,$5) RETURNING id`,
       [
         item.mediaKey,
         item.href,
         item.shortcode,
         item.mediaType,
         item.authorUsername,
-        item.likedAt,
-        item.source,
-        importId,
       ],
     );
     id = inserted.rows[0]!.id;
-    kind = "added";
+    mediaChanged = true;
   } else {
     id = row.id;
-    const nextLikedAt =
-      item.likedAt && (!row.liked_at || item.likedAt > row.liked_at)
-        ? item.likedAt
-        : row.liked_at;
     const nextAuthor = item.authorUsername || row.author_username;
     const nextType =
       item.mediaType !== "unknown" ? item.mediaType : row.media_type;
-    const changed =
+    mediaChanged =
       item.href !== row.href ||
       nextAuthor !== row.author_username ||
-      nextType !== row.media_type ||
-      nextLikedAt !== row.liked_at ||
-      item.source !== row.source;
+      nextType !== row.media_type;
     await client.query(
-      `UPDATE liked_items SET href=$1,author_username=$2,media_type=$3,
-       liked_at=$4,source=$5,last_seen_import_id=$6,updated_at=now() WHERE id=$7`,
-      [item.href, nextAuthor, nextType, nextLikedAt, item.source, importId, id],
+      `UPDATE media SET href=$1,author_username=$2,media_type=$3,
+       updated_at=now() WHERE id=$4`,
+      [item.href, nextAuthor, nextType, id],
     );
-    kind = changed ? "updated" : "skipped";
+  }
+  const membership = await client.query<{ liked_at: Date | null; source: string }>(
+    "SELECT liked_at,source FROM liked WHERE media_id=$1",
+    [id],
+  );
+  const likedRow = membership.rows[0];
+  const nextLikedAt =
+    item.likedAt && (!likedRow?.liked_at || item.likedAt > likedRow.liked_at)
+      ? item.likedAt
+      : (likedRow?.liked_at ?? null);
+  if (!likedRow) {
+    await client.query(
+      `INSERT INTO liked(media_id,liked_at,source,first_seen_import_id,last_seen_import_id)
+       VALUES($1,$2,$3,$4,$4)`,
+      [id, nextLikedAt, item.source, importId],
+    );
+  } else {
+    await client.query(
+      `UPDATE liked SET liked_at=$1,source=$2,last_seen_import_id=$3,
+       updated_at=now() WHERE media_id=$4`,
+      [nextLikedAt, item.source, importId, id],
+    );
   }
   await client.query(
     `INSERT INTO liked_items_search(
        item_id,author_username,shortcode,media_key,media_type,source)
-     SELECT id,author_username,shortcode,media_key,media_type,source
-       FROM liked_items WHERE id=$1
+     SELECT m.id,m.author_username,m.shortcode,m.media_key,m.media_type,l.source
+       FROM media m JOIN liked l ON l.media_id=m.id WHERE m.id=$1
      ON CONFLICT(item_id) DO UPDATE SET
        author_username=excluded.author_username,shortcode=excluded.shortcode,
        media_key=excluded.media_key,media_type=excluded.media_type,
        source=excluded.source`,
     [id],
   );
-  return { kind, id };
+  const changed = mediaChanged || !likedRow ||
+    nextLikedAt !== likedRow.liked_at || item.source !== likedRow.source;
+  return { kind: changed ? (likedRow ? "updated" : "added") : "skipped", id };
 }
 
 async function applyItems<T extends ParsedSavedItem | ParsedLikedItem>(
@@ -354,7 +385,7 @@ async function applyItems<T extends ParsedSavedItem | ParsedLikedItem>(
     if (outcome.kind === "added") added += 1;
     else if (outcome.kind === "updated") updated += 1;
     else skipped += 1;
-    if (outcome.kind !== "skipped") changedIds.push(outcome.id);
+    if (outcome.kind !== "skipped" && outcome.id != null) changedIds.push(outcome.id);
     if ((index + 1) % 20 === 0 || index + 1 === items.length) {
       await emitProgress(options?.onProgress, {
         phase: "writing",
@@ -384,27 +415,29 @@ export function createPostgresCatalogStore(pool: Pool): CatalogStore {
         import_count: number;
       }>(
         `SELECT
-          (SELECT count(*)::int FROM saved_items) total_items,
-          (SELECT count(*)::int FROM saved_items WHERE media_type='post') posts,
-          (SELECT count(*)::int FROM saved_items WHERE media_type='reel') reels,
-          (SELECT count(DISTINCT author_username)::int FROM saved_items) authors,
-          (SELECT count(*)::int FROM liked_items) total_likes,
-          (SELECT count(*)::int FROM liked_items WHERE media_type='post') liked_posts,
-          (SELECT count(*)::int FROM liked_items WHERE media_type='reel') liked_reels,
-          (SELECT count(*)::int FROM liked_items WHERE media_type='story') liked_stories,
-          (SELECT count(*)::int FROM liked_items WHERE media_type='comment') liked_comments,
+          (SELECT count(*)::int FROM saved) total_items,
+          (SELECT count(*)::int FROM saved s JOIN media m ON m.id=s.media_id WHERE m.media_type='post') posts,
+          (SELECT count(*)::int FROM saved s JOIN media m ON m.id=s.media_id WHERE m.media_type='reel') reels,
+          (SELECT count(DISTINCT m.author_username)::int FROM saved s JOIN media m ON m.id=s.media_id) authors,
+          (SELECT count(*)::int FROM liked) total_likes,
+          (SELECT count(*)::int FROM liked l JOIN media m ON m.id=l.media_id WHERE m.media_type='post') liked_posts,
+          (SELECT count(*)::int FROM liked l JOIN media m ON m.id=l.media_id WHERE m.media_type='reel') liked_reels,
+          (SELECT count(*)::int FROM liked l JOIN media m ON m.id=l.media_id WHERE m.media_type='story') liked_stories,
+          0::int liked_comments,
           (SELECT count(*)::int FROM imports) import_count`,
       );
       const row = result.rows[0]!;
       const [top, topLikes, collections, recent] = await Promise.all([
         pool.query<{ author_username: string | null; total: number }>(
-          `SELECT author_username,count(*)::int total FROM saved_items
-           WHERE author_username IS NOT NULL GROUP BY author_username
+          `SELECT m.author_username,count(*)::int total FROM saved s
+           JOIN media m ON m.id=s.media_id
+           WHERE m.author_username IS NOT NULL GROUP BY m.author_username
            ORDER BY total DESC LIMIT 10`,
         ),
         pool.query<{ author_username: string | null; total: number }>(
-          `SELECT author_username,count(*)::int total FROM liked_items
-           WHERE author_username IS NOT NULL GROUP BY author_username
+          `SELECT m.author_username,count(*)::int total FROM liked l
+           JOIN media m ON m.id=l.media_id
+           WHERE m.author_username IS NOT NULL GROUP BY m.author_username
            ORDER BY total DESC LIMIT 10`,
         ),
         pool.query<{ collection_name: string; total: number }>(
@@ -452,31 +485,35 @@ export function createPostgresCatalogStore(pool: Pool): CatalogStore {
       if (query.q?.trim()) {
         const p = add(query.q.trim());
         filters.push(
-          `EXISTS (SELECT 1 FROM saved_items_search s WHERE s.item_id=i.id
-           AND s.search_vector @@ websearch_to_tsquery('simple', ${p}))`,
+          `EXISTS (SELECT 1 FROM saved_items_search x WHERE x.item_id=m.id
+           AND x.search_vector @@ websearch_to_tsquery('simple', ${p}))`,
         );
         searchMode = "fts";
       }
       if (query.type && query.type !== "all")
-        filters.push(`i.media_type=${add(query.type)}`);
-      if (query.author) filters.push(`i.author_username=${add(query.author)}`);
+        filters.push(`m.media_type=${add(query.type)}`);
+      if (query.author) filters.push(`m.author_username=${add(query.author)}`);
       if (query.collection)
         filters.push(
-          `EXISTS (SELECT 1 FROM item_collections c WHERE c.item_id=i.id
+          `EXISTS (SELECT 1 FROM item_collections c WHERE c.item_id=m.id
            AND c.collection_name=${add(query.collection)})`,
         );
       const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
       const count = await pool.query<{ count: string }>(
-        `SELECT count(*) FROM saved_items i ${where}`,
+        `SELECT count(*) FROM saved i JOIN media m ON m.id=i.media_id ${where}`,
         values,
       );
       const limit = add(pageSize);
       const offset = add((page - 1) * pageSize);
       const rows = await pool.query(
-        `SELECT i.*,coalesce(array_agg(c.collection_name)
+        `SELECT m.*,i.saved_at,i.first_seen_import_id,i.last_seen_import_id,
+           EXISTS(SELECT 1 FROM liked l WHERE l.media_id=m.id) liked,
+           coalesce(array_agg(c.collection_name)
            FILTER (WHERE c.collection_name IS NOT NULL),'{}') collections
-         FROM saved_items i LEFT JOIN item_collections c ON c.item_id=i.id
-         ${where} GROUP BY i.id ORDER BY i.saved_at DESC NULLS LAST,i.id DESC
+         FROM saved i JOIN media m ON m.id=i.media_id
+         LEFT JOIN item_collections c ON c.item_id=m.id
+         ${where} GROUP BY m.id,i.media_id
+         ORDER BY i.saved_at DESC NULLS LAST,m.id DESC
          LIMIT ${limit} OFFSET ${offset}`,
         values,
       );
@@ -508,27 +545,26 @@ export function createPostgresCatalogStore(pool: Pool): CatalogStore {
       if (query.q?.trim()) {
         const p = add(query.q.trim());
         filters.push(
-          `EXISTS (SELECT 1 FROM liked_items_search s WHERE s.item_id=i.id
-           AND s.search_vector @@ websearch_to_tsquery('simple', ${p}))`,
+          `EXISTS (SELECT 1 FROM liked_items_search x WHERE x.item_id=m.id
+           AND x.search_vector @@ websearch_to_tsquery('simple', ${p}))`,
         );
         searchMode = "fts";
       }
       if (query.type && query.type !== "all")
-        filters.push(`i.media_type=${add(query.type)}`);
-      if (query.author) filters.push(`i.author_username=${add(query.author)}`);
+        filters.push(`m.media_type=${add(query.type)}`);
+      if (query.author) filters.push(`m.author_username=${add(query.author)}`);
       const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
       const count = await pool.query<{ count: string }>(
-        `SELECT count(*) FROM liked_items i ${where}`,
+        `SELECT count(*) FROM liked i JOIN media m ON m.id=i.media_id ${where}`,
         values,
       );
       const limit = add(pageSize);
       const offset = add((page - 1) * pageSize);
       const rows = await pool.query(
-        `SELECT i.*,EXISTS(SELECT 1 FROM saved_items s
-           WHERE s.media_key=i.media_key OR
-             (i.shortcode IS NOT NULL AND s.shortcode=i.shortcode)) also_saved
-         FROM liked_items i ${where}
-         ORDER BY i.liked_at DESC NULLS LAST,i.id DESC
+        `SELECT m.*,i.liked_at,i.source,i.first_seen_import_id,i.last_seen_import_id,
+           EXISTS(SELECT 1 FROM saved s WHERE s.media_id=m.id) also_saved
+         FROM liked i JOIN media m ON m.id=i.media_id ${where}
+         ORDER BY i.liked_at DESC NULLS LAST,m.id DESC
          LIMIT ${limit} OFFSET ${offset}`,
         values,
       );
@@ -558,8 +594,9 @@ export function createPostgresCatalogStore(pool: Pool): CatalogStore {
     listSavesFilterOptions: async () => {
       const [authors, collections] = await Promise.all([
         pool.query<{ author_username: string }>(
-          `SELECT DISTINCT author_username FROM saved_items
-           WHERE author_username IS NOT NULL ORDER BY author_username`,
+          `SELECT DISTINCT m.author_username FROM saved s
+           JOIN media m ON m.id=s.media_id
+           WHERE m.author_username IS NOT NULL ORDER BY m.author_username`,
         ),
         pool.query<{ collection_name: string }>(
           "SELECT DISTINCT collection_name FROM item_collections ORDER BY collection_name",
@@ -572,8 +609,9 @@ export function createPostgresCatalogStore(pool: Pool): CatalogStore {
     },
     listLikesFilterOptions: async () => {
       const result = await pool.query<{ author_username: string }>(
-        `SELECT DISTINCT author_username FROM liked_items
-         WHERE author_username IS NOT NULL ORDER BY author_username`,
+        `SELECT DISTINCT m.author_username FROM liked l
+         JOIN media m ON m.id=l.media_id
+         WHERE m.author_username IS NOT NULL ORDER BY m.author_username`,
       );
       return { authors: result.rows.map((row) => row.author_username) };
     },
@@ -726,6 +764,7 @@ function mapSaved(row: Record<string, unknown>) {
     createdAt: (row.created_at as Date).toISOString(),
     updatedAt: (row.updated_at as Date).toISOString(),
     collections: (row.collections as string[]) ?? [],
+    membership: { saved: true, liked: Boolean(row.liked) },
   };
 }
 
@@ -740,19 +779,16 @@ function mapLiked(row: Record<string, unknown>) {
       | "reel"
       | "igtv"
       | "story"
-      | "comment"
       | "unknown",
     authorUsername: (row.author_username as string | null) ?? null,
     likedAt: (row.liked_at as Date | null)?.toISOString() ?? null,
-    source: String(row.source) as
-      | "liked_posts"
-      | "story_likes"
-      | "liked_comments",
+    source: String(row.source) as "liked_posts" | "story_likes",
     firstSeenImportId: Number(row.first_seen_import_id),
     lastSeenImportId: Number(row.last_seen_import_id),
     createdAt: (row.created_at as Date).toISOString(),
     updatedAt: (row.updated_at as Date).toISOString(),
     alsoSaved: Boolean(row.also_saved),
+    membership: { saved: Boolean(row.also_saved), liked: true },
   };
 }
 
@@ -782,12 +818,17 @@ async function rollback(pool: Pool, importId: number) {
   const before = await countImportRows(pool, importId);
   const result = await transaction(pool, async (client) => {
     const saves = await client.query(
-      "DELETE FROM saved_items WHERE first_seen_import_id=$1",
+      "DELETE FROM saved WHERE first_seen_import_id=$1",
       [importId],
     );
     const likes = await client.query(
-      "DELETE FROM liked_items WHERE first_seen_import_id=$1",
+      "DELETE FROM liked WHERE first_seen_import_id=$1",
       [importId],
+    );
+    await client.query(
+      `DELETE FROM media m WHERE NOT EXISTS
+         (SELECT 1 FROM saved s WHERE s.media_id=m.id)
+       AND NOT EXISTS (SELECT 1 FROM liked l WHERE l.media_id=m.id)`,
     );
     return {
       savesDeleted: saves.rowCount ?? 0,

@@ -103,8 +103,8 @@ export function createSqliteSearchIndex(sqlite: Database.Database): SearchIndex 
             c: number;
           }
         ).c;
-      const savesItems = count("saved_items");
-      const likesItems = count("liked_items");
+      const savesItems = count("saved");
+      const likesItems = count("liked");
       const savesFtsGap = Math.max(0, savesItems - ftsCount("saves", sqlite));
       const likesFtsGap = Math.max(0, likesItems - ftsCount("likes", sqlite));
       const savesLocal = vecCount("saves", "local", sqlite);

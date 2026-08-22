@@ -288,6 +288,9 @@ export function accumulateLikedExportJsonFile(
   if (!source) return;
 
   acc.likedJsonFiles.push(file.name);
+  // Comments are deliberately outside the v11 canonical-media model. Keep
+  // recognizing their export files, but never turn their rows into media.
+  if (source === "liked_comments") return;
 
   try {
     const json = JSON.parse(file.content) as unknown;

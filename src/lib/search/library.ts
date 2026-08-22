@@ -38,7 +38,7 @@ export function profileIndexName(
 }
 
 export function itemsTableName(library: SearchLibrary): string {
-  return library === "saves" ? "saved_items" : "liked_items";
+  return library === "saves" ? "saved" : "liked";
 }
 
 export function ftsTableName(library: SearchLibrary): string {

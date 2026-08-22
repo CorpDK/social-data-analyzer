@@ -98,8 +98,8 @@ export function createPostgresMaintenanceOps(pool: Pool): MaintenanceOps {
       }>(
         `SELECT
           (SELECT count(*)::int FROM imports) AS imports,
-          (SELECT count(*)::int FROM saved_items) AS saved_items,
-          (SELECT count(*)::int FROM liked_items) AS liked_items,
+          (SELECT count(*)::int FROM saved) AS saved_items,
+          (SELECT count(*)::int FROM liked) AS liked_items,
           (SELECT count(*)::int FROM item_collections) AS item_collections,
           (SELECT count(*)::int FROM embedding_index_profiles) AS embedding_profiles,
           (SELECT count(*)::int FROM embedding_jobs) AS embedding_jobs,
@@ -108,10 +108,10 @@ export function createPostgresMaintenanceOps(pool: Pool): MaintenanceOps {
       const before = counts.rows[0]!;
       await pool.query(
         `TRUNCATE TABLE
-          saved_item_embeddings, liked_item_embeddings,
+          media_embeddings,
           saved_items_search, liked_items_search,
           import_schemas, item_collections, import_jobs, embedding_jobs,
-          embedding_index_profiles, saved_items, liked_items, imports
+          embedding_index_profiles, saved, liked, media, imports
          RESTART IDENTITY CASCADE`,
       );
       clearImportSpool();
@@ -139,16 +139,16 @@ export function createPostgresMaintenanceOps(pool: Pool): MaintenanceOps {
       }>(
         `SELECT
           (SELECT count(*)::int FROM item_collections c
-             WHERE NOT EXISTS (SELECT 1 FROM saved_items i WHERE i.id=c.item_id))
+             WHERE NOT EXISTS (SELECT 1 FROM saved i WHERE i.media_id=c.item_id))
              AS orphan_collections,
           (SELECT count(*)::int FROM import_schemas s
              WHERE NOT EXISTS (SELECT 1 FROM imports i WHERE i.id=s.import_id))
              AS orphan_schemas,
           (SELECT count(*)::int FROM saved_items_search s
-             WHERE NOT EXISTS (SELECT 1 FROM saved_items i WHERE i.id=s.item_id))
+             WHERE NOT EXISTS (SELECT 1 FROM saved i WHERE i.media_id=s.item_id))
              AS orphan_save_search,
           (SELECT count(*)::int FROM liked_items_search s
-             WHERE NOT EXISTS (SELECT 1 FROM liked_items i WHERE i.id=s.item_id))
+             WHERE NOT EXISTS (SELECT 1 FROM liked i WHERE i.media_id=s.item_id))
              AS orphan_like_search`,
       );
       const row = result.rows[0]!;

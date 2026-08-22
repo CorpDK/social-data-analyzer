@@ -11,8 +11,7 @@ export const ENGINE_MIGRATION_TABLE = "engine_migration";
 export const ENGINE_MIGRATION_ADVISORY_LOCK = 8_723_640_1;
 
 export const POSTGRES_LIBRARY_TABLES = [
-  "saved_item_embeddings",
-  "liked_item_embeddings",
+  "media_embeddings",
   "saved_items_search",
   "liked_items_search",
   "import_schemas",
@@ -20,8 +19,9 @@ export const POSTGRES_LIBRARY_TABLES = [
   "import_jobs",
   "embedding_jobs",
   "embedding_index_profiles",
-  "saved_items",
-  "liked_items",
+  "saved",
+  "liked",
+  "media",
   "imports",
   "app_settings",
 ] as const;

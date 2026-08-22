@@ -1,5 +1,5 @@
 {
-  "id": "74723a44-ab2a-4a27-aa73-22cca80d8459",
+  "id": "9280428d-a3f8-44ce-bb0f-a09e91ce95e8",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -755,15 +755,15 @@
         }
       },
       "foreignKeys": {
-        "item_collections_item_id_saved_items_id_fk": {
-          "name": "item_collections_item_id_saved_items_id_fk",
+        "item_collections_item_id_saved_media_id_fk": {
+          "name": "item_collections_item_id_saved_media_id_fk",
           "tableFrom": "item_collections",
-          "tableTo": "saved_items",
+          "tableTo": "saved",
           "columnsFrom": [
             "item_id"
           ],
           "columnsTo": [
-            "id"
+            "media_id"
           ],
           "onDelete": "cascade",
           "onUpdate": "no action"
@@ -775,57 +775,15 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.liked_items": {
-      "name": "liked_items",
+    "public.liked": {
+      "name": "liked",
       "schema": "",
       "columns": {
-        "id": {
-          "name": "id",
+        "media_id": {
+          "name": "media_id",
           "type": "integer",
           "primaryKey": true,
-          "notNull": true,
-          "identity": {
-            "type": "always",
-            "name": "liked_items_id_seq",
-            "schema": "public",
-            "increment": "1",
-            "startWith": "1",
-            "minValue": "1",
-            "maxValue": "2147483647",
-            "cache": "1",
-            "cycle": false
-          }
-        },
-        "media_key": {
-          "name": "media_key",
-          "type": "text",
-          "primaryKey": false,
           "notNull": true
-        },
-        "href": {
-          "name": "href",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "shortcode": {
-          "name": "shortcode",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "media_type": {
-          "name": "media_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'unknown'"
-        },
-        "author_username": {
-          "name": "author_username",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "liked_at": {
           "name": "liked_at",
@@ -868,53 +826,8 @@
         }
       },
       "indexes": {
-        "liked_items_media_key_uidx": {
-          "name": "liked_items_media_key_uidx",
-          "columns": [
-            {
-              "expression": "media_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "liked_items_author_idx": {
-          "name": "liked_items_author_idx",
-          "columns": [
-            {
-              "expression": "author_username",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "liked_items_type_idx": {
-          "name": "liked_items_type_idx",
-          "columns": [
-            {
-              "expression": "media_type",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "liked_items_liked_at_idx": {
-          "name": "liked_items_liked_at_idx",
+        "liked_liked_at_idx": {
+          "name": "liked_liked_at_idx",
           "columns": [
             {
               "expression": "liked_at",
@@ -928,8 +841,8 @@
           "method": "btree",
           "with": {}
         },
-        "liked_items_source_idx": {
-          "name": "liked_items_source_idx",
+        "liked_source_idx": {
+          "name": "liked_source_idx",
           "columns": [
             {
               "expression": "source",
@@ -945,9 +858,22 @@
         }
       },
       "foreignKeys": {
-        "liked_items_first_seen_import_id_imports_id_fk": {
-          "name": "liked_items_first_seen_import_id_imports_id_fk",
-          "tableFrom": "liked_items",
+        "liked_media_id_media_id_fk": {
+          "name": "liked_media_id_media_id_fk",
+          "tableFrom": "liked",
+          "tableTo": "media",
+          "columnsFrom": [
+            "media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "liked_first_seen_import_id_imports_id_fk": {
+          "name": "liked_first_seen_import_id_imports_id_fk",
+          "tableFrom": "liked",
           "tableTo": "imports",
           "columnsFrom": [
             "first_seen_import_id"
@@ -958,9 +884,9 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "liked_items_last_seen_import_id_imports_id_fk": {
-          "name": "liked_items_last_seen_import_id_imports_id_fk",
-          "tableFrom": "liked_items",
+        "liked_last_seen_import_id_imports_id_fk": {
+          "name": "liked_last_seen_import_id_imports_id_fk",
+          "tableFrom": "liked",
           "tableTo": "imports",
           "columnsFrom": [
             "last_seen_import_id"
@@ -978,8 +904,8 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.saved_items": {
-      "name": "saved_items",
+    "public.media": {
+      "name": "media",
       "schema": "",
       "columns": {
         "id": {
@@ -989,7 +915,7 @@
           "notNull": true,
           "identity": {
             "type": "always",
-            "name": "saved_items_id_seq",
+            "name": "media_id_seq",
             "schema": "public",
             "increment": "1",
             "startWith": "1",
@@ -1030,6 +956,85 @@
           "primaryKey": false,
           "notNull": false
         },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "media_media_key_uidx": {
+          "name": "media_media_key_uidx",
+          "columns": [
+            {
+              "expression": "media_key",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_author_idx": {
+          "name": "media_author_idx",
+          "columns": [
+            {
+              "expression": "author_username",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "media_type_idx": {
+          "name": "media_type_idx",
+          "columns": [
+            {
+              "expression": "media_type",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.saved": {
+      "name": "saved",
+      "schema": "",
+      "columns": {
+        "media_id": {
+          "name": "media_id",
+          "type": "integer",
+          "primaryKey": true,
+          "notNull": true
+        },
         "saved_at": {
           "name": "saved_at",
           "type": "timestamp with time zone",
@@ -1064,53 +1069,8 @@
         }
       },
       "indexes": {
-        "saved_items_media_key_uidx": {
-          "name": "saved_items_media_key_uidx",
-          "columns": [
-            {
-              "expression": "media_key",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": true,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "saved_items_author_idx": {
-          "name": "saved_items_author_idx",
-          "columns": [
-            {
-              "expression": "author_username",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "saved_items_type_idx": {
-          "name": "saved_items_type_idx",
-          "columns": [
-            {
-              "expression": "media_type",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "saved_items_saved_at_idx": {
-          "name": "saved_items_saved_at_idx",
+        "saved_saved_at_idx": {
+          "name": "saved_saved_at_idx",
           "columns": [
             {
               "expression": "saved_at",
@@ -1126,9 +1086,22 @@
         }
       },
       "foreignKeys": {
-        "saved_items_first_seen_import_id_imports_id_fk": {
-          "name": "saved_items_first_seen_import_id_imports_id_fk",
-          "tableFrom": "saved_items",
+        "saved_media_id_media_id_fk": {
+          "name": "saved_media_id_media_id_fk",
+          "tableFrom": "saved",
+          "tableTo": "media",
+          "columnsFrom": [
+            "media_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "saved_first_seen_import_id_imports_id_fk": {
+          "name": "saved_first_seen_import_id_imports_id_fk",
+          "tableFrom": "saved",
           "tableTo": "imports",
           "columnsFrom": [
             "first_seen_import_id"
@@ -1139,9 +1112,9 @@
           "onDelete": "no action",
           "onUpdate": "no action"
         },
-        "saved_items_last_seen_import_id_imports_id_fk": {
-          "name": "saved_items_last_seen_import_id_imports_id_fk",
-          "tableFrom": "saved_items",
+        "saved_last_seen_import_id_imports_id_fk": {
+          "name": "saved_last_seen_import_id_imports_id_fk",
+          "tableFrom": "saved",
           "tableTo": "imports",
           "columnsFrom": [
             "last_seen_import_id"

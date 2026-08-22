@@ -25,7 +25,7 @@ export function countPersistedImportRows(
   const itemsAdded = (
     sqlite
       .prepare(
-        `SELECT count(*) AS c FROM saved_items WHERE first_seen_import_id = ?`,
+        `SELECT count(*) AS c FROM saved WHERE first_seen_import_id = ?`,
       )
       .get(importId) as { c: number }
   ).c;
@@ -33,7 +33,7 @@ export function countPersistedImportRows(
   const itemsTouched = (
     sqlite
       .prepare(
-        `SELECT count(*) AS c FROM saved_items WHERE last_seen_import_id = ?`,
+        `SELECT count(*) AS c FROM saved WHERE last_seen_import_id = ?`,
       )
       .get(importId) as { c: number }
   ).c;
@@ -41,7 +41,7 @@ export function countPersistedImportRows(
   const likesAdded = (
     sqlite
       .prepare(
-        `SELECT count(*) AS c FROM liked_items WHERE first_seen_import_id = ?`,
+        `SELECT count(*) AS c FROM liked WHERE first_seen_import_id = ?`,
       )
       .get(importId) as { c: number }
   ).c;
@@ -49,7 +49,7 @@ export function countPersistedImportRows(
   const likesTouched = (
     sqlite
       .prepare(
-        `SELECT count(*) AS c FROM liked_items WHERE last_seen_import_id = ?`,
+        `SELECT count(*) AS c FROM liked WHERE last_seen_import_id = ?`,
       )
       .get(importId) as { c: number }
   ).c;

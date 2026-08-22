@@ -10,10 +10,9 @@ const DIMENSIONS = 1024;
 
 const searchTable = (library: SearchLibrary) =>
   library === "saves" ? "saved_items_search" : "liked_items_search";
-const embeddingTable = (library: SearchLibrary) =>
-  library === "saves" ? "saved_item_embeddings" : "liked_item_embeddings";
+const embeddingTable = (_library: SearchLibrary) => "media_embeddings";
 const itemsTable = (library: SearchLibrary) =>
-  library === "saves" ? "saved_items" : "liked_items";
+  library === "saves" ? "saved" : "liked";
 
 function vectorLiteral(vector: Float32Array): string {
   if (vector.length !== DIMENSIONS) {
@@ -83,7 +82,9 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
     index: VectorIndexName,
   ) => {
     const result = await pool.query<{ count: string }>(
-      `SELECT count(*) FROM ${embeddingTable(library)} WHERE provider = $1`,
+      `SELECT count(*) FROM ${embeddingTable(library)} e
+       JOIN ${itemsTable(library)} i ON i.media_id=e.media_id
+       WHERE e.provider = $1`,
       [index],
     );
     return Number(result.rows[0]?.count ?? 0);
@@ -98,12 +99,12 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
     insertOnly = false,
   ) =>
     client.query(
-      `INSERT INTO ${embeddingTable(library)}(item_id, provider, embedding)
+      `INSERT INTO ${embeddingTable(library)}(media_id, provider, embedding)
        VALUES ($1, $2, $3::vector)
        ${
          insertOnly
-           ? ""
-           : "ON CONFLICT(item_id, provider) DO UPDATE SET embedding = excluded.embedding"
+           ? "ON CONFLICT(media_id, provider) DO NOTHING"
+           : "ON CONFLICT(media_id, provider) DO UPDATE SET embedding = excluded.embedding"
        }`,
       [itemId, index, vectorLiteral(embedding)],
     );
@@ -170,7 +171,10 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
         );
       }
       await pool.query(
-        `DELETE FROM ${embeddingTable(library)} WHERE provider = $1`,
+        `DELETE FROM ${embeddingTable(library)} e WHERE e.provider = $1
+         AND EXISTS (
+           SELECT 1 FROM ${itemsTable(library)} i WHERE i.media_id=e.media_id
+         )`,
         [index],
       );
     },
@@ -232,7 +236,9 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
     },
     existingEmbeddingItemIds: async (library, index) => {
       const result = await pool.query<{ item_id: number }>(
-        `SELECT item_id FROM ${embeddingTable(library)} WHERE provider=$1`,
+        `SELECT e.media_id AS item_id FROM ${embeddingTable(library)} e
+         JOIN ${itemsTable(library)} i ON i.media_id=e.media_id
+         WHERE e.provider=$1`,
         [index],
       );
       return new Set(result.rows.map((row) => row.item_id));
@@ -240,7 +246,7 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
     allSavesSearchRows: async (itemIds) => {
       if (itemIds?.length === 0) return [];
       const values = itemIds ? [itemIds] : [];
-      const where = itemIds ? "WHERE si.id = ANY($1::int[])" : "";
+      const where = itemIds ? "WHERE m.id = ANY($1::int[])" : "";
       const result = await pool.query<{
         id: number;
         author_username: string | null;
@@ -249,13 +255,13 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
         media_type: string;
         collections: string[];
       }>(
-        `SELECT si.id, si.author_username, si.shortcode, si.media_key,
-           si.media_type,
+        `SELECT m.id, m.author_username, m.shortcode, m.media_key,
+           m.media_type,
            coalesce(array_agg(ic.collection_name)
              FILTER (WHERE ic.collection_name IS NOT NULL), '{}') AS collections
-         FROM saved_items si
-         LEFT JOIN item_collections ic ON ic.item_id = si.id
-         ${where} GROUP BY si.id`,
+         FROM saved s JOIN media m ON m.id=s.media_id
+         LEFT JOIN item_collections ic ON ic.item_id = m.id
+         ${where} GROUP BY m.id`,
         values,
       );
       return result.rows.map((row) => ({
@@ -277,8 +283,10 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
         media_type: string;
         source: string;
       }>(
-        `SELECT id, author_username, shortcode, media_key, media_type, source
-         FROM liked_items ${itemIds ? "WHERE id = ANY($1::int[])" : ""}`,
+        `SELECT m.id, m.author_username, m.shortcode, m.media_key,
+           m.media_type, l.source
+         FROM liked l JOIN media m ON m.id=l.media_id
+         ${itemIds ? "WHERE m.id = ANY($1::int[])" : ""}`,
         itemIds ? [itemIds] : [],
       );
       return result.rows.map((row) => ({
@@ -307,10 +315,11 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
     },
     searchVector: async (library, index, embedding, limit) => {
       const result = await pool.query<{ id: number; distance: number }>(
-        `SELECT item_id AS id, embedding <=> $1::vector AS distance
-         FROM ${embeddingTable(library)}
-         WHERE provider=$2
-         ORDER BY embedding <=> $1::vector LIMIT $3`,
+        `SELECT e.media_id AS id, e.embedding <=> $1::vector AS distance
+         FROM ${embeddingTable(library)} e
+         JOIN ${itemsTable(library)} i ON i.media_id=e.media_id
+         WHERE e.provider=$2
+         ORDER BY e.embedding <=> $1::vector LIMIT $3`,
         [vectorLiteral(embedding), index, limit],
       );
       return result.rows.map((row) => ({
@@ -325,7 +334,7 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
         pool.query<{ count: string }>(
           `SELECT count(*) FROM ${embeddingTable(library)} e
            WHERE e.provider = $1 AND NOT EXISTS (
-             SELECT 1 FROM ${itemsTable(library)} i WHERE i.id = e.item_id
+             SELECT 1 FROM ${itemsTable(library)} i WHERE i.media_id = e.media_id
            )`,
           [index],
         ),
@@ -354,8 +363,8 @@ export function createPostgresSearchIndex(pool: Pool): SearchIndex {
     assessSearchIndexGaps: async () => {
       const [savesItems, likesItems, savesFts, likesFts, savesVec, likesVec] =
         await Promise.all([
-          pool.query<{ count: string }>("SELECT count(*) FROM saved_items"),
-          pool.query<{ count: string }>("SELECT count(*) FROM liked_items"),
+          pool.query<{ count: string }>("SELECT count(*) FROM saved"),
+          pool.query<{ count: string }>("SELECT count(*) FROM liked"),
           pool.query<{ count: string }>("SELECT count(*) FROM saved_items_search"),
           pool.query<{ count: string }>("SELECT count(*) FROM liked_items_search"),
           countVectors("saves", "local"),

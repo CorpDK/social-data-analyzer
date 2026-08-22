@@ -40,8 +40,8 @@ export const imports = pgTable(
   (table) => [index("imports_content_hash_idx").on(table.contentHash)],
 );
 
-export const savedItems = pgTable(
-  "saved_items",
+export const media = pgTable(
+  "media",
   {
     id: id(),
     mediaKey: text("media_key").notNull(),
@@ -49,6 +49,26 @@ export const savedItems = pgTable(
     shortcode: text("shortcode"),
     mediaType: text("media_type").notNull().default("unknown"),
     authorUsername: text("author_username"),
+    createdAt: timestamp("created_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (table) => [
+    uniqueIndex("media_media_key_uidx").on(table.mediaKey),
+    index("media_author_idx").on(table.authorUsername),
+    index("media_type_idx").on(table.mediaType),
+  ],
+);
+
+export const saved = pgTable(
+  "saved",
+  {
+    mediaId: integer("media_id")
+      .primaryKey()
+      .references(() => media.id, { onDelete: "cascade" }),
     savedAt: timestamp("saved_at", { withTimezone: true }),
     firstSeenImportId: integer("first_seen_import_id")
       .notNull()
@@ -63,12 +83,7 @@ export const savedItems = pgTable(
       .notNull()
       .defaultNow(),
   },
-  (table) => [
-    uniqueIndex("saved_items_media_key_uidx").on(table.mediaKey),
-    index("saved_items_author_idx").on(table.authorUsername),
-    index("saved_items_type_idx").on(table.mediaType),
-    index("saved_items_saved_at_idx").on(table.savedAt),
-  ],
+  (table) => [index("saved_saved_at_idx").on(table.savedAt)],
 );
 
 export const itemCollections = pgTable(
@@ -77,7 +92,7 @@ export const itemCollections = pgTable(
     id: id(),
     itemId: integer("item_id")
       .notNull()
-      .references(() => savedItems.id, { onDelete: "cascade" }),
+      .references(() => saved.mediaId, { onDelete: "cascade" }),
     collectionName: text("collection_name").notNull(),
   },
   (table) => [
@@ -89,15 +104,12 @@ export const itemCollections = pgTable(
   ],
 );
 
-export const likedItems = pgTable(
-  "liked_items",
+export const liked = pgTable(
+  "liked",
   {
-    id: id(),
-    mediaKey: text("media_key").notNull(),
-    href: text("href").notNull(),
-    shortcode: text("shortcode"),
-    mediaType: text("media_type").notNull().default("unknown"),
-    authorUsername: text("author_username"),
+    mediaId: integer("media_id")
+      .primaryKey()
+      .references(() => media.id, { onDelete: "cascade" }),
     likedAt: timestamp("liked_at", { withTimezone: true }),
     source: text("source").notNull().default("liked_posts"),
     firstSeenImportId: integer("first_seen_import_id")
@@ -114,11 +126,8 @@ export const likedItems = pgTable(
       .defaultNow(),
   },
   (table) => [
-    uniqueIndex("liked_items_media_key_uidx").on(table.mediaKey),
-    index("liked_items_author_idx").on(table.authorUsername),
-    index("liked_items_type_idx").on(table.mediaType),
-    index("liked_items_liked_at_idx").on(table.likedAt),
-    index("liked_items_source_idx").on(table.source),
+    index("liked_liked_at_idx").on(table.likedAt),
+    index("liked_source_idx").on(table.source),
   ],
 );
 
