@@ -35,6 +35,15 @@ export const INCOMPLETE_ENGINE_MIGRATION_MESSAGE =
   "or DROP/recreate the database and retry. Do not point the app at this database " +
   "until the copy completes.";
 
+export class IncompleteEngineMigrationError extends Error {
+  readonly code = "POSTGRES_MIGRATION_IN_PROGRESS" as const;
+
+  constructor() {
+    super(INCOMPLETE_ENGINE_MIGRATION_MESSAGE);
+    this.name = "IncompleteEngineMigrationError";
+  }
+}
+
 export async function postgresEngineMigrationStatus(
   db: Queryable,
 ): Promise<EngineMigrationStatus> {
@@ -53,7 +62,7 @@ export async function postgresEngineMigrationStatus(
 export async function assertPostgresMigrationUsable(db: Queryable): Promise<void> {
   const status = await postgresEngineMigrationStatus(db);
   if (status === "in_progress") {
-    throw new Error(INCOMPLETE_ENGINE_MIGRATION_MESSAGE);
+    throw new IncompleteEngineMigrationError();
   }
 }
 

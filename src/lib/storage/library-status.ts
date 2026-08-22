@@ -22,6 +22,15 @@ function sqliteBase(filePath: string) {
   };
 }
 
+function postgresBase(location: string) {
+  return {
+    engine: "postgres" as const,
+    displayName: "PostgreSQL",
+    location,
+    locationFolder: null,
+  };
+}
+
 export function markLibraryUpdating(filePath: string): void {
   globalForLibraryStatus.instagramSavesLibraryStatus = {
     ...sqliteBase(filePath),
@@ -56,6 +65,37 @@ export function markLibraryFailed(
   };
 }
 
+export function markPostgresLibraryUpdating(location: string): void {
+  globalForLibraryStatus.instagramSavesLibraryStatus = {
+    ...postgresBase(location),
+    state: "updating",
+    appliedMigrations: 0,
+    pendingMigrations: 0,
+  };
+}
+
+export function markPostgresLibraryReady(location: string): void {
+  globalForLibraryStatus.instagramSavesLibraryStatus = {
+    ...postgresBase(location),
+    state: "up_to_date",
+    appliedMigrations: 0,
+    pendingMigrations: 0,
+  };
+}
+
+export function markPostgresLibraryFailed(
+  location: string,
+  technicalDetail: string,
+): void {
+  globalForLibraryStatus.instagramSavesLibraryStatus = {
+    ...postgresBase(location),
+    state: "apply_failed",
+    appliedMigrations: 0,
+    pendingMigrations: 0,
+    technicalDetail,
+  };
+}
+
 export function currentLibraryStatus(): LibraryStatus | null {
   return globalForLibraryStatus.instagramSavesLibraryStatus ?? null;
 }
@@ -78,15 +118,17 @@ export function createPostgresLibraryStatusPort(
   location: string,
 ): LibraryStatusPort {
   return {
-    getStatus: async () => ({
-      engine: "postgres",
-      displayName: "PostgreSQL",
-      location,
-      locationFolder: null,
-      state: "up_to_date",
-      appliedMigrations: 0,
-      pendingMigrations: 0,
-    }),
+    getStatus: async () => {
+      const current = currentLibraryStatus();
+      return current?.engine === "postgres"
+        ? current
+        : {
+            ...postgresBase(location),
+            state: "up_to_date",
+            appliedMigrations: 0,
+            pendingMigrations: 0,
+          };
+    },
   };
 }
 

@@ -611,7 +611,10 @@ export async function runEngineMigration(
     options.to === "sqlite"
       ? openSqliteDatabase(stagingPath!, "target")
       : openSqliteDatabase(options.sqlitePath, "source");
-  const pool = await createPostgresPool(options.postgresUrl);
+  const pool = await createPostgresPool(options.postgresUrl, {
+    allowIncompleteMigration: options.to === "postgres",
+    trackLibraryStatus: false,
+  });
   const client = await pool.connect();
   const specs = options.includeJobs ? [...CORE_TABLES, ...JOB_TABLES] : CORE_TABLES;
   const totalSteps = specs.length + 4;

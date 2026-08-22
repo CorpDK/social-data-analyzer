@@ -5,9 +5,11 @@ import { readJsonObject } from "@/lib/request-json";
 import {
   EngineSwitchError,
   getEngineSelectionStatus,
+  preflightPostgresTarget,
   startEngineMigration,
   switchToEmptyEngine,
 } from "@/lib/storage/engine-switch";
+import { PostgresSetupError } from "@/lib/storage/postgres/preflight";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -33,15 +35,18 @@ export async function POST(request: Request) {
   }
 
   const action = parsed.value.action;
-  if (action !== "migrate" && action !== "fresh") {
+  if (action !== "migrate" && action !== "fresh" && action !== "preflight") {
     return jsonPublicError(
       400,
       "INVALID_ACTION",
-      'Action must be "migrate" or "fresh".',
+      'Action must be "preflight", "migrate", or "fresh".',
     );
   }
 
   try {
+    if (action === "preflight") {
+      return NextResponse.json(await preflightPostgresTarget(parsed.value));
+    }
     const job =
       action === "migrate"
         ? await startEngineMigration(parsed.value)
@@ -50,6 +55,9 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof EngineSwitchError) {
       return jsonPublicError(error.status, error.code, error.message);
+    }
+    if (error instanceof PostgresSetupError) {
+      return jsonPublicError(503, error.code, error.message);
     }
     return jsonInternalError("Failed to start storage engine switch", error, {
       code: "ENGINE_SWITCH_FAILED",

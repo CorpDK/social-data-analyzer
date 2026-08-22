@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-const { startEngineMigration, switchToEmptyEngine } = vi.hoisted(() => ({
+const { preflightPostgresTarget, startEngineMigration, switchToEmptyEngine } =
+  vi.hoisted(() => ({
+  preflightPostgresTarget: vi.fn(),
   startEngineMigration: vi.fn(),
   switchToEmptyEngine: vi.fn(),
-}));
+  }));
 
 vi.mock("@/lib/storage/engine-switch", () => ({
   EngineSwitchError: class EngineSwitchError extends Error {
@@ -16,11 +18,24 @@ vi.mock("@/lib/storage/engine-switch", () => ({
     }
   },
   getEngineSelectionStatus: vi.fn(),
+  preflightPostgresTarget,
   startEngineMigration,
   switchToEmptyEngine,
 }));
 
+vi.mock("@/lib/storage/postgres/preflight", () => ({
+  PostgresSetupError: class PostgresSetupError extends Error {
+    constructor(
+      readonly code: string,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
+}));
+
 import { POST } from "./route";
+import { PostgresSetupError } from "@/lib/storage/postgres/preflight";
 
 function request(body: unknown, host = "127.0.0.1:3000") {
   return new Request("http://127.0.0.1:3000/api/settings/storage-engine", {
@@ -44,6 +59,10 @@ describe("storage engine settings API", () => {
     switchToEmptyEngine.mockResolvedValue({
       state: "completed",
       action: "fresh",
+    });
+    preflightPostgresTarget.mockResolvedValue({
+      redactedUrl: "postgres://user:%E2%80%A2%E2%80%A2@localhost/library",
+      preflight: { state: "ready" },
     });
   });
 
@@ -76,6 +95,42 @@ describe("storage engine settings API", () => {
     expect(response.status).toBe(202);
     expect(switchToEmptyEngine).toHaveBeenCalledOnce();
     expect(startEngineMigration).not.toHaveBeenCalled();
+  });
+
+  it("returns a redacted preflight result and never echoes the password", async () => {
+    const response = await POST(
+      request({
+        action: "preflight",
+        engine: "postgres",
+        postgresUrl: "postgres://user:very-secret@localhost/library",
+      }),
+    );
+    const body = JSON.stringify(await response.json());
+
+    expect(response.status).toBe(200);
+    expect(preflightPostgresTarget).toHaveBeenCalledOnce();
+    expect(body).not.toContain("very-secret");
+  });
+
+  it("returns classified preflight errors without connection secrets", async () => {
+    preflightPostgresTarget.mockRejectedValueOnce(
+      new PostgresSetupError(
+        "PERMISSION_DENIED",
+        "This database account cannot enable search support.",
+      ),
+    );
+    const response = await POST(
+      request({
+        action: "preflight",
+        engine: "postgres",
+        postgresUrl: "postgres://user:very-secret@localhost/library",
+      }),
+    );
+    const body = JSON.stringify(await response.json());
+
+    expect(response.status).toBe(503);
+    expect(body).toContain("PERMISSION_DENIED");
+    expect(body).not.toContain("very-secret");
   });
 
   it("does not weaken the local mutating guard", async () => {

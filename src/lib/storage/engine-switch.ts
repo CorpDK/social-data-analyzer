@@ -15,8 +15,17 @@ import {
   type StorageEngineConfig,
 } from "./index";
 import {
+  preflightPostgresDatabase,
+} from "./postgres/connection";
+import {
   postgresEngineMigrationStatus,
 } from "./postgres/engine-migration";
+import {
+  PostgresSetupError,
+  type PostgresPreflight,
+  type PostgresSetupErrorCode,
+} from "./postgres/preflight";
+import { redactPostgresUrl } from "./engine-config";
 
 export const ENGINE_SWITCH_CHANNEL = "engine-switch";
 export const FRESH_SWITCH_CONFIRMATION = "SWITCH EMPTY";
@@ -38,6 +47,7 @@ export type EngineSwitchStatus = {
   percent: number;
   message: string;
   error: string | null;
+  errorCode: PostgresSetupErrorCode | "COPY_FAILED" | null;
   rowsCopied: number;
   startedAt: number | null;
   finishedAt: number | null;
@@ -70,6 +80,7 @@ function initialStatus(): EngineSwitchStatus {
     percent: 0,
     message: "No engine switch is running.",
     error: null,
+    errorCode: null,
     rowsCopied: 0,
     startedAt: null,
     finishedAt: null,
@@ -168,7 +179,9 @@ async function assertTargetEmpty(target: StorageEngineConfig): Promise<void> {
     }
     return;
   }
-  const pool = await createPostgresPool(target.postgresUrl);
+  const pool = await createPostgresPool(target.postgresUrl, {
+    trackLibraryStatus: false,
+  });
   try {
     const marker = await postgresEngineMigrationStatus(pool);
     if (marker === "in_progress") {
@@ -201,10 +214,21 @@ async function activateTarget(target: StorageEngineConfig): Promise<void> {
 }
 
 function failSwitch(error: unknown): void {
+  const failure =
+    error instanceof PostgresSetupError
+      ? { message: error.message, code: error.code }
+      : error instanceof EngineSwitchError
+        ? { message: error.message, code: error.code }
+        : {
+            message:
+              "We couldn't finish copying your library. Ask whoever runs the database to take a backup before you try again.",
+            code: "COPY_FAILED",
+          };
   updateStatus({
     state: "failed",
     phase: "failed",
-    error: error instanceof Error ? error.message : "Storage engine switch failed.",
+    error: failure.message,
+    errorCode: failure.code as EngineSwitchStatus["errorCode"],
     message: "Storage engine switch failed.",
     finishedAt: Date.now(),
   });
@@ -233,6 +257,7 @@ export async function startEngineMigration(
     percent: 0,
     message: "Checking active jobs and target readiness",
     error: null,
+    errorCode: null,
     rowsCopied: 0,
     startedAt: Date.now(),
     finishedAt: null,
@@ -321,6 +346,7 @@ export async function switchToEmptyEngine(
     percent: 0,
     message: "Checking active jobs and empty target",
     error: null,
+    errorCode: null,
     rowsCopied: 0,
     startedAt: Date.now(),
     finishedAt: null,
@@ -344,27 +370,52 @@ export async function switchToEmptyEngine(
   }
 }
 
+export async function preflightPostgresTarget(input: EngineTargetInput): Promise<{
+  redactedUrl: string;
+  preflight: PostgresPreflight;
+}> {
+  const target = parseEngineTarget(input);
+  if (target.engine !== "postgres") {
+    throw new EngineSwitchError(
+      "PostgreSQL preflight requires a PostgreSQL target.",
+      400,
+      "INVALID_TARGET",
+    );
+  }
+  return {
+    redactedUrl: redactPostgresUrl(target.postgresUrl),
+    preflight: await preflightPostgresDatabase(target.postgresUrl),
+  };
+}
+
 export async function getEngineSelectionStatus() {
   const config = readStorageEngineConfig();
   let postgresMigration: "absent" | "in_progress" | "complete" | "unreachable" =
     "absent";
   let startupError: string | null = null;
+  let postgresPreflight: PostgresPreflight | null = null;
   if (config.engine === "postgres") {
     try {
-      const pool = await createPostgresPool(config.postgresUrl);
-      try {
-        postgresMigration = await postgresEngineMigrationStatus(pool);
-      } finally {
+      postgresPreflight = await preflightPostgresDatabase(config.postgresUrl);
+      postgresMigration = postgresPreflight.engineMigration;
+      if (postgresPreflight.state === "ready") {
+        const pool = await createPostgresPool(config.postgresUrl);
         await pool.end();
+      } else {
+        startupError = postgresPreflight.message;
       }
     } catch (error) {
       postgresMigration = "unreachable";
-      startupError = error instanceof Error ? error.message : "PostgreSQL is unavailable.";
+      startupError =
+        error instanceof PostgresSetupError
+          ? error.message
+          : "PostgreSQL is unavailable.";
     }
   }
   return {
     current: storageEnginePublicStatus(config),
     postgresMigration,
+    postgresPreflight,
     startupError,
     job: getEngineSwitchStatus(),
     freshConfirmation: FRESH_SWITCH_CONFIRMATION,

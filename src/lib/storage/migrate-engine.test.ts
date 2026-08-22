@@ -177,7 +177,9 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
       runEngineMigration(options, { afterTable: "imports" }),
     ).rejects.toBeInstanceOf(EngineMigrationAbortError);
 
-    const interrupted = await createPostgresPool(isolated.url);
+    const interrupted = await createPostgresPool(isolated.url, {
+      allowIncompleteMigration: true,
+    });
     try {
       expect(await postgresEngineMigrationStatus(interrupted)).toBe("in_progress");
       const count = await interrupted.query<{ n: number }>(
@@ -222,7 +224,9 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
       runEngineMigration(options, { afterPhase: "copy" }),
     ).rejects.toBeInstanceOf(EngineMigrationAbortError);
 
-    const interrupted = await createPostgresPool(isolated.url);
+    const interrupted = await createPostgresPool(isolated.url, {
+      allowIncompleteMigration: true,
+    });
     try {
       expect(await postgresEngineMigrationStatus(interrupted)).toBe("in_progress");
       const count = await interrupted.query<{ n: number }>(

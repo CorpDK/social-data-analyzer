@@ -27,8 +27,10 @@ const sqliteStatus = {
     percent: 0,
     message: "No engine switch is running.",
     error: null,
+    errorCode: null,
     rowsCopied: 0,
   },
+  postgresPreflight: null,
   freshConfirmation: "SWITCH EMPTY",
 };
 
@@ -98,5 +100,61 @@ describe("StorageEngineSwitcher", () => {
       expect(screen.getByText("42%")).toBeInTheDocument();
     });
     expect(screen.getByText("Target integrity failed.")).toBeInTheDocument();
+  });
+
+  it("preflights a dedicated database, redacts its URL, and shows admin copy", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify(sqliteStatus), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            redactedUrl:
+              "postgres://operator:%E2%80%A2%E2%80%A2%E2%80%A2@localhost/library",
+            preflight: {
+              state: "permission_denied",
+              serverReachable: true,
+              serverVersion: "17.5",
+              roleName: "operator",
+              vector: {
+                installed: false,
+                available: true,
+                installable: false,
+              },
+              engineMigration: "absent",
+              code: "PERMISSION_DENIED",
+              message:
+                "This database account cannot enable search support.",
+            },
+          }),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(<StorageEngineSwitcher />);
+    const input = await screen.findByLabelText("PostgreSQL connection URL");
+    await userEvent.type(
+      input,
+      "postgres://operator:very-secret@localhost/library",
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Check connection" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "This database account cannot enable search support.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("CREATE EXTENSION IF NOT EXISTS vector;"),
+    ).toBeInTheDocument();
+    expect(document.body.textContent).not.toContain("very-secret");
+    expect(
+      screen.getByRole("button", { name: "Migrate library to PostgreSQL" }),
+    ).toBeDisabled();
   });
 });

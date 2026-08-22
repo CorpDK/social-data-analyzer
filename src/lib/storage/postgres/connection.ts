@@ -2,8 +2,21 @@ import path from "node:path";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
-import { assertPostgresMigrationUsable } from "./engine-migration";
-import { readStorageEngineConfig } from "../engine-config";
+import {
+  readStorageEngineConfig,
+  redactPostgresUrl,
+} from "../engine-config";
+import {
+  markPostgresLibraryFailed,
+  markPostgresLibraryReady,
+  markPostgresLibraryUpdating,
+} from "../library-status";
+import {
+  assertPostgresPreflightReady,
+  classifyPostgresError,
+  inspectPostgresPreflight,
+  type PostgresPreflight,
+} from "./preflight";
 import * as schema from "./schema";
 
 export type PostgresPool = Pool;
@@ -45,7 +58,14 @@ export function isPostgresConfigured(): boolean {
 
 export async function createPostgresPool(
   connectionString = databaseUrl(),
+  options: {
+    allowIncompleteMigration?: boolean;
+    trackLibraryStatus?: boolean;
+  } = {},
 ): Promise<Pool> {
+  const location = redactPostgresUrl(connectionString);
+  const trackLibraryStatus = options.trackLibraryStatus !== false;
+  if (trackLibraryStatus) markPostgresLibraryUpdating(location);
   const pool = new Pool({
     connectionString,
     max: Number(process.env.INSTAGRAM_SAVES_POSTGRES_POOL_MAX ?? 10),
@@ -56,12 +76,51 @@ export async function createPostgresPool(
   });
   const db = drizzle({ client: pool, schema });
   try {
-    await migrate(db, { migrationsFolder: POSTGRES_MIGRATIONS_FOLDER });
+    let preflight: PostgresPreflight;
+    try {
+      preflight = await inspectPostgresPreflight(pool);
+    } catch (error) {
+      throw classifyPostgresError(error, "connect");
+    }
+    assertPostgresPreflightReady(preflight, options);
+    try {
+      await migrate(db, { migrationsFolder: POSTGRES_MIGRATIONS_FOLDER });
+    } catch (error) {
+      throw classifyPostgresError(error, "migrate");
+    }
     await pool.query("SELECT 1");
+    if (trackLibraryStatus) markPostgresLibraryReady(location);
     return pool;
   } catch (error) {
+    const classified = classifyPostgresError(error, "connect");
+    if (trackLibraryStatus) {
+      markPostgresLibraryFailed(
+        location,
+        `${classified.code}${classified.sqlState ? ` (SQLSTATE ${classified.sqlState})` : ""}`,
+      );
+    }
     await pool.end().catch(() => undefined);
-    throw error;
+    throw classified;
+  }
+}
+
+export async function preflightPostgresDatabase(
+  connectionString: string,
+): Promise<PostgresPreflight> {
+  const pool = new Pool({
+    connectionString,
+    max: 1,
+    connectionTimeoutMillis: Number(
+      process.env.INSTAGRAM_SAVES_POSTGRES_CONNECT_TIMEOUT_MS ?? 5_000,
+    ),
+    idleTimeoutMillis: 1_000,
+  });
+  try {
+    return await inspectPostgresPreflight(pool);
+  } catch (error) {
+    throw classifyPostgresError(error, "connect");
+  } finally {
+    await pool.end().catch(() => undefined);
   }
 }
 
@@ -72,12 +131,6 @@ export async function getPostgresPool(): Promise<Pool> {
   if (!globalForPostgres.instagramSavesPostgresInit) {
     globalForPostgres.instagramSavesPostgresInit = createPostgresPool()
       .then(async (pool) => {
-        try {
-          await assertPostgresMigrationUsable(pool);
-        } catch (error) {
-          await pool.end().catch(() => undefined);
-          throw error;
-        }
         globalForPostgres.instagramSavesPostgresPool = pool;
         return pool;
       })

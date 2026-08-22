@@ -45,7 +45,14 @@ export function LibraryStatusCard({
   const [status, setStatus] = useState(initialStatus);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
-  const copy = COPY[status.state];
+  const baseCopy = COPY[status.state];
+  const copy =
+    status.engine === "postgres" && status.state === "apply_failed"
+      ? {
+          ...baseCopy,
+          body: "Nothing was deleted. Ask whoever runs PostgreSQL to back up this database, then try again. Connection and search-support recovery is under Advanced storage.",
+        }
+      : baseCopy;
 
   useEffect(() => {
     if (status.state !== "updating") return;
@@ -113,7 +120,9 @@ export function LibraryStatusCard({
       <dl className="grid gap-2 text-sm sm:grid-cols-[8rem_1fr]">
         <dt className="text-[var(--muted)]">Stored with</dt>
         <dd>{status.displayName}</dd>
-        <dt className="text-[var(--muted)]">File location</dt>
+        <dt className="text-[var(--muted)]">
+          {status.engine === "sqlite" ? "File location" : "Database"}
+        </dt>
         <dd className="break-all font-[family-name:var(--font-ibm)] text-xs">
           {status.locationFolder ?? status.location}
         </dd>
@@ -124,6 +133,12 @@ export function LibraryStatusCard({
           Quit the app before making a backup. Copy the library file
           <span className="font-[family-name:var(--font-ibm)]"> {status.location}</span>
           {" "}and the two sidecar files if you see them into another folder.
+        </p>
+      ) : null}
+      {needsBackup && status.engine === "postgres" ? (
+        <p className="rounded-xl border border-[var(--warn)]/40 px-3 py-2 text-sm">
+          Ask whoever runs this PostgreSQL server to back up this database
+          before retrying or switching storage engines.
         </p>
       ) : null}
 

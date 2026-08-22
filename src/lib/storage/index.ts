@@ -96,8 +96,11 @@ export async function getLibraryStatus() {
 
 export async function retryLibraryUpdate() {
   const config = readStorageEngineConfig();
-  if (config.engine !== "sqlite") {
-    throw new Error("PostgreSQL update recovery is available in Advanced storage.");
+  if (config.engine === "postgres") {
+    clearStorageCache();
+    await closePostgres();
+    await getStorage();
+    return getLibraryStatus();
   }
 
   const probe = new Database(config.sqlitePath);

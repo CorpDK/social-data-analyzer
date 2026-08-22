@@ -60,6 +60,21 @@ port 5432 is occupied. Storage startup applies `drizzle/postgres/` automatically
 including the `vector` extension, generated `tsvector` documents, and indexes.
 Unset `INSTAGRAM_SAVES_DATABASE_URL` to return to SQLite.
 
+Advanced storage can check a dedicated database before a copy. The preflight
+connects with `INSTAGRAM_SAVES_POSTGRES_CONNECT_TIMEOUT_MS` (default 5000 ms),
+reports the server version and role, checks whether `vector` is installed or
+available to that role, and checks for an unfinished `engine_migration` copy.
+Connection URLs returned to the browser are password-redacted. If the role
+cannot enable vector, an administrator should connect to that database and run:
+
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+```
+
+Before retrying an update or engine copy, have whoever operates PostgreSQL take
+a backup of the dedicated database. Use `pg_dump` from an operator shell; the
+app never stores backup credentials or runs database provisioning commands.
+
 The Postgres adapter implements all five storage ports, including import and
 embedding queue runner operations.
 
@@ -172,8 +187,9 @@ files are deleted on the next attempt. Postgres destinations record an
 that database until the copy is marked complete, and Settings surfaces this
 blocked state. Retry **Migrate** with the same target, or re-run the same
 `pnpm migrate:engine` command after a kill — either path wipes the in-progress
-target and starts over. You can also `DROP DATABASE` / create an empty database
-and retry.
+target and starts over. Settings offers **Retry copy** (wipe only the app's
+unfinished rows) or **Choose another target**. An operator may instead recreate
+the dedicated database, but the app never creates or drops a database.
 
 After a successful copy, configure the app for the target engine and compare
 the library counts before deleting either source or backup. If the target is
