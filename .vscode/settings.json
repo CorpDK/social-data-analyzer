@@ -1,0 +1,6 @@
+{
+    "sonarlint.connectedMode.project": {
+        "connectionId": "corpdk",
+        "projectKey": "CorpDK_social-data-analyzer"
+    }
+}
