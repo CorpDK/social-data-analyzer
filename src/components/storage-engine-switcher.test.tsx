@@ -14,6 +14,8 @@ const sqliteStatus = {
     displayName: "SQLite",
     sqlitePath: "/tmp/library.db",
     postgresUrl: null,
+    postgresSchema: null,
+    postgresTenancy: null,
     source: "environment",
   },
   postgresMigration: "absent",
@@ -123,6 +125,12 @@ describe("StorageEngineSwitcher", () => {
                 available: true,
                 installable: false,
               },
+              schema: {
+                name: "instagram_saves",
+                exists: true,
+                usable: true,
+                creatable: false,
+              },
               engineMigration: "absent",
               code: "PERMISSION_DENIED",
               message:
@@ -144,6 +152,11 @@ describe("StorageEngineSwitcher", () => {
       screen.getByRole("button", { name: "Check connection" }),
     );
 
+    const request = fetchMock.mock.calls[1]?.[1] as RequestInit;
+    expect(JSON.parse(String(request.body))).toMatchObject({
+      postgresSchema: "instagram_saves",
+      postgresTenancy: "database",
+    });
     expect(
       await screen.findByText(
         "This database account cannot enable search support.",

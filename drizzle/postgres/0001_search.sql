@@ -1,4 +1,4 @@
-CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 --> statement-breakpoint
 CREATE TABLE "saved_items_search" (
   "item_id" integer PRIMARY KEY REFERENCES "saved_items"("id") ON DELETE CASCADE,

@@ -5,6 +5,7 @@
  * killed copy cannot look like a normal library. The app refuses in_progress.
  */
 import type { Pool, PoolClient } from "pg";
+import { validPostgresSchema } from "../engine-config";
 
 export const ENGINE_MIGRATION_TABLE = "engine_migration";
 export const ENGINE_MIGRATION_ADVISORY_LOCK = 8_723_640_1;
@@ -29,11 +30,21 @@ export type EngineMigrationStatus = "absent" | "in_progress" | "complete";
 
 type Queryable = Pick<Pool, "query">;
 
+function quoteSchema(schema: string): string {
+  if (!validPostgresSchema(schema)) {
+    throw new Error(`Unsafe PostgreSQL schema: ${schema}`);
+  }
+  return `"${schema}"`;
+}
+
+function qualified(schema: string, table: string): string {
+  return `${quoteSchema(schema)}."${table}"`;
+}
+
 export const INCOMPLETE_ENGINE_MIGRATION_MESSAGE =
   "Refusing to open a Postgres library with an incomplete migrate:engine copy. " +
   "Re-run `pnpm migrate:engine` with the same flags (it wipes an in-progress target) " +
-  "or DROP/recreate the database and retry. Do not point the app at this database " +
-  "until the copy completes.";
+  "or choose another schema. Do not point the app at this schema until the copy completes.";
 
 export class IncompleteEngineMigrationError extends Error {
   readonly code = "POSTGRES_MIGRATION_IN_PROGRESS" as const;
@@ -46,21 +57,26 @@ export class IncompleteEngineMigrationError extends Error {
 
 export async function postgresEngineMigrationStatus(
   db: Queryable,
+  schema: string,
 ): Promise<EngineMigrationStatus> {
   const present = await db.query<{ name: string | null }>(
-    "SELECT to_regclass('public.engine_migration')::text AS name",
+    "SELECT to_regclass($1)::text AS name",
+    [`${schema}.${ENGINE_MIGRATION_TABLE}`],
   );
   if (!present.rows[0]?.name) return "absent";
   const result = await db.query<{ status: string }>(
-    `SELECT status FROM ${ENGINE_MIGRATION_TABLE} WHERE id = 1`,
+    `SELECT status FROM ${qualified(schema, ENGINE_MIGRATION_TABLE)} WHERE id = 1`,
   );
   const status = result.rows[0]?.status;
   if (status === "in_progress" || status === "complete") return status;
   return "absent";
 }
 
-export async function assertPostgresMigrationUsable(db: Queryable): Promise<void> {
-  const status = await postgresEngineMigrationStatus(db);
+export async function assertPostgresMigrationUsable(
+  db: Queryable,
+  schema: string,
+): Promise<void> {
+  const status = await postgresEngineMigrationStatus(db, schema);
   if (status === "in_progress") {
     throw new IncompleteEngineMigrationError();
   }
@@ -68,10 +84,12 @@ export async function assertPostgresMigrationUsable(db: Queryable): Promise<void
 
 export async function markPostgresEngineMigration(
   db: Queryable,
+  schema: string,
   status: "in_progress" | "complete",
 ): Promise<void> {
+  const table = qualified(schema, ENGINE_MIGRATION_TABLE);
   await db.query(`
-    CREATE TABLE IF NOT EXISTS ${ENGINE_MIGRATION_TABLE} (
+    CREATE TABLE IF NOT EXISTS ${table} (
       id integer PRIMARY KEY CHECK (id = 1),
       status text NOT NULL CHECK (status IN ('in_progress', 'complete')),
       started_at timestamptz NOT NULL DEFAULT now(),
@@ -80,7 +98,7 @@ export async function markPostgresEngineMigration(
   `);
   if (status === "in_progress") {
     await db.query(
-      `INSERT INTO ${ENGINE_MIGRATION_TABLE} (id, status, started_at, finished_at)
+      `INSERT INTO ${table} (id, status, started_at, finished_at)
        VALUES (1, 'in_progress', now(), NULL)
        ON CONFLICT (id) DO UPDATE
          SET status = 'in_progress',
@@ -90,7 +108,7 @@ export async function markPostgresEngineMigration(
     return;
   }
   const updated = await db.query(
-    `UPDATE ${ENGINE_MIGRATION_TABLE}
+    `UPDATE ${table}
      SET status = 'complete', finished_at = now()
      WHERE id = 1`,
   );
@@ -99,12 +117,17 @@ export async function markPostgresEngineMigration(
   }
 }
 
-export async function wipeIncompletePostgresLibrary(db: Queryable): Promise<void> {
+export async function wipeIncompletePostgresLibrary(
+  db: Queryable,
+  schema: string,
+): Promise<void> {
   await db.query(
-    `TRUNCATE TABLE ${POSTGRES_LIBRARY_TABLES.map((name) => `"${name}"`).join(", ")}
+    `TRUNCATE TABLE ${POSTGRES_LIBRARY_TABLES.map((name) => qualified(schema, name)).join(", ")}
      RESTART IDENTITY CASCADE`,
   );
-  await db.query(`DROP TABLE IF EXISTS ${ENGINE_MIGRATION_TABLE}`);
+  await db.query(
+    `DROP TABLE IF EXISTS ${qualified(schema, ENGINE_MIGRATION_TABLE)}`,
+  );
 }
 
 export async function tryLockEngineMigration(client: PoolClient): Promise<boolean> {

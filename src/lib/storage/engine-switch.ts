@@ -25,7 +25,7 @@ import {
   type PostgresPreflight,
   type PostgresSetupErrorCode,
 } from "./postgres/preflight";
-import { redactPostgresUrl } from "./engine-config";
+import { redactPostgresUrl, validPostgresSchema } from "./engine-config";
 
 export const ENGINE_SWITCH_CHANNEL = "engine-switch";
 export const FRESH_SWITCH_CONFIRMATION = "SWITCH EMPTY";
@@ -112,6 +112,8 @@ export function engineSwitchBusyMessage(operation: string): string {
 type EngineTargetInput = {
   engine?: unknown;
   postgresUrl?: unknown;
+  postgresSchema?: unknown;
+  postgresTenancy?: unknown;
   sqlitePath?: unknown;
 };
 
@@ -138,9 +140,28 @@ export function parseEngineTarget(
     if (protocol !== "postgres:" && protocol !== "postgresql:") {
       throw new EngineSwitchError("PostgreSQL URL must use postgres:// or postgresql://.");
     }
+    if (!validPostgresSchema(input.postgresSchema)) {
+      throw new EngineSwitchError(
+        "PostgreSQL schema must start with a lowercase letter or underscore and contain only lowercase letters, numbers, and underscores.",
+        400,
+        "INVALID_POSTGRES_SCHEMA",
+      );
+    }
+    if (
+      input.postgresTenancy !== "database" &&
+      input.postgresTenancy !== "schema"
+    ) {
+      throw new EngineSwitchError(
+        "PostgreSQL tenancy must be database or schema.",
+        400,
+        "INVALID_POSTGRES_TENANCY",
+      );
+    }
     return {
       engine: "postgres",
       postgresUrl: input.postgresUrl.trim(),
+      postgresSchema: input.postgresSchema,
+      postgresTenancy: input.postgresTenancy,
       sqlitePath: current.sqlitePath,
     };
   }
@@ -180,21 +201,25 @@ async function assertTargetEmpty(target: StorageEngineConfig): Promise<void> {
     return;
   }
   const pool = await createPostgresPool(target.postgresUrl, {
+    postgresSchema: target.postgresSchema,
     trackLibraryStatus: false,
   });
   try {
-    const marker = await postgresEngineMigrationStatus(pool);
+    const marker = await postgresEngineMigrationStatus(
+      pool,
+      target.postgresSchema,
+    );
     if (marker === "in_progress") {
       throw new EngineSwitchError(
-        "This PostgreSQL target contains an incomplete migration. Use Migrate to retry it, or recreate the database before starting fresh.",
+        "This PostgreSQL schema contains an incomplete migration. Use Migrate to retry it, or choose another schema before starting fresh.",
         409,
         "POSTGRES_MIGRATION_IN_PROGRESS",
       );
     }
-    const count = await postgresTargetCount(pool);
+    const count = await postgresTargetCount(pool, target.postgresSchema);
     if (count !== 0) {
       throw new EngineSwitchError(
-        `PostgreSQL target is not empty (${count} rows). Choose an unused database.`,
+        `PostgreSQL schema is not empty (${count} rows). Choose an unused schema.`,
         409,
         "TARGET_NOT_EMPTY",
       );
@@ -283,6 +308,12 @@ export async function startEngineMigration(
               ? source.postgresUrl
               : target.engine === "postgres"
                 ? target.postgresUrl
+                : "",
+          postgresSchema:
+            source.engine === "postgres"
+              ? source.postgresSchema
+              : target.engine === "postgres"
+                ? target.postgresSchema
                 : "",
           includeJobs: false,
         },
@@ -384,7 +415,10 @@ export async function preflightPostgresTarget(input: EngineTargetInput): Promise
   }
   return {
     redactedUrl: redactPostgresUrl(target.postgresUrl),
-    preflight: await preflightPostgresDatabase(target.postgresUrl),
+    preflight: await preflightPostgresDatabase(
+      target.postgresUrl,
+      target.postgresSchema,
+    ),
   };
 }
 
@@ -396,10 +430,15 @@ export async function getEngineSelectionStatus() {
   let postgresPreflight: PostgresPreflight | null = null;
   if (config.engine === "postgres") {
     try {
-      postgresPreflight = await preflightPostgresDatabase(config.postgresUrl);
+      postgresPreflight = await preflightPostgresDatabase(
+        config.postgresUrl,
+        config.postgresSchema,
+      );
       postgresMigration = postgresPreflight.engineMigration;
       if (postgresPreflight.state === "ready") {
-        const pool = await createPostgresPool(config.postgresUrl);
+        const pool = await createPostgresPool(config.postgresUrl, {
+          postgresSchema: config.postgresSchema,
+        });
         await pool.end();
       } else {
         startupError = postgresPreflight.message;

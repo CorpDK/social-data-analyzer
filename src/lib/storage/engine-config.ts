@@ -2,10 +2,19 @@ import fs from "node:fs";
 import path from "node:path";
 
 export type StorageEngine = "sqlite" | "postgres";
+export type PostgresTenancy = "database" | "schema";
+
+export const DEFAULT_POSTGRES_SCHEMA = "instagram_saves";
 
 export type StorageEngineConfig =
   | { engine: "sqlite"; sqlitePath: string }
-  | { engine: "postgres"; postgresUrl: string; sqlitePath: string };
+  | {
+      engine: "postgres";
+      postgresUrl: string;
+      postgresSchema: string;
+      postgresTenancy: PostgresTenancy;
+      sqlitePath: string;
+    };
 
 const CONFIG_FILENAME = "storage-engine.json";
 
@@ -24,7 +33,26 @@ function envConfig(): StorageEngineConfig {
   const sqlitePath = defaultSqlitePath();
   const postgresUrl = process.env.INSTAGRAM_SAVES_DATABASE_URL?.trim();
   if (postgresUrl) {
-    return { engine: "postgres", postgresUrl, sqlitePath };
+    const configuredSchema = process.env.INSTAGRAM_SAVES_PG_SCHEMA?.trim();
+    const postgresSchema = validPostgresSchema(configuredSchema)
+      ? configuredSchema
+      : DEFAULT_POSTGRES_SCHEMA;
+    const configuredTenancy = process.env.INSTAGRAM_SAVES_PG_TENANCY?.trim();
+    const postgresTenancy: PostgresTenancy =
+      configuredTenancy === "database" || configuredTenancy === "schema"
+        ? configuredTenancy
+        : configuredSchema
+          ? postgresSchema === "public"
+            ? "database"
+            : "schema"
+          : "database";
+    return {
+      engine: "postgres",
+      postgresUrl,
+      postgresSchema,
+      postgresTenancy,
+      sqlitePath,
+    };
   }
   return { engine: "sqlite", sqlitePath };
 }
@@ -39,6 +67,13 @@ function validPostgresUrl(value: unknown): value is string {
   }
 }
 
+export function validPostgresSchema(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^[a-z_][a-z0-9_]{0,62}$/.test(value)
+  );
+}
+
 export function readStorageEngineConfig(): StorageEngineConfig {
   const filename = storageEngineConfigPath();
   if (!fs.existsSync(filename)) return envConfig();
@@ -47,6 +82,8 @@ export function readStorageEngineConfig(): StorageEngineConfig {
       engine?: unknown;
       sqlitePath?: unknown;
       postgresUrl?: unknown;
+      postgresSchema?: unknown;
+      postgresTenancy?: unknown;
     };
     const sqlitePath =
       typeof parsed.sqlitePath === "string" && path.isAbsolute(parsed.sqlitePath)
@@ -54,9 +91,16 @@ export function readStorageEngineConfig(): StorageEngineConfig {
         : defaultSqlitePath();
     if (parsed.engine === "sqlite") return { engine: "sqlite", sqlitePath };
     if (parsed.engine === "postgres" && validPostgresUrl(parsed.postgresUrl)) {
+      const postgresSchema = validPostgresSchema(parsed.postgresSchema)
+        ? parsed.postgresSchema
+        : DEFAULT_POSTGRES_SCHEMA;
+      const postgresTenancy: PostgresTenancy =
+        parsed.postgresTenancy === "schema" ? "schema" : "database";
       return {
         engine: "postgres",
         postgresUrl: parsed.postgresUrl.trim(),
+        postgresSchema,
+        postgresTenancy,
         sqlitePath,
       };
     }
@@ -94,6 +138,10 @@ export function storageEnginePublicStatus(config = readStorageEngineConfig()) {
     sqlitePath: config.sqlitePath,
     postgresUrl:
       config.engine === "postgres" ? redactPostgresUrl(config.postgresUrl) : null,
+    postgresSchema:
+      config.engine === "postgres" ? config.postgresSchema : null,
+    postgresTenancy:
+      config.engine === "postgres" ? config.postgresTenancy : null,
     source: fs.existsSync(storageEngineConfigPath()) ? "settings" : "environment",
   } as const;
 }

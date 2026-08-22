@@ -15,7 +15,7 @@ export function createPostgresStorage(pool: Pool): Storage {
   const configured = readStorageEngineConfig();
   const location =
     configured.engine === "postgres"
-      ? redactPostgresUrl(configured.postgresUrl)
+      ? `${redactPostgresUrl(configured.postgresUrl)} · schema ${configured.postgresSchema}`
       : "Configured PostgreSQL database";
   return {
     libraryStatus: createPostgresLibraryStatusPort(location),

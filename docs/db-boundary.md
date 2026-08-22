@@ -12,6 +12,7 @@ expressed by the portable schema.
 | Postgres plain tables and indexes | Drizzle Kit | `src/lib/storage/postgres/schema.ts`, `drizzle/postgres/` |
 | SQLite FTS5 and sqlite-vec virtual tables | SQLite bootstrap SQL | `src/lib/db/ddl.ts` |
 | Postgres vector/tsvector search objects | Custom journaled SQL | `drizzle/postgres/0001_search.sql` |
+| Postgres app schema and migration journal | Postgres connection bootstrap | `src/lib/storage/postgres/connection.ts` |
 | Reads, writes, transactions, and maintenance | Async storage ports | `src/lib/storage/ports.ts`, engine adapters |
 | SQLite connection and migration startup | SQLite storage | `src/lib/storage/sqlite/connection.ts` |
 
@@ -47,6 +48,14 @@ greenfield generation; normal forward schema changes use Drizzle migrations.
 - Never put SQLite virtual tables in the Drizzle schema.
 - Never create unjournaled Postgres extensions, generated search columns, or
   vector indexes at runtime.
+- Postgres owns exactly one validated schema. Every connection sets
+  `search_path` to that schema before app SQL; migrations place
+  `__drizzle_migrations` there.
+- Postgres SQL must not hardcode `public` for app tables. `public` is used only
+  for the database-level vector extension; app tables, search objects, and the
+  `engine_migration` marker stay in the configured app schema.
+- Destructive Postgres operations qualify an explicit app-table list with the
+  configured schema. They never drop a database or an operator-owned schema.
 
 ## Related
 

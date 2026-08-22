@@ -5,6 +5,7 @@ import { localMutatingHeaders } from "@/lib/local-mutating-headers";
 import { useJobSse } from "@/lib/use-job-sse";
 
 type Engine = "sqlite" | "postgres";
+type PostgresTenancy = "database" | "schema";
 
 type EngineJob = {
   state: "idle" | "running" | "completed" | "failed";
@@ -20,7 +21,12 @@ type EngineJob = {
 };
 
 type PostgresPreflight = {
-  state: "ready" | "extension_missing" | "permission_denied" | "unfinished_copy";
+  state:
+    | "ready"
+    | "extension_missing"
+    | "permission_denied"
+    | "schema_unavailable"
+    | "unfinished_copy";
   serverReachable: true;
   serverVersion: string;
   roleName: string;
@@ -28,6 +34,12 @@ type PostgresPreflight = {
     installed: boolean;
     available: boolean;
     installable: boolean;
+  };
+  schema: {
+    name: string;
+    exists: boolean;
+    usable: boolean;
+    creatable: boolean;
   };
   engineMigration: "absent" | "in_progress" | "complete";
   code: string | null;
@@ -40,6 +52,8 @@ type EngineStatus = {
     displayName: string;
     sqlitePath: string;
     postgresUrl: string | null;
+    postgresSchema: string | null;
+    postgresTenancy: PostgresTenancy | null;
     source: "settings" | "environment";
   };
   postgresMigration: "absent" | "in_progress" | "complete" | "unreachable";
@@ -61,6 +75,9 @@ export function StorageEngineSwitcher() {
   const [status, setStatus] = useState<EngineStatus | null>(null);
   const [job, setJob] = useState<EngineJob | null>(null);
   const [postgresUrl, setPostgresUrl] = useState("");
+  const [postgresSchema, setPostgresSchema] = useState("instagram_saves");
+  const [postgresTenancy, setPostgresTenancy] =
+    useState<PostgresTenancy>("database");
   const [sqlitePath, setSqlitePath] = useState("");
   const [freshOpen, setFreshOpen] = useState(false);
   const [confirmation, setConfirmation] = useState("");
@@ -77,6 +94,12 @@ export function StorageEngineSwitcher() {
       setStatus(next);
       setJob(next.job);
       setSqlitePath((current) => current || next.current.sqlitePath);
+      setPostgresSchema(
+        (current) => next.current.postgresSchema ?? current,
+      );
+      setPostgresTenancy(
+        (current) => next.current.postgresTenancy ?? current,
+      );
       setPreflight(next.postgresPreflight);
       setError(null);
     } catch (loadError) {
@@ -85,7 +108,8 @@ export function StorageEngineSwitcher() {
   }, []);
 
   useEffect(() => {
-    void load();
+    const timeout = window.setTimeout(() => void load(), 0);
+    return () => window.clearTimeout(timeout);
   }, [load]);
 
   useJobSse({
@@ -122,6 +146,10 @@ export function StorageEngineSwitcher() {
         action,
         engine: targetEngine,
         postgresUrl: targetEngine === "postgres" ? postgresUrl : undefined,
+        postgresSchema:
+          targetEngine === "postgres" ? postgresSchema : undefined,
+        postgresTenancy:
+          targetEngine === "postgres" ? postgresTenancy : undefined,
         sqlitePath: targetEngine === "sqlite" ? sqlitePath : undefined,
         confirmation: action === "fresh" ? confirmation : undefined,
       };
@@ -155,6 +183,8 @@ export function StorageEngineSwitcher() {
             action: "preflight",
             engine: "postgres",
             postgresUrl,
+            postgresSchema,
+            postgresTenancy,
           }),
         }),
       );
@@ -193,9 +223,17 @@ export function StorageEngineSwitcher() {
       </div>
 
       {status.current.engine === "postgres" && status.current.postgresUrl ? (
-        <p className="break-all rounded-xl border border-[var(--line)] px-3 py-2 font-[family-name:var(--font-ibm)] text-xs text-[var(--muted)]">
-          {status.current.postgresUrl}
-        </p>
+        <div className="rounded-xl border border-[var(--line)] px-3 py-2 text-xs text-[var(--muted)]">
+          <p className="break-all font-[family-name:var(--font-ibm)]">
+            {status.current.postgresUrl}
+          </p>
+          <p className="mt-1">
+            Schema <strong>{status.current.postgresSchema}</strong> ·{" "}
+            {status.current.postgresTenancy === "schema"
+              ? "shared-cluster schema"
+              : "dedicated database"}
+          </p>
+        </div>
       ) : null}
 
       {status.postgresMigration === "in_progress" ? (
@@ -236,11 +274,52 @@ export function StorageEngineSwitcher() {
       </label>
 
       {targetEngine === "postgres" ? (
-        <div className="space-y-2">
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <label className="block space-y-1.5 text-sm">
+              <span className="text-[var(--muted)]">Application schema</span>
+              <input
+                value={postgresSchema}
+                onChange={(event) => {
+                  setPostgresSchema(event.target.value);
+                  setPreflight(null);
+                  setCheckedUrl(null);
+                }}
+                placeholder="instagram_saves"
+                disabled={running || pending}
+                className="w-full rounded-lg border border-[var(--line)] bg-[var(--bg)] px-3 py-2 font-[family-name:var(--font-ibm)] text-[13px]"
+              />
+            </label>
+            <label className="block space-y-1.5 text-sm">
+              <span className="text-[var(--muted)]">PostgreSQL tenancy</span>
+              <select
+                value={postgresTenancy}
+                onChange={(event) => {
+                  setPostgresTenancy(event.target.value as PostgresTenancy);
+                  setPreflight(null);
+                }}
+                disabled={running || pending}
+                className="w-full rounded-lg border border-[var(--line)] bg-[var(--bg)] px-3 py-2 text-[13px]"
+              >
+                <option value="database">Dedicated database</option>
+                <option value="schema">Schema on a shared cluster</option>
+              </select>
+            </label>
+          </div>
+          <p className="text-xs text-[var(--muted)]">
+            {postgresTenancy === "schema"
+              ? "The app reads and writes only this schema. Other schemas in the database are ignored."
+              : "The app uses a named schema inside the dedicated database so its tables and migration journal never collide with public."}
+          </p>
           <button
             type="button"
             onClick={() => void checkPostgres()}
-            disabled={pending || running || !postgresUrl.trim()}
+            disabled={
+              pending ||
+              running ||
+              !postgresUrl.trim() ||
+              !postgresSchema.trim()
+            }
             className="rounded-full border border-[var(--line)] px-3.5 py-1.5 text-xs font-medium disabled:opacity-40"
           >
             {pending ? "Checking…" : "Check connection"}
@@ -264,6 +343,14 @@ export function StorageEngineSwitcher() {
                     ? "available to install"
                     : "needs an administrator"}
               </p>
+              <p className="text-[var(--muted)]">
+                Schema {preflight.schema.name} ·{" "}
+                {preflight.schema.usable
+                  ? "ready"
+                  : preflight.schema.creatable
+                    ? "will be created"
+                    : "administrator setup needed"}
+              </p>
               {preflight.state === "extension_missing" ||
               preflight.state === "permission_denied" ? (
                 <div className="space-y-1 pt-1">
@@ -272,6 +359,12 @@ export function StorageEngineSwitcher() {
                     CREATE EXTENSION IF NOT EXISTS vector;
                   </code>
                 </div>
+              ) : null}
+              {preflight.state === "schema_unavailable" ? (
+                <p className="pt-1">
+                  Ask the administrator to create this schema and grant this
+                  role USAGE and CREATE, then check again.
+                </p>
               ) : null}
               {preflight.state === "unfinished_copy" ? (
                 <button
@@ -315,6 +408,7 @@ export function StorageEngineSwitcher() {
             pending ||
             (targetEngine === "postgres"
               ? !postgresUrl.trim() ||
+                !postgresSchema.trim() ||
                 (preflight?.state !== "ready" &&
                   preflight?.state !== "unfinished_copy")
               : !sqlitePath.trim())

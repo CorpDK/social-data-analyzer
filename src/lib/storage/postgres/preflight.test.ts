@@ -12,6 +12,9 @@ function queryable(options?: {
   available?: boolean;
   superuser?: boolean;
   databaseCreate?: boolean;
+  schemaExists?: boolean;
+  schemaUsage?: boolean;
+  schemaCreate?: boolean;
   migration?: "absent" | "in_progress" | "complete";
 }) {
   const query = vi
@@ -25,6 +28,9 @@ function queryable(options?: {
           vector_available: options?.available ?? true,
           role_superuser: options?.superuser ?? true,
           database_create: options?.databaseCreate ?? false,
+          schema_exists: options?.schemaExists ?? true,
+          schema_usage: options?.schemaUsage ?? true,
+          schema_create: options?.schemaCreate ?? true,
         },
       ],
     })
@@ -53,6 +59,7 @@ describe("PostgreSQL dedicated-database preflight", () => {
   it("reports the role and installable vector support", async () => {
     const result = await inspectPostgresPreflight(
       queryable({ available: true, superuser: true }) as never,
+      "instagram_saves",
     );
 
     expect(result).toMatchObject({
@@ -66,9 +73,11 @@ describe("PostgreSQL dedicated-database preflight", () => {
   it("distinguishes missing vector from insufficient privilege", async () => {
     const missing = await inspectPostgresPreflight(
       queryable({ available: false, superuser: true }) as never,
+      "instagram_saves",
     );
     const forbidden = await inspectPostgresPreflight(
       queryable({ available: true, superuser: false }) as never,
+      "instagram_saves",
     );
 
     expect(missing.code).toBe("EXTENSION_MISSING");
@@ -82,10 +91,36 @@ describe("PostgreSQL dedicated-database preflight", () => {
         superuser: false,
         databaseCreate: true,
       }) as never,
+      "instagram_saves",
     );
 
     expect(result.state).toBe("ready");
     expect(result.vector.installable).toBe(true);
+  });
+
+  it("requires an existing usable schema for schema-only roles", async () => {
+    const result = await inspectPostgresPreflight(
+      queryable({
+        installed: true,
+        superuser: false,
+        databaseCreate: false,
+        schemaExists: false,
+        schemaUsage: false,
+        schemaCreate: false,
+      }) as never,
+      "shared_app",
+    );
+
+    expect(result).toMatchObject({
+      state: "schema_unavailable",
+      code: "SCHEMA_UNAVAILABLE",
+      schema: {
+        name: "shared_app",
+        exists: false,
+        usable: false,
+        creatable: false,
+      },
+    });
   });
 
   it("blocks normal opens but permits explicit unfinished-copy recovery", async () => {
@@ -94,6 +129,7 @@ describe("PostgreSQL dedicated-database preflight", () => {
         installed: true,
         migration: "in_progress",
       }) as never,
+      "instagram_saves",
     );
 
     expect(result.state).toBe("unfinished_copy");

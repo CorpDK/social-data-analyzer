@@ -38,6 +38,7 @@ export type EngineMigrationOptions = {
   to: Engine;
   sqlitePath: string;
   postgresUrl: string;
+  postgresSchema: string;
   includeJobs: boolean;
 };
 
@@ -209,6 +210,10 @@ function parseOptions(): EngineMigrationOptions {
     to,
     sqlitePath,
     postgresUrl,
+    postgresSchema:
+      argument("postgres-schema")?.trim() ||
+      process.env.INSTAGRAM_SAVES_PG_SCHEMA?.trim() ||
+      "instagram_saves",
     includeJobs: process.argv.includes("--include-jobs"),
   };
 }
@@ -267,8 +272,14 @@ export function countSqliteFileIfExists(filename: string): number {
 }
 
 function quote(identifier: string): string {
-  if (!/^[a-z_]+$/.test(identifier)) throw new Error(`Unsafe identifier: ${identifier}`);
+  if (!/^[a-z_][a-z0-9_]{0,62}$/.test(identifier)) {
+    throw new Error(`Unsafe identifier: ${identifier}`);
+  }
   return `"${identifier}"`;
+}
+
+function qualified(schema: string, table: string): string {
+  return `${quote(schema)}.${quote(table)}`;
 }
 
 function convertRow(row: Row, spec: TableSpec, target: Engine): Row {
@@ -518,7 +529,10 @@ export function sqliteTargetCount(sqlite: Database.Database): number {
   }, ordinary);
 }
 
-export async function postgresTargetCount(pool: Pool): Promise<number> {
+export async function postgresTargetCount(
+  pool: Pool,
+  postgresSchema: string,
+): Promise<number> {
   const tables = [
     ...CORE_TABLES,
     ...JOB_TABLES,
@@ -528,7 +542,8 @@ export async function postgresTargetCount(pool: Pool): Promise<number> {
     { name: "liked_item_embeddings" },
   ];
   const expressions = tables.map(
-    (table) => `(SELECT count(*) FROM ${quote(table.name)})`,
+    (table) =>
+      `(SELECT count(*) FROM ${qualified(postgresSchema, table.name)})`,
   );
   const result = await pool.query(
     `SELECT (${expressions.join(" + ")})::int AS count`,
@@ -613,6 +628,7 @@ export async function runEngineMigration(
       : openSqliteDatabase(options.sqlitePath, "source");
   const pool = await createPostgresPool(options.postgresUrl, {
     allowIncompleteMigration: options.to === "postgres",
+    postgresSchema: options.postgresSchema,
     trackLibraryStatus: false,
   });
   const client = await pool.connect();
@@ -644,14 +660,20 @@ export async function runEngineMigration(
         );
       }
       postgresLocked = true;
-      const status = await postgresEngineMigrationStatus(pool);
+      const status = await postgresEngineMigrationStatus(
+        pool,
+        options.postgresSchema,
+      );
       if (status === "in_progress") {
         console.log(
           "[migrate-engine] wiping incomplete Postgres target from a previous interrupted copy",
         );
-        await wipeIncompletePostgresLibrary(pool);
+        await wipeIncompletePostgresLibrary(pool, options.postgresSchema);
       } else {
-        const targetCount = await postgresTargetCount(pool);
+        const targetCount = await postgresTargetCount(
+          pool,
+          options.postgresSchema,
+        );
         if (targetCount !== 0) {
           throw new Error(
             `Refusing non-empty postgres target (${targetCount} rows). ` +
@@ -659,7 +681,11 @@ export async function runEngineMigration(
           );
         }
       }
-      await markPostgresEngineMigration(pool, "in_progress");
+      await markPostgresEngineMigration(
+        pool,
+        options.postgresSchema,
+        "in_progress",
+      );
     }
 
     await client.query("BEGIN");
@@ -725,7 +751,11 @@ export async function runEngineMigration(
     const integrity = await targetStorage.maintenance.checkIntegrity();
     if (!integrity.ok) throw new Error(`Target integrity failed: ${integrity.detail}`);
     if (options.to === "postgres") {
-      await markPostgresEngineMigration(pool, "complete");
+      await markPostgresEngineMigration(
+        pool,
+        options.postgresSchema,
+        "complete",
+      );
     } else {
       sqlite.close();
       replaceSqliteDatabaseFile(stagingPath!, options.sqlitePath);

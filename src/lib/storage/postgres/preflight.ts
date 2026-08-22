@@ -9,10 +9,16 @@ export type PostgresSetupErrorCode =
   | "PERMISSION_DENIED"
   | "EXTENSION_MISSING"
   | "MIGRATE_FAILED"
+  | "SCHEMA_UNAVAILABLE"
   | "POSTGRES_MIGRATION_IN_PROGRESS";
 
 export type PostgresPreflight = {
-  state: "ready" | "extension_missing" | "permission_denied" | "unfinished_copy";
+  state:
+    | "ready"
+    | "extension_missing"
+    | "permission_denied"
+    | "schema_unavailable"
+    | "unfinished_copy";
   serverReachable: true;
   serverVersion: string;
   roleName: string;
@@ -20,6 +26,12 @@ export type PostgresPreflight = {
     installed: boolean;
     available: boolean;
     installable: boolean;
+  };
+  schema: {
+    name: string;
+    exists: boolean;
+    usable: boolean;
+    creatable: boolean;
   };
   engineMigration: EngineMigrationStatus;
   code: PostgresSetupErrorCode | null;
@@ -97,6 +109,7 @@ export function classifyPostgresError(
 
 export async function inspectPostgresPreflight(
   pool: Pick<Pool, "query">,
+  postgresSchema: string,
 ): Promise<PostgresPreflight> {
   const result = await pool.query<{
     server_version: string;
@@ -105,6 +118,9 @@ export async function inspectPostgresPreflight(
     vector_available: boolean;
     role_superuser: boolean;
     database_create: boolean;
+    schema_exists: boolean;
+    schema_usage: boolean;
+    schema_create: boolean;
   }>(`
     SELECT
       current_setting('server_version') AS server_version,
@@ -119,8 +135,19 @@ export async function inspectPostgresPreflight(
         SELECT rolsuper FROM pg_roles WHERE rolname = current_user
       ), false) AS role_superuser,
       has_database_privilege(current_user, current_database(), 'CREATE')
-        AS database_create
-  `);
+        AS database_create,
+      EXISTS (
+        SELECT 1 FROM pg_namespace WHERE nspname = $1
+      ) AS schema_exists,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM pg_namespace WHERE nspname = $1
+      ) THEN has_schema_privilege(current_user, $1, 'USAGE') ELSE false END
+        AS schema_usage,
+      CASE WHEN EXISTS (
+        SELECT 1 FROM pg_namespace WHERE nspname = $1
+      ) THEN has_schema_privilege(current_user, $1, 'CREATE') ELSE false END
+        AS schema_create
+  `, [postgresSchema]);
   const row = result.rows[0];
   if (!row) {
     throw new PostgresSetupError(
@@ -129,7 +156,9 @@ export async function inspectPostgresPreflight(
     );
   }
 
-  const engineMigration = await postgresEngineMigrationStatus(pool);
+  const engineMigration = row.schema_exists
+    ? await postgresEngineMigrationStatus(pool, postgresSchema)
+    : "absent";
   const vector = {
     installed: row.vector_installed,
     available: row.vector_available,
@@ -137,15 +166,36 @@ export async function inspectPostgresPreflight(
       row.vector_installed ||
       (row.vector_available && (row.role_superuser || row.database_create)),
   };
+  const schema = {
+    name: postgresSchema,
+    exists: row.schema_exists,
+    usable: row.schema_exists && row.schema_usage && row.schema_create,
+    creatable: !row.schema_exists && row.database_create,
+  };
+  const common = {
+    serverReachable: true as const,
+    serverVersion: row.server_version,
+    roleName: row.role_name,
+    vector,
+    schema,
+    engineMigration,
+  };
+
+  if (!schema.usable && !schema.creatable) {
+    return {
+      ...common,
+      state: "schema_unavailable",
+      code: "SCHEMA_UNAVAILABLE",
+      message: row.schema_exists
+        ? `This account needs USAGE and CREATE permission on schema "${postgresSchema}".`
+        : `Schema "${postgresSchema}" does not exist and this account cannot create it. Ask the database administrator to create it and grant USAGE and CREATE.`,
+    };
+  }
 
   if (engineMigration === "in_progress") {
     return {
+      ...common,
       state: "unfinished_copy",
-      serverReachable: true,
-      serverVersion: row.server_version,
-      roleName: row.role_name,
-      vector,
-      engineMigration,
       code: "POSTGRES_MIGRATION_IN_PROGRESS",
       message:
         "A copy into PostgreSQL didn't finish. Retry the copy to clear the unfinished data and start again, or choose another target.",
@@ -153,12 +203,8 @@ export async function inspectPostgresPreflight(
   }
   if (!vector.installed && !vector.available) {
     return {
+      ...common,
       state: "extension_missing",
-      serverReachable: true,
-      serverVersion: row.server_version,
-      roleName: row.role_name,
-      vector,
-      engineMigration,
       code: "EXTENSION_MISSING",
       message:
         "This PostgreSQL server is missing search support. Ask the database administrator to install the vector extension, then try again.",
@@ -166,24 +212,16 @@ export async function inspectPostgresPreflight(
   }
   if (!vector.installable) {
     return {
+      ...common,
       state: "permission_denied",
-      serverReachable: true,
-      serverVersion: row.server_version,
-      roleName: row.role_name,
-      vector,
-      engineMigration,
       code: "PERMISSION_DENIED",
       message:
         "This database account cannot enable search support. Ask the database administrator to enable vector for this database, then try again.",
     };
   }
   return {
+    ...common,
     state: "ready",
-    serverReachable: true,
-    serverVersion: row.server_version,
-    roleName: row.role_name,
-    vector,
-    engineMigration,
     code: null,
     message: row.vector_installed
       ? "The server is reachable and search support is ready."

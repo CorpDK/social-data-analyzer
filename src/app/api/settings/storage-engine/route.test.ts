@@ -72,12 +72,19 @@ describe("storage engine settings API", () => {
         action: "migrate",
         engine: "postgres",
         postgresUrl: "postgres://localhost/library",
+        postgresSchema: "shared_library",
+        postgresTenancy: "schema",
       }),
     );
 
     expect(response.status).toBe(202);
     expect(startEngineMigration).toHaveBeenCalledWith(
-      expect.objectContaining({ action: "migrate", engine: "postgres" }),
+      expect.objectContaining({
+        action: "migrate",
+        engine: "postgres",
+        postgresSchema: "shared_library",
+        postgresTenancy: "schema",
+      }),
     );
     expect(switchToEmptyEngine).not.toHaveBeenCalled();
   });

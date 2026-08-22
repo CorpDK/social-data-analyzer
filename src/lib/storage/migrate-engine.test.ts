@@ -26,7 +26,7 @@ import {
 
 const tempDirs: string[] = [];
 const adminPools: Pool[] = [];
-const tempDatabaseNames: string[] = [];
+const tempSchemaNames: string[] = [];
 
 function tempDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "migrate-engine-"));
@@ -62,31 +62,25 @@ function quoteIdent(name: string): string {
   return `"${name}"`;
 }
 
-function withDatabaseName(url: string, name: string): string {
-  const parsed = new URL(url);
-  parsed.pathname = `/${name}`;
-  return parsed.toString();
-}
-
 async function createIsolatedPostgres(
   baseUrl: string,
-): Promise<{ url: string; name: string } | null> {
+): Promise<{ url: string; schema: string } | null> {
   const admin = new Pool({ connectionString: baseUrl });
-  const name = `migrate_engine_t_${process.pid}_${Date.now().toString(36)}`;
+  const schema = `migrate_engine_t_${process.pid}_${Date.now().toString(36)}`;
   try {
-    await admin.query(`CREATE DATABASE ${quoteIdent(name)}`);
+    await admin.query(`CREATE SCHEMA ${quoteIdent(schema)}`);
   } catch (error) {
     await admin.end().catch(() => undefined);
     console.info(
-      `[migrate-engine.test] skipping Postgres: cannot CREATE DATABASE (${
+      `[migrate-engine.test] skipping Postgres: cannot CREATE SCHEMA (${
         error instanceof Error ? error.message : String(error)
       })`,
     );
     return null;
   }
   adminPools.push(admin);
-  tempDatabaseNames.push(name);
-  return { url: withDatabaseName(baseUrl, name), name };
+  tempSchemaNames.push(schema);
+  return { url: baseUrl, schema };
 }
 
 afterEach(async () => {
@@ -95,10 +89,10 @@ afterEach(async () => {
     if (dir) fs.rmSync(dir, { recursive: true, force: true });
   }
   const admin = adminPools[0];
-  while (tempDatabaseNames.length > 0) {
-    const name = tempDatabaseNames.pop();
-    if (admin && name) {
-      await admin.query(`DROP DATABASE IF EXISTS ${quoteIdent(name)} WITH (FORCE)`);
+  while (tempSchemaNames.length > 0) {
+    const schema = tempSchemaNames.pop();
+    if (admin && schema) {
+      await admin.query(`DROP SCHEMA IF EXISTS ${quoteIdent(schema)} CASCADE`);
     }
   }
   while (adminPools.length > 0) {
@@ -170,6 +164,7 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
       to: "postgres" as const,
       sqlitePath: source,
       postgresUrl: isolated.url,
+      postgresSchema: isolated.schema,
       includeJobs: false,
     };
 
@@ -179,26 +174,33 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
 
     const interrupted = await createPostgresPool(isolated.url, {
       allowIncompleteMigration: true,
+      postgresSchema: isolated.schema,
     });
     try {
-      expect(await postgresEngineMigrationStatus(interrupted)).toBe("in_progress");
+      expect(
+        await postgresEngineMigrationStatus(interrupted, isolated.schema),
+      ).toBe("in_progress");
       const count = await interrupted.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM saved_items",
       );
       expect(count.rows[0]?.n).toBe(0);
-      await expect(assertPostgresMigrationUsable(interrupted)).rejects.toThrow(
-        INCOMPLETE_ENGINE_MIGRATION_MESSAGE,
-      );
+      await expect(
+        assertPostgresMigrationUsable(interrupted, isolated.schema),
+      ).rejects.toThrow(INCOMPLETE_ENGINE_MIGRATION_MESSAGE);
     } finally {
       await interrupted.end();
     }
 
     await runEngineMigration(options);
 
-    const completed = await createPostgresPool(isolated.url);
+    const completed = await createPostgresPool(isolated.url, {
+      postgresSchema: isolated.schema,
+    });
     try {
-      expect(await postgresEngineMigrationStatus(completed)).toBe("complete");
-      await assertPostgresMigrationUsable(completed);
+      expect(
+        await postgresEngineMigrationStatus(completed, isolated.schema),
+      ).toBe("complete");
+      await assertPostgresMigrationUsable(completed, isolated.schema);
       const storage = createPostgresStorage(completed);
       expect((await storage.catalog.getStats()).totalItems).toBe(1);
     } finally {
@@ -217,6 +219,7 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
       to: "postgres" as const,
       sqlitePath: source,
       postgresUrl: isolated.url,
+      postgresSchema: isolated.schema,
       includeJobs: false,
     };
 
@@ -226,25 +229,32 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
 
     const interrupted = await createPostgresPool(isolated.url, {
       allowIncompleteMigration: true,
+      postgresSchema: isolated.schema,
     });
     try {
-      expect(await postgresEngineMigrationStatus(interrupted)).toBe("in_progress");
+      expect(
+        await postgresEngineMigrationStatus(interrupted, isolated.schema),
+      ).toBe("in_progress");
       const count = await interrupted.query<{ n: number }>(
         "SELECT count(*)::int AS n FROM saved_items",
       );
       expect(count.rows[0]?.n).toBe(1);
-      await expect(assertPostgresMigrationUsable(interrupted)).rejects.toThrow(
-        /incomplete migrate:engine/i,
-      );
+      await expect(
+        assertPostgresMigrationUsable(interrupted, isolated.schema),
+      ).rejects.toThrow(/incomplete migrate:engine/i);
     } finally {
       await interrupted.end();
     }
 
     await runEngineMigration(options);
 
-    const completed = await createPostgresPool(isolated.url);
+    const completed = await createPostgresPool(isolated.url, {
+      postgresSchema: isolated.schema,
+    });
     try {
-      expect(await postgresEngineMigrationStatus(completed)).toBe("complete");
+      expect(
+        await postgresEngineMigrationStatus(completed, isolated.schema),
+      ).toBe("complete");
       const storage = createPostgresStorage(completed);
       expect((await storage.catalog.getStats()).totalItems).toBe(1);
     } finally {
@@ -256,7 +266,9 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
     const isolated = await createIsolatedPostgres(postgresUrl!);
     if (!isolated) return;
 
-    const seedPool = await createPostgresPool(isolated.url);
+    const seedPool = await createPostgresPool(isolated.url, {
+      postgresSchema: isolated.schema,
+    });
     try {
       const storage = createPostgresStorage(seedPool);
       const imported = await storage.catalog.createImport({
@@ -286,6 +298,7 @@ describe.skipIf(!postgresUrl).sequential("migrate:engine interrupt then retry", 
       to: "sqlite" as const,
       sqlitePath: dest,
       postgresUrl: isolated.url,
+      postgresSchema: isolated.schema,
       includeJobs: false,
     };
 

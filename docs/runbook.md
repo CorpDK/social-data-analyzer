@@ -52,6 +52,8 @@ SQLite remains the default. To start the local pgvector recipe:
 ```bash
 docker compose -f docker-compose.postgres.yml up -d --wait
 export INSTAGRAM_SAVES_DATABASE_URL='postgres://instagram_saves:instagram_saves_dev@127.0.0.1:5432/instagram_saves'
+export INSTAGRAM_SAVES_PG_SCHEMA='instagram_saves'
+export INSTAGRAM_SAVES_PG_TENANCY='database'
 pnpm dev
 ```
 
@@ -59,6 +61,23 @@ Use `INSTAGRAM_SAVES_POSTGRES_PORT=55432` (both for Compose and in the URL) when
 port 5432 is occupied. Storage startup applies `drizzle/postgres/` automatically,
 including the `vector` extension, generated `tsvector` documents, and indexes.
 Unset `INSTAGRAM_SAVES_DATABASE_URL` to return to SQLite.
+
+Postgres app tables, search indexes, `engine_migration`, and the Drizzle journal
+live in `INSTAGRAM_SAVES_PG_SCHEMA` (default `instagram_saves`), including on a
+dedicated database. Every pooled connection uses that schema first in
+`search_path`; `public` is used only to resolve the database-level vector
+extension. There is no automatic move from an older `public` install. For a
+greenfield shared cluster, have an administrator create a schema and grant the
+app role `USAGE, CREATE`, then set:
+
+```bash
+export INSTAGRAM_SAVES_PG_SCHEMA='my_instagram_saves'
+export INSTAGRAM_SAVES_PG_TENANCY='schema'
+```
+
+The app may create a missing schema only when its role has database-level
+`CREATE`; schema-only roles should receive an administrator-created schema.
+The app never creates or drops databases and never drops a shared schema.
 
 Advanced storage can check a dedicated database before a copy. The preflight
 connects with `INSTAGRAM_SAVES_POSTGRES_CONNECT_TIMEOUT_MS` (default 5000 ms),
@@ -72,8 +91,9 @@ CREATE EXTENSION IF NOT EXISTS vector;
 ```
 
 Before retrying an update or engine copy, have whoever operates PostgreSQL take
-a backup of the dedicated database. Use `pg_dump` from an operator shell; the
-app never stores backup credentials or runs database provisioning commands.
+a backup. For a shared cluster, dump only the configured app schema so other
+applications are left alone. The app never stores backup credentials or runs
+database provisioning commands.
 
 The Postgres adapter implements all five storage ports, including import and
 embedding queue runner operations.
@@ -83,6 +103,9 @@ Back up a Postgres library with:
 ```bash
 pg_dump "$INSTAGRAM_SAVES_DATABASE_URL" --format=custom --file=instagram-saves.dump
 ```
+
+For schema tenancy, add
+`--schema="$INSTAGRAM_SAVES_PG_SCHEMA"` to that command.
 
 Restore into a fresh database with `pg_restore --clean --if-exists`. CI
 (`contracts-pg`) runs storage contracts against `pgvector/pgvector:pg17`. Local
@@ -135,7 +158,7 @@ when the Postgres URL is configured.
 The default path is **Settings → Storage engine → Migrate library**:
 
 1. Keep a backup of the current library.
-2. Enter an unused SQLite file path or empty PostgreSQL database URL.
+2. Enter an unused SQLite file path or a PostgreSQL URL plus an empty app schema.
 3. Choose **Migrate library**. The app copies catalog rows, settings, embedding
    profiles/vectors, rebuilds search documents, verifies integrity, and activates
    the target only after the copy succeeds.
@@ -160,14 +183,16 @@ pnpm migrate:engine -- \
   --from=sqlite \
   --to=postgres \
   --sqlite=/absolute/path/to/instagram-saves.db \
-  --postgres-url='postgres://user:password@127.0.0.1:5432/instagram_saves_new'
+  --postgres-url='postgres://user:password@127.0.0.1:5432/shared' \
+  --postgres-schema='instagram_saves'
 
 # Postgres -> SQLite
 pnpm migrate:engine -- \
   --from=postgres \
   --to=sqlite \
   --sqlite=/absolute/path/to/new-instagram-saves.db \
-  --postgres-url='postgres://user:password@127.0.0.1:5432/instagram_saves'
+  --postgres-url='postgres://user:password@127.0.0.1:5432/shared' \
+  --postgres-schema='instagram_saves'
 ```
 
 The SQLite path and Postgres URL are always required (the URL may instead come
@@ -187,9 +212,9 @@ files are deleted on the next attempt. Postgres destinations record an
 that database until the copy is marked complete, and Settings surfaces this
 blocked state. Retry **Migrate** with the same target, or re-run the same
 `pnpm migrate:engine` command after a kill — either path wipes the in-progress
-target and starts over. Settings offers **Retry copy** (wipe only the app's
-unfinished rows) or **Choose another target**. An operator may instead recreate
-the dedicated database, but the app never creates or drops a database.
+app schema and starts over. Settings offers **Retry copy** (truncate only the
+app's qualified table list) or **Choose another target**. Other schemas and
+their tables are never touched.
 
 After a successful copy, configure the app for the target engine and compare
 the library counts before deleting either source or backup. If the target is

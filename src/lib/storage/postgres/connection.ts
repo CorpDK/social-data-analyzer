@@ -3,8 +3,10 @@ import { drizzle } from "drizzle-orm/node-postgres";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import { Pool } from "pg";
 import {
+  DEFAULT_POSTGRES_SCHEMA,
   readStorageEngineConfig,
   redactPostgresUrl,
+  validPostgresSchema,
 } from "../engine-config";
 import {
   markPostgresLibraryFailed,
@@ -20,6 +22,12 @@ import {
 import * as schema from "./schema";
 
 export type PostgresPool = Pool;
+
+export type PostgresConnectionOptions = {
+  allowIncompleteMigration?: boolean;
+  postgresSchema?: string;
+  trackLibraryStatus?: boolean;
+};
 
 const POSTGRES_MIGRATIONS_FOLDER = path.join(
   process.cwd(),
@@ -52,39 +60,88 @@ function databaseUrl(): string {
   return value;
 }
 
+function configuredPostgresSchema(): string {
+  const configured = readStorageEngineConfig();
+  return configured.engine === "postgres"
+    ? configured.postgresSchema
+    : DEFAULT_POSTGRES_SCHEMA;
+}
+
+function assertSchemaName(value: string): string {
+  if (!validPostgresSchema(value)) {
+    throw new Error(
+      "PostgreSQL schema must start with a lowercase letter or underscore and contain only lowercase letters, numbers, and underscores.",
+    );
+  }
+  return value;
+}
+
+function poolConfig(connectionString: string, postgresSchema: string, max: number) {
+  return {
+    connectionString,
+    max,
+    options: `-c search_path=${postgresSchema},public`,
+    connectionTimeoutMillis: Number(
+      process.env.INSTAGRAM_SAVES_POSTGRES_CONNECT_TIMEOUT_MS ?? 5_000,
+    ),
+    idleTimeoutMillis: max === 1 ? 1_000 : 30_000,
+  };
+}
+
+async function ensurePostgresSchema(
+  pool: Pool,
+  postgresSchema: string,
+  preflight: PostgresPreflight,
+): Promise<void> {
+  if (!preflight.schema.exists) {
+    await pool.query(`CREATE SCHEMA IF NOT EXISTS "${postgresSchema}"`);
+  }
+  const current = await pool.query<{ current_schema: string | null }>(
+    "SELECT current_schema() AS current_schema",
+  );
+  if (current.rows[0]?.current_schema !== postgresSchema) {
+    throw new Error(
+      `PostgreSQL did not select the configured application schema "${postgresSchema}".`,
+    );
+  }
+}
+
 export function isPostgresConfigured(): boolean {
   return readStorageEngineConfig().engine === "postgres";
 }
 
 export async function createPostgresPool(
   connectionString = databaseUrl(),
-  options: {
-    allowIncompleteMigration?: boolean;
-    trackLibraryStatus?: boolean;
-  } = {},
+  options: PostgresConnectionOptions = {},
 ): Promise<Pool> {
-  const location = redactPostgresUrl(connectionString);
+  const postgresSchema = assertSchemaName(
+    options.postgresSchema ?? configuredPostgresSchema(),
+  );
+  const location = `${redactPostgresUrl(connectionString)} · schema ${postgresSchema}`;
   const trackLibraryStatus = options.trackLibraryStatus !== false;
   if (trackLibraryStatus) markPostgresLibraryUpdating(location);
-  const pool = new Pool({
-    connectionString,
-    max: Number(process.env.INSTAGRAM_SAVES_POSTGRES_POOL_MAX ?? 10),
-    connectionTimeoutMillis: Number(
-      process.env.INSTAGRAM_SAVES_POSTGRES_CONNECT_TIMEOUT_MS ?? 5_000,
+  const pool = new Pool(
+    poolConfig(
+      connectionString,
+      postgresSchema,
+      Number(process.env.INSTAGRAM_SAVES_POSTGRES_POOL_MAX ?? 10),
     ),
-    idleTimeoutMillis: 30_000,
-  });
+  );
   const db = drizzle({ client: pool, schema });
   try {
     let preflight: PostgresPreflight;
     try {
-      preflight = await inspectPostgresPreflight(pool);
+      preflight = await inspectPostgresPreflight(pool, postgresSchema);
     } catch (error) {
       throw classifyPostgresError(error, "connect");
     }
     assertPostgresPreflightReady(preflight, options);
+    await ensurePostgresSchema(pool, postgresSchema, preflight);
     try {
-      await migrate(db, { migrationsFolder: POSTGRES_MIGRATIONS_FOLDER });
+      await migrate(db, {
+        migrationsFolder: POSTGRES_MIGRATIONS_FOLDER,
+        migrationsSchema: postgresSchema,
+      });
     } catch (error) {
       throw classifyPostgresError(error, "migrate");
     }
@@ -106,17 +163,12 @@ export async function createPostgresPool(
 
 export async function preflightPostgresDatabase(
   connectionString: string,
+  postgresSchema = configuredPostgresSchema(),
 ): Promise<PostgresPreflight> {
-  const pool = new Pool({
-    connectionString,
-    max: 1,
-    connectionTimeoutMillis: Number(
-      process.env.INSTAGRAM_SAVES_POSTGRES_CONNECT_TIMEOUT_MS ?? 5_000,
-    ),
-    idleTimeoutMillis: 1_000,
-  });
+  assertSchemaName(postgresSchema);
+  const pool = new Pool(poolConfig(connectionString, postgresSchema, 1));
   try {
-    return await inspectPostgresPreflight(pool);
+    return await inspectPostgresPreflight(pool, postgresSchema);
   } catch (error) {
     throw classifyPostgresError(error, "connect");
   } finally {
