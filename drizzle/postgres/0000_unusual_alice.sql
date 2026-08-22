@@ -114,15 +114,15 @@ CREATE TABLE "saved" (
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
 );
 --> statement-breakpoint
-ALTER TABLE "import_jobs" ADD CONSTRAINT "import_jobs_import_id_imports_id_fk" FOREIGN KEY ("import_id") REFERENCES "public"."imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "import_schemas" ADD CONSTRAINT "import_schemas_import_id_imports_id_fk" FOREIGN KEY ("import_id") REFERENCES "public"."imports"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "item_collections" ADD CONSTRAINT "item_collections_item_id_saved_media_id_fk" FOREIGN KEY ("item_id") REFERENCES "public"."saved"("media_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "liked" ADD CONSTRAINT "liked_media_id_media_id_fk" FOREIGN KEY ("media_id") REFERENCES "public"."media"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "liked" ADD CONSTRAINT "liked_first_seen_import_id_imports_id_fk" FOREIGN KEY ("first_seen_import_id") REFERENCES "public"."imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "liked" ADD CONSTRAINT "liked_last_seen_import_id_imports_id_fk" FOREIGN KEY ("last_seen_import_id") REFERENCES "public"."imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "saved" ADD CONSTRAINT "saved_media_id_media_id_fk" FOREIGN KEY ("media_id") REFERENCES "public"."media"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "saved" ADD CONSTRAINT "saved_first_seen_import_id_imports_id_fk" FOREIGN KEY ("first_seen_import_id") REFERENCES "public"."imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "saved" ADD CONSTRAINT "saved_last_seen_import_id_imports_id_fk" FOREIGN KEY ("last_seen_import_id") REFERENCES "public"."imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "import_jobs" ADD CONSTRAINT "import_jobs_import_id_imports_id_fk" FOREIGN KEY ("import_id") REFERENCES "imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "import_schemas" ADD CONSTRAINT "import_schemas_import_id_imports_id_fk" FOREIGN KEY ("import_id") REFERENCES "imports"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "item_collections" ADD CONSTRAINT "item_collections_item_id_saved_media_id_fk" FOREIGN KEY ("item_id") REFERENCES "saved"("media_id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "liked" ADD CONSTRAINT "liked_media_id_media_id_fk" FOREIGN KEY ("media_id") REFERENCES "media"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "liked" ADD CONSTRAINT "liked_first_seen_import_id_imports_id_fk" FOREIGN KEY ("first_seen_import_id") REFERENCES "imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "liked" ADD CONSTRAINT "liked_last_seen_import_id_imports_id_fk" FOREIGN KEY ("last_seen_import_id") REFERENCES "imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "saved" ADD CONSTRAINT "saved_media_id_media_id_fk" FOREIGN KEY ("media_id") REFERENCES "media"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "saved" ADD CONSTRAINT "saved_first_seen_import_id_imports_id_fk" FOREIGN KEY ("first_seen_import_id") REFERENCES "imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "saved" ADD CONSTRAINT "saved_last_seen_import_id_imports_id_fk" FOREIGN KEY ("last_seen_import_id") REFERENCES "imports"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 CREATE INDEX "embedding_jobs_state_idx" ON "embedding_jobs" USING btree ("state");--> statement-breakpoint
 CREATE INDEX "embedding_jobs_started_idx" ON "embedding_jobs" USING btree ("started_at" DESC NULLS LAST);--> statement-breakpoint
 CREATE INDEX "import_jobs_state_idx" ON "import_jobs" USING btree ("state");--> statement-breakpoint

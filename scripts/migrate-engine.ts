@@ -488,7 +488,10 @@ async function copyVectors(
           );
           sqlite.transaction(() => {
             for (const row of rows) {
-              statement.run(row.item_id, postgresVector(row.embedding));
+              statement.run(
+                BigInt(Number(row.item_id)),
+                postgresVector(row.embedding),
+              );
             }
           })();
         } else {
@@ -498,7 +501,7 @@ async function copyVectors(
                VALUES ($1, $2, $3::vector)
                ON CONFLICT(media_id, provider) DO UPDATE
                SET embedding=excluded.embedding`,
-              [row.item_id, provider, vectorLiteral(sqliteVector(row.embedding))],
+              [Number(row.item_id), provider, vectorLiteral(sqliteVector(row.embedding))],
             );
           }
         }

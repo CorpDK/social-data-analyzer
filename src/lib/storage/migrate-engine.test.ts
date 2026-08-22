@@ -73,12 +73,12 @@ function seedSqliteLibrary(file: string): void {
       .prepare(
         "INSERT INTO saved_items_vec_local(item_id, embedding) VALUES (?, ?)",
       )
-      .run(1, vector);
+      .run(BigInt(1), vector);
     sqlite
       .prepare(
         "INSERT INTO liked_items_vec_local(item_id, embedding) VALUES (?, ?)",
       )
-      .run(1, vector);
+      .run(BigInt(1), vector);
   } finally {
     sqlite.close();
   }
